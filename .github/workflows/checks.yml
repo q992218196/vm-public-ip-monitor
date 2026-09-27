@@ -67,3 +67,15 @@ jobs:
           trap 'docker rm -f vm-monitor-fpm-smoke >/dev/null 2>&1 || true' EXIT
           sleep 3
           test "$(docker inspect -f '{{.State.Running}}' vm-monitor-fpm-smoke)" = true
+      - run: |
+          trap 'docker compose --profile screenshots down --remove-orphans >/dev/null 2>&1 || true' EXIT
+          worker_uid=$(docker compose --profile screenshots run --rm --no-deps --entrypoint id worker -u)
+          worker_gid=$(docker compose --profile screenshots run --rm --no-deps --entrypoint id worker -g)
+          sudo mkdir -p /home/vm-monitor-server/worker/tmp
+          sudo chown -R "$worker_uid:$worker_gid" /home/vm-monitor-server/worker
+          docker compose --profile screenshots up -d --no-deps worker
+          sleep 3
+          worker_cid=$(docker compose --profile screenshots ps -q worker)
+          test -n "$worker_cid"
+          test "$(docker inspect -f '{{.State.Running}}' "$worker_cid")" = true
+        working-directory: deploy

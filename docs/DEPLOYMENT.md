@@ -35,7 +35,6 @@ MONITOR_AUTO_PROBE=false
 ```sh
 sudo mkdir -p /home/vm-monitor-server/{storage,postgres,redis,worker,nginx-logs}
 sudo mkdir -p /home/vm-monitor-server/worker/tmp
-sudo chown -R 1000:1000 /home/vm-monitor-server/worker
 docker compose build app web
 docker compose up -d postgres redis app web
 docker compose ps app
@@ -89,8 +88,13 @@ server {
 
 ```sh
 docker compose --profile screenshots build worker
+worker_uid=$(docker compose --profile screenshots run --rm --no-deps --entrypoint id worker -u)
+worker_gid=$(docker compose --profile screenshots run --rm --no-deps --entrypoint id worker -g)
+sudo chown -R "$worker_uid:$worker_gid" /home/vm-monitor-server/worker
 docker compose --profile screenshots up -d worker
 ```
+
+工作容器以镜像内的 `pwuser` 运行，UID/GID 随基础镜像而定，因此先查询实际编号再授权数据目录；自定义 `MONITOR_DATA_DIR` 时替换上述路径。若容器启动前就退出，可在 `deploy` 目录运行 `docker compose --profile screenshots run --rm --no-deps worker` 查看直接错误。
 
 默认并发 1，容器内存上限 2 GiB，Chromium 以非 root 用户、沙箱和上游 seccomp 配置运行。使用额外网络隔离限制工作机到管理内网和云元数据地址的访问。
 
