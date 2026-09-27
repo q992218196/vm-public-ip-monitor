@@ -15,8 +15,8 @@ return new class extends Migration
             $table->foreignId('ip_asset_id')->constrained()->cascadeOnDelete();
             $table->string('protocol', 16);
             $table->string('peer_ip', 45);
-            $table->unsignedSmallInteger('local_port');
-            $table->unsignedSmallInteger('peer_port');
+            $table->unsignedInteger('local_port');
+            $table->unsignedInteger('peer_port');
             $table->timestamp('window_start');
             $table->timestamp('window_end')->index();
             $table->json('evidence');
