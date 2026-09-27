@@ -184,7 +184,7 @@ SMTP 通知：在 `.env` 配置 `MONITOR_ALERT_EMAIL`、`MAIL_MAILER=smtp` 及�
 
 升级前备份数据库、`.env` 和 storage。升级服务端后执行迁移，重启队列与调度器。不要在生产使用 `migrate:fresh`。
 
-本次网站描述字段与独立告警详情页的升级示例：
+本次轻量列表、并发索引与 VPN 握手识别的升级示例：
 
 ```sh
 cd /home/vm-monitor-src
