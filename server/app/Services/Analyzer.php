@@ -47,9 +47,6 @@ class Analyzer
             if ($website->last_seen_at->lt($at)) {
                 $website->update(['last_seen_at' => $at]);
             }
-            if (config('monitor.auto_probe') && (! $website->last_probed_at || $website->last_probed_at->lt(now()->subDay()))) {
-                app(ProbeQueue::class)->enqueue($website, false);
-            }
         }
         $h = $p['health'];
         if (($h['kernel_drops'] ?? 0) + ($h['state_dropped'] ?? 0) + ($h['spool_dropped'] ?? 0) > 0) {
@@ -97,6 +94,8 @@ class Analyzer
                 'horizontal_scan' => (int) $rows->max(fn ($m) => $m->evidence['unique_targets'] ?? 0),
                 'vertical_scan' => (int) $rows->max(fn ($m) => $m->evidence['max_ports_per_target'] ?? 0),
                 'suspected_bruteforce' => (int) $rows->max(fn ($m) => $m->evidence['auth_attempts'] ?? 0),
+                'single_target_attempts' => (int) $rows->max(fn ($m) => $m->evidence['max_attempts_per_target'] ?? 0),
+                'tcp_connection_burst' => (int) $rows->sum('tcp_attempts'),
                 'egress_mbps' => (int) ($rows->sum('bytes_out') * 8 / max(1, $rows->sum(fn ($m) => $m->window_start->diffInSeconds($m->window_end))) / 1000000),
                 default => 0,
             };
@@ -104,9 +103,17 @@ class Analyzer
                 continue;
             }
             $title = match ($rule->kind) {
-                'horizontal_scan' => '疑似对外横向扫描','vertical_scan' => '疑似对外端口扫描','suspected_bruteforce' => '疑似认证服务高频连接',default => '出站流量超出阈值'
+                'horizontal_scan' => '疑似对外横向扫描','vertical_scan' => '疑似对外端口扫描','suspected_bruteforce' => '疑似认证服务高频连接',
+                'single_target_attempts' => '单目标高频连接','tcp_connection_burst' => 'TCP 连接突增',default => '出站流量超出阈值'
             };
-            $this->alert($node, $asset, $rule->kind, $rule->severity, $title, ['rule_id' => $rule->id, 'value' => $value, 'threshold' => $rule->threshold, 'window_seconds' => $rule->window_seconds, 'sample' => $rows->last()?->evidence, 'confidence' => 'behavioral', 'note' => '仅当前观察节点；去重目标数取各采集窗口最大值，属于保守下界；认证连接不等于登录失败'], $batch->window_end, $rule->cooldown_seconds, (string) $rule->id);
+            $note = match ($rule->kind) {
+                'horizontal_scan', 'vertical_scan' => '仅当前观察节点；跨窗口取最大值，目标/端口数是保守下界',
+                'suspected_bruteforce' => '按单目标认证端口连接计数，不代表登录失败或密码爆破已发生',
+                'single_target_attempts' => '按单目标 TCP 发起计数，可能是正常重连；不代表登录失败',
+                'tcp_connection_burst' => '按窗口累积 TCP 发起计数，可能包含正常高并发连接',
+                default => '按当前观察节点估算的出站速率',
+            };
+            $this->alert($node, $asset, $rule->kind, $rule->severity, $title, ['rule_id' => $rule->id, 'value' => $value, 'threshold' => $rule->threshold, 'window_seconds' => $rule->window_seconds, 'sample' => $rows->last()?->evidence, 'confidence' => 'behavioral', 'note' => $note], $batch->window_end, $rule->cooldown_seconds, (string) $rule->id);
         }
     }
 

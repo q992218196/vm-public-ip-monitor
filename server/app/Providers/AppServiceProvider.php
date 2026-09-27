@@ -9,6 +9,7 @@ use App\Models\IpAsset;
 use App\Models\Node;
 use App\Models\Rule;
 use App\Models\Website;
+use Filament\Tables\Table;
 use Illuminate\Cache\RateLimiting\Limit;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\RateLimiter;
@@ -30,6 +31,10 @@ class AppServiceProvider extends ServiceProvider
      */
     public function boot(): void
     {
+        Table::configureUsing(fn (Table $table) => $table
+            ->stackedOnMobile()
+            ->paginationPageOptions([10, 25, 50, 100, 200, 500])
+            ->defaultPaginationPageOption(25));
         if (app()->environment('production') && str_starts_with(config('app.url'), 'https://')) {
             URL::forceScheme('https');
         }

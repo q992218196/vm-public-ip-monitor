@@ -4,8 +4,10 @@ namespace Tests\Feature;
 
 use App\Filament\Resources\NodeResource;
 use App\Filament\Resources\NodeResource\Pages\ManageNodes;
+use App\Filament\Resources\AlertResource\Pages\ManageAlerts;
 use App\Jobs\ProcessBatch;
 use App\Models\Batch;
+use App\Models\Alert;
 use App\Models\Node;
 use App\Models\User;
 use App\Models\Website;
@@ -64,6 +66,19 @@ class MonitorTest extends TestCase
         $this->assertDatabaseCount('websites', 1);
         $this->assertDatabaseHas('alerts', ['kind' => 'horizontal_scan']);
         $this->assertNull(Batch::first()->payload);
+    }
+
+    public function test_connection_burst_and_single_target_rules_use_observed_counts(): void
+    {
+        $this->seed(MonitorSeeder::class);
+        $node = $this->node();
+        $payload = $this->payload();
+        $payload['metrics'][0]['tcp_attempts'] = 1200;
+        $payload['metrics'][0]['max_attempts_per_target'] = 90;
+        $this->upload($node, $payload)->assertOk();
+        ProcessBatch::dispatchSync(Batch::first()->id);
+        $this->assertDatabaseHas('alerts', ['kind' => 'single_target_attempts']);
+        $this->assertDatabaseHas('alerts', ['kind' => 'tcp_connection_burst']);
     }
 
     public function test_shared_cidr_keeps_observers_and_single_ip_site(): void
@@ -175,6 +190,43 @@ class MonitorTest extends TestCase
         $this->artisan('monitor:discover', ['node' => $n->id, 'target' => '203.0.113.10', '--ports' => '18080', '--scheme' => 'both'])->assertSuccessful();
         $this->assertDatabaseCount('probe_tasks', 2);
         $this->assertDatabaseCount('ip_observations', 0);
+    }
+
+    public function test_maintenance_queues_existing_sites_only_when_auto_probe_is_enabled(): void
+    {
+        $node = $this->node();
+        $this->upload($node, $this->payload())->assertOk();
+        ProcessBatch::dispatchSync(Batch::first()->id);
+        config(['monitor.auto_probe' => false]);
+        $this->artisan('monitor:maintain')->assertSuccessful();
+        $this->assertDatabaseCount('probe_tasks', 0);
+        config(['monitor.auto_probe' => true]);
+        $this->artisan('monitor:maintain')->assertSuccessful();
+        $this->assertDatabaseCount('probe_tasks', 1);
+        $this->artisan('monitor:maintain')->assertSuccessful();
+        $this->assertDatabaseCount('probe_tasks', 1);
+    }
+
+    public function test_alerts_can_be_filtered_and_handled_in_a_bounded_batch(): void
+    {
+        $node = $this->node();
+        $this->upload($node, $this->payload())->assertOk();
+        ProcessBatch::dispatchSync(Batch::first()->id);
+        $admin = User::factory()->create();
+        $admin->role = 'admin';
+        $admin->save();
+        $this->actingAs($admin);
+        Filament::setCurrentPanel(Filament::getPanel('admin'));
+        $alert = Alert::where('kind', 'new_website')->firstOrFail();
+        Livewire::test(ManageAlerts::class)
+            ->filterTable('node_id', $node->id)
+            ->filterTable('ip', ['ip' => '203.0.113.10'])
+            ->filterTable('severity', 'low')
+            ->assertCanSeeTableRecords([$alert])
+            ->callTableBulkAction('handle', [$alert], ['status' => 'acknowledged', 'resolution' => '已核对资产'])
+            ->assertHasNoActionErrors();
+        $this->assertDatabaseHas('alerts', ['id' => $alert->id, 'status' => 'acknowledged', 'resolution' => '已核对资产']);
+        $this->assertDatabaseHas('audit_logs', ['action' => 'alerts_bulk_handled']);
     }
 
     public function test_node_create_form_validates_cidrs_and_saves_settings(): void

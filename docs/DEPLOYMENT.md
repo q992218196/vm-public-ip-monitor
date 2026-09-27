@@ -28,7 +28,9 @@ MONITOR_DOMAIN=monitor.your-domain.example
 MONITOR_AUTO_PROBE=false
 ```
 
-不要在生产使用默认示例域名。第一次建议关闭自动探测，验证采集范围之后再开启。
+不要在生产使用默认示例域名。第一次建议关闭自动探测，验证采集范围之后再开启。新部署的 `.env.example` 默认开启自动验证；试点时可以显式设为 `false`。
+
+试点确认公网 IP 范围、截图工作服务和内网隔离后，将现有 `.env` 的 `MONITOR_AUTO_PROBE` 改为 `true`，执行 `docker compose up -d --no-deps --force-recreate app queue scheduler`。开启后，后台每 5 分钟最多为 50 个尚未验证或超过 24 小时未验证的网站排队，同时待处理任务最多 1000 个。未启动截图 worker 时任务会排队，但不会生成截图。
 
 准备目录：
 

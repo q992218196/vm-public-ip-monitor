@@ -5,6 +5,7 @@ namespace App\Filament\Widgets;
 use App\Models\Node;
 use App\Models\TrafficMetric;
 use Filament\Widgets\ChartWidget;
+use Illuminate\Support\Facades\Cache;
 
 class EgressChart extends ChartWidget
 {
@@ -27,8 +28,10 @@ class EgressChart extends ChartWidget
     protected function getData(): array
     {
         $node = $this->filter ?: Node::orderBy('name')->value('id');
-        $rows = TrafficMetric::where('node_id', $node)->where('window_start', '>=', now()->subHour())->selectRaw('window_start, window_end, SUM(bytes_out) AS total_bytes')->groupBy('window_start', 'window_end')->orderBy('window_end')->get();
+        return Cache::remember('monitor:egress:'.($node ?? 'none'), 20, function () use ($node): array {
+            $rows = TrafficMetric::where('node_id', $node)->where('window_start', '>=', now()->subHour())->selectRaw('window_start, window_end, SUM(bytes_out) AS total_bytes')->groupBy('window_start', 'window_end')->orderBy('window_end')->get();
 
-        return ['datasets' => [['label' => '出站 Mbps', 'data' => $rows->map(fn ($r) => round($r->total_bytes * 8 / max(1, $r->window_start->diffInSeconds($r->window_end)) / 1000000, 3))->all(), 'borderColor' => '#0d9488', 'backgroundColor' => '#0d948833', 'fill' => true]], 'labels' => $rows->map(fn ($r) => $r->window_end->timezone(config('monitor.display_timezone'))->format('H:i:s'))->all()];
+            return ['datasets' => [['label' => '出站 Mbps', 'data' => $rows->map(fn ($row) => round($row->total_bytes * 8 / max(1, $row->window_start->diffInSeconds($row->window_end)) / 1000000, 3))->all(), 'borderColor' => '#0d9488', 'backgroundColor' => '#0d948833', 'fill' => true]], 'labels' => $rows->map(fn ($row) => $row->window_end->timezone(config('monitor.display_timezone'))->format('H:i:s'))->all()];
+        });
     }
 }

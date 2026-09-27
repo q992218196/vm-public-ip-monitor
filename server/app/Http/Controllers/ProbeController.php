@@ -30,7 +30,7 @@ class ProbeController extends Controller
             'title' => 'nullable|string|max:255', 'http_status' => 'nullable|integer|min:100|max:599', 'final_url' => 'nullable|string|max:2048',
             'category' => 'nullable|string|max:64', 'classification' => 'nullable|array', 'classification.confidence' => 'nullable|numeric|min:0|max:1',
             'classification.reasons' => 'nullable|array|max:20', 'classification.reasons.*' => 'string|max:255',
-            'classification.method' => 'nullable|string|max:64', 'content_hash' => 'nullable|string|size:64',
+            'classification.method' => 'nullable|string|max:64', 'classification.review_required' => 'nullable|boolean', 'content_hash' => 'nullable|string|size:64',
             'screenshot' => 'nullable|string|max:2800000', 'error' => 'nullable|string|max:1000']);
 
         return DB::transaction(function () use ($v, $task, $screenshots) {

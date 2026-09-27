@@ -3,7 +3,7 @@
 return [
     'display_timezone' => env('MONITOR_DISPLAY_TIMEZONE', 'Asia/Shanghai'),
     'worker_token' => env('MONITOR_WORKER_TOKEN', ''),
-    'auto_probe' => env('MONITOR_AUTO_PROBE', false),
+    'auto_probe' => env('MONITOR_AUTO_PROBE', true),
     'alert_email' => env('MONITOR_ALERT_EMAIL'),
     'metrics_days' => (int) env('MONITOR_METRICS_DAYS', 7),
     'alerts_days' => (int) env('MONITOR_ALERTS_DAYS', 180),

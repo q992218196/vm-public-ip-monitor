@@ -17,3 +17,11 @@ test('IPv6 origin and explainable low confidence classification',()=>{
   assert.equal(target({ip:'2606:4700:4700::1111',host:'',port:443,scheme:'https'}).url,'https://[2606:4700:4700::1111]/');
   const c=classify('后台','管理员登录');assert.equal(c.category,'管理后台');assert.ok(c.classification.confidence<1);assert.equal(classify('hello','world').category,'未分类');
 });
+test('review hints retain uncertainty and do not flag ordinary pages',()=>{
+  const flagged=classify('体育投注', '欢迎访问在线博彩平台');
+  assert.equal(flagged.category, '疑似博彩');
+  assert.equal(flagged.classification.review_required, true);
+  assert.ok(flagged.classification.confidence < 0.8);
+  assert.equal(classify('企业介绍', '联系我们').classification.review_required, false);
+  assert.equal(classify('新闻', '普通资讯').classification.review_required, false);
+});
