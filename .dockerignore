@@ -1,0 +1,13 @@
+.git
+.tools
+server/.env
+server/vendor
+server/node_modules
+server/database/*.sqlite*
+server/storage/logs/*
+server/storage/framework/*
+server/bootstrap/cache/*.php
+worker/node_modules
+agent/.cache
+agent/bin
+dist

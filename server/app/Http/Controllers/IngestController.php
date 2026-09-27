@@ -1,0 +1,85 @@
+<?php
+
+namespace App\Http\Controllers;
+
+use App\Models\Batch;
+use App\Models\Node;
+use App\Support\Ip;
+use Carbon\CarbonImmutable;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Validation\ValidationException;
+
+class IngestController extends Controller
+{
+    public function __invoke(Request $r)
+    {
+        abort_if(strlen($r->getContent()) > 8 * 1024 * 1024, 413);
+        $v = $r->validate([
+            'batch_id' => 'required|string|regex:/^[a-zA-Z0-9-]{16,64}$/',
+            'window_start' => 'required|date', 'window_end' => 'required|date|after:window_start',
+            'health' => 'required|array', 'health.version' => 'required|string|max:32',
+            'health.interfaces' => 'sometimes|array|max:8', 'health.interfaces.*' => 'string|max:64',
+            'health.*' => ['nullable'],
+            'metrics' => 'present|array|max:8192', 'sites' => 'present|array|max:4096',
+            'metrics.*.ip' => 'required|ip', 'metrics.*.targets' => 'present|array|max:16', 'metrics.*.targets.*' => 'ip',
+            'metrics.*.cardinality_capped' => 'required|boolean',
+            'sites.*.ip' => 'required|ip', 'sites.*.port' => 'required|integer|min:1|max:65535',
+            'sites.*.scheme' => 'required|in:http,https', 'sites.*.host' => ['present', 'nullable', 'string', 'max:253', 'regex:/^[a-zA-Z0-9.\-:\[\]]*$/'],
+            'sites.*.source' => 'required|in:http_host,tls_sni',
+            ...collect(['bytes_out', 'bytes_in', 'packets_out', 'packets_in', 'tcp_attempts', 'unique_targets', 'max_ports_per_target', 'max_attempts_per_target', 'auth_attempts'])->mapWithKeys(fn ($f) => ["metrics.*.$f" => 'required|integer|min:0|max:1000000000000000'])->all(),
+        ]);
+        $start = CarbonImmutable::parse($v['window_start']);
+        $end = CarbonImmutable::parse($v['window_end']);
+        if ($end->isAfter(now()->addMinutes(5)) || $start->isBefore(now()->subDays(14)) || $start->diffInSeconds($end) > 600) {
+            throw ValidationException::withMessages(['window_start' => '窗口必须在过去14天内、长度不超过600秒，未来偏差不超过5分钟']);
+        }
+        $node = $r->attributes->get('node');
+        $seen = [];
+        foreach (['metrics', 'sites'] as $type) {
+            foreach ($v[$type] as &$item) {
+                $item['ip'] = Ip::normalize($item['ip']);
+                if (! Ip::inRanges($item['ip'], $node->cidrs)) {
+                    throw ValidationException::withMessages([$type => 'IP 不在该节点授权 CIDR 中']);
+                }
+                if ($type === 'metrics' && isset($seen[$item['ip']])) {
+                    throw ValidationException::withMessages(['metrics' => '同一批次不能包含重复 IP']);
+                }
+                if ($type === 'metrics') {
+                    $seen[$item['ip']] = true;
+                }
+                if ($type === 'sites') {
+                    $item['host'] = strtolower(rtrim($item['host'] ?? '', '.'));
+                }
+            }
+        } unset($item);
+        $health = [];
+        foreach (['captured', 'kernel_drops', 'decode_skipped', 'state_dropped', 'spool_dropped', 'duplicate_packets', 'reassembly_dropped', 'rss_bytes', 'heap_bytes', 'spool_bytes', 'disk_bytes'] as $f) {
+            $n = $v['health'][$f] ?? 0;
+            if (! is_int($n) || $n < 0) {
+                throw ValidationException::withMessages(["health.$f" => '必须为非负整数']);
+            }$health[$f] = $n;
+        }
+        $v['health'] = $health + ['version' => $v['health']['version'], 'interfaces' => $v['health']['interfaces'] ?? []];
+        // A durable DB inbox is the acknowledgement boundary. The scheduler retries
+        // undispatched rows after crashes / Redis outages; no event is acked in RAM.
+        $duplicate = DB::transaction(function () use ($node, $v, $start, $end) {
+            $locked = Node::whereKey($node->id)->lockForUpdate()->firstOrFail();
+            $exists = Batch::where('node_id', $node->id)->where('batch_id', $v['batch_id'])->exists();
+            if (! $exists) {
+                $bytes = strlen(json_encode($v));
+                $pending = Batch::where('node_id', $node->id)->whereNull('processed_at')->sum('payload_bytes');
+                abort_if($pending + $bytes > config('monitor.pending_bytes_per_node'), 429, '节点接收队列已达容量上限，请等待分析完成');
+                Batch::create(['node_id' => $node->id, 'batch_id' => $v['batch_id'], 'payload' => $v, 'payload_bytes' => $bytes, 'window_start' => $start, 'window_end' => $end]);
+            }
+            $locked->update(['last_seen_at' => now()]);
+            if (! $locked->health_observed_at || $locked->health_observed_at->lte($end)) {
+                $locked->update(['health' => $v['health'], 'health_observed_at' => $end]);
+            }
+
+            return $exists;
+        });
+
+        return response()->json(['accepted' => true, 'duplicate' => $duplicate]);
+    }
+}

@@ -1,0 +1,18 @@
+<?php
+
+use App\Http\Controllers\ExportController;
+use App\Models\Website;
+use Illuminate\Support\Facades\Route;
+
+Route::get('/', fn () => redirect('/admin'));
+Route::middleware('auth')->group(function () {
+    Route::get('/screenshots/{website}', function (Website $website) {
+        abort_unless(in_array(auth()->user()->role, ['admin', 'viewer']), 403);
+        abort_unless($website->screenshot_path && preg_match('#^screenshots/[a-f0-9]{64}\.png$#', $website->screenshot_path), 404);
+        $path = storage_path('app/private/'.$website->screenshot_path);
+        abort_unless(is_file($path), 404);
+
+        return response()->file($path, ['Cache-Control' => 'private, no-store', 'X-Content-Type-Options' => 'nosniff']);
+    })->name('screenshots.show');
+    Route::get('/exports/{type}', ExportController::class)->name('exports');
+});

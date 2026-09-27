@@ -1,0 +1,61 @@
+name: checks
+on: [push, pull_request]
+jobs:
+  agent:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24.x'
+          cache: false
+      - run: go test -race ./...
+        working-directory: agent
+      - run: go vet ./...
+        working-directory: agent
+      - run: bash deploy/agent/build.sh
+  server:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_DB: monitor_test
+          POSTGRES_USER: monitor
+          POSTGRES_PASSWORD: test-only-password
+        ports: ['5432:5432']
+        options: --health-cmd 'pg_isready -U monitor -d monitor_test' --health-interval 10s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: intl, mbstring, pdo_pgsql, pdo_sqlite, zip
+          coverage: none
+      - run: composer install --no-interaction --prefer-dist
+        working-directory: server
+      - run: php vendor/phpunit/phpunit/phpunit
+        working-directory: server
+        env:
+          APP_KEY: base64:dGVzdC1vbmx5LWtleS0zMmJ5dGVzLWZvci1jaSEhISE=
+          DB_CONNECTION: pgsql
+          DB_HOST: 127.0.0.1
+          DB_DATABASE: monitor_test
+          DB_USERNAME: monitor
+          DB_PASSWORD: test-only-password
+  worker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm ci && npm test
+        working-directory: worker
+  containers:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash deploy/prepare.sh
+      - run: docker compose --profile screenshots build app web worker
+        working-directory: deploy

@@ -1,0 +1,19 @@
+{
+  "node_id": "replace-with-node-uuid",
+  "server_url": "https://monitor.example.com",
+  "token": "replace-with-node-token",
+  "interfaces": ["monitor0"],
+  "cidrs": ["203.0.113.0/24", "2001:db8::/48"],
+  "data_dir": "/home/vm-monitor",
+  "memory_soft_mib": 2048,
+  "memory_hard_mib": 4096,
+  "disk_limit_mib": 2048,
+  "spool_limit_mib": 512,
+  "capture_buffer_mib": 16,
+  "flush_seconds": 30,
+  "max_ips": 4096,
+  "max_flows": 50000,
+  "max_reassembly": 2048,
+  "max_sites": 4096,
+  "allow_http_localhost": false
+}

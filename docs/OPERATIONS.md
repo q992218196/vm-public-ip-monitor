@@ -1,0 +1,97 @@
+# 配置、协议与运维
+
+## Agent 参数
+
+完整示例见 `agent/config.example.json`。CIDR 及资源参数同时在本地校验。下调内存时，需要相应缩小状态上限，不能只降低系统硬限额。
+
+| 参数 | 默认 | 说明 |
+|---|---:|---|
+| memory_soft_mib | 2048 | Go 工作预算；不是 OS 硬限额 |
+| memory_hard_mib | 4096 | 安装器写入 systemd 限额 |
+| disk_limit_mib | 2048 | 应用目录预算，含程序、日志、缓存 |
+| spool_limit_mib | 512 | 待确认批次缓存 |
+| capture_buffer_mib | 16 | 每个接口请求的 socket 缓冲；内核可能限制或按双倍记账 |
+| flush_seconds | 30 | 上报窗口，允许 10～300 秒 |
+| max_ips | 4096 | 每窗口 IP 状态上限 |
+| max_flows | 50000 | SYN 去重状态上限 |
+| max_reassembly | 2048 | 协议重组连接上限，每个最多 16 KiB、10 秒 |
+| max_sites | 4096 | 每窗口网站线索上限 |
+
+内存开销还包含内核网络缓冲。主机内核的记账方式不同，必须同时检查服务 cgroup 和主机增量内存。工作预算不是吞吐保证；达到状态上限会丢弃新状态并计数，避免无限增长。
+
+内存预算可高于默认值，但必须在本地配置和 systemd 硬限额中一致更新。界面资源字段是部署配置，不是远程任意命令功能。
+
+## 有界缓存与磁盘
+
+- 普通批次最多使用缓存预算的 75%；包含网站线索、采集丢失或较高扫描计数的批次优先发送和保留。
+- 优先级判断只是本地保护策略，不代替后台规则。
+- 普通批次不会挤掉优先批次；连优先数据都装不下时也必须淘汰并报告损失。
+- 200 且 `accepted=true` 才删除已确认批次；401、429、5xx、网络错误保留重试。
+- 400、413、422 属于永久拒绝，丢弃该批次并计数，避免一个坏批次永久阻塞队列。
+- 上传窗口超过14天、节点 CIDR 已修改而旧批次越界等，可能产生422。先排查原因，不要把失败补传当作成功。
+- 应用日志约 8 MiB × 2；完整抓包关闭。目录预算是应用写入策略，并不能限制管理员手工放入的大文件。建议使用独立目录，必要时加文件系统项目配额。
+- 系统 OOM 会留下数据缺口；正常 SIGTERM 尝试将最后窗口写入缓存。运行时丢弃计数在重启后重新累计。
+
+## 服务端协议
+
+Agent 使用 `POST /api/v1/agent/batches`：
+
+```http
+Authorization: Bearer 节点密钥
+X-Node-ID: 节点UUID
+Content-Type: application/json
+```
+
+主体包含 `batch_id`、`window_start`、`window_end`、`health`、`metrics[]`、`sites[]`，结构见 `agent/internal/wire/types.go`。
+
+服务端在单个数据库事务内保存批次后确认。唯一键为 `(node_id,batch_id)`。持久化 inbox 由调度器每10秒扫描并送入队列；Redis 临时不可用不会丢失已确认的 inbox。分析任务自身也幂等。
+
+每批最多8 MiB、8192个 IP、4096条网站线索；每节点每分钟最多120次请求。时间窗口最多600秒，允许未来5分钟偏差和过去14天补传。
+
+没有批次签名或 mTLS；使用 HTTPS、节点专用高熵密钥、服务端只存 SHA-256 摘要、节点禁用与凭据轮换。密钥仅授权本节点的 CIDR。
+
+每节点未处理 inbox 默认最多64 MiB（`MONITOR_PENDING_BYTES_PER_NODE`），超限返回429，Agent保留重试；避免队列长时间故障时数据库无限积压。总预算近似节点数乘此值，另计数据库存储开销。
+
+截图工作节点使用独立凭据，租约为3分钟，结果必须携带对应随机租约。过期结果和重复完成均拒绝。任务失败可从网站页面重新排队。租约最多自动尝试3次。
+
+## 告警语义
+
+横向扫描：窗口内不同目标 IP 的保守计数。纵向扫描：单个目标的不同端口数。疑似爆破：单个目标认证类端口的重复 TCP 发起次数，不是认证失败数。
+
+Agent 每 IP 最多保存256个目标和256个目标/端口组合。超过上限时，证据标记 `cardinality_capped`。后台多个采集窗口取最大值作为保守下界，不把不同窗口去重数直接相加。本版本尚未实现精确跨小时目标集合或自适应业务基线。
+
+告警按节点、IP、规则和固定时间桶合并；时间桶边界可能短时间产生两条告警。白名单对源 IP/CIDR 生效，必须有原因和失效时间，节点健康告警不被白名单屏蔽。
+
+## 数据保留
+
+| 数据 | 默认 |
+|---|---|
+| 流量窗口 | 7天 |
+| 已处理批次幂等ID | 16天；原始 payload 处理后清空 |
+| 已解决告警 | 180天 |
+| 未解决告警 | 保留等待处理 |
+| 截图 | 每站点当前图；内容哈希去重；总额度5 GiB |
+| 无引用截图 | 超过24小时后回收 |
+
+截图额度满时保留资产和分类结果，拒绝新增图片，任务回执中 `screenshot_stored=false`。不是自动删除其他站点的当前证据。
+
+截图工作目录默认预算512 MiB（`WORKER_DISK_LIMIT_MIB`），任务前和运行中检查，超限停止浏览器；缓存和临时目录放在工作目录中。应用周期检查可能短时超额，若必须严格限制写入量，应在管理机设置文件系统项目配额。崩溃遗留的 Playwright 临时目录在重启时按时效清理。
+
+PostgreSQL 不能简单用文件删除实现空间上限。设置保留期、监控分区余量，并配置数据库备份、autovacuum。几十台宿主机的数据库用量需真实采样评估；默认仅存聚合窗口，不保存所有逐连接明细。
+
+应用和 Nginx 日志可使用 `deploy/server/logrotate.conf`，自定义目录后同步修改路径。Docker 服务日志默认不保存，主要错误查看挂载目录中的应用日志与探测任务。
+
+## 常用维护命令
+
+```sh
+cd /home/vm-monitor-src/deploy
+docker compose exec app php artisan monitor:dispatch --sync
+docker compose exec app php artisan monitor:maintain
+docker compose exec app php artisan queue:failed
+docker compose exec app php artisan queue:retry all
+docker compose exec -T postgres pg_dump -U monitor monitor > /home/monitor-backup.sql
+```
+
+定期备份 `.env`、数据库和 storage。备份路径也需要容量和保留策略。恢复演练在独立环境执行，避免用生产库验证脚本。
+
+只读用户使用 `php artisan monitor:admin viewer@example.com --role=viewer --name=观察员` 创建。当前不提供公开注册和自助权限提升。

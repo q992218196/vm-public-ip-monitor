@@ -1,0 +1,116 @@
+name: vm-monitor
+x-app: &app
+  image: vm-monitor-app:local
+  build:
+    context: ..
+    dockerfile: deploy/server/Dockerfile
+    target: app
+  restart: unless-stopped
+  mem_limit: 1g
+  env_file: .env
+  environment: &appenv
+    APP_ENV: production
+    APP_DEBUG: "false"
+    APP_LOCALE: zh_CN
+    DB_CONNECTION: pgsql
+    DB_HOST: postgres
+    DB_PORT: 5432
+    DB_DATABASE: monitor
+    DB_USERNAME: monitor
+    QUEUE_CONNECTION: redis
+    REDIS_QUEUE_RETRY_AFTER: 180
+    CACHE_STORE: redis
+    REDIS_HOST: redis
+    SESSION_DRIVER: database
+    SESSION_SECURE_COOKIE: "true"
+    LOG_CHANNEL: daily
+    LOG_DAILY_DAYS: 7
+  volumes:
+    - ${MONITOR_DATA_DIR:-/home/vm-monitor-server}/storage:/var/www/html/storage
+  depends_on:
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+  logging: &nolog
+    driver: none
+  networks: [backend]
+services:
+  app:
+    <<: *app
+  queue:
+    <<: *app
+    command: ["php", "artisan", "queue:work", "--sleep=2", "--tries=5", "--timeout=120", "--memory=384", "--max-jobs=500"]
+    networks: [backend, notifications]
+  scheduler:
+    <<: *app
+    command: ["php", "artisan", "schedule:work"]
+  web:
+    image: vm-monitor-web:local
+    build:
+      context: ..
+      dockerfile: deploy/server/Dockerfile
+      target: web
+    restart: unless-stopped
+    ports: ["127.0.0.1:8080:8080"]
+    depends_on: [app]
+    volumes:
+      - ${MONITOR_DATA_DIR:-/home/vm-monitor-server}/nginx-logs:/var/log/nginx
+    logging: *nolog
+    networks: [backend, probes]
+  postgres:
+    image: postgres:17-bookworm
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: monitor
+      POSTGRES_USER: monitor
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD}
+    volumes:
+      - ${MONITOR_DATA_DIR:-/home/vm-monitor-server}/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U monitor -d monitor"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    logging: *nolog
+    networks: [backend]
+  redis:
+    image: redis:7.4-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "512mb", "--maxmemory-policy", "noeviction"]
+    volumes:
+      - ${MONITOR_DATA_DIR:-/home/vm-monitor-server}/redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    logging: *nolog
+    networks: [backend]
+  worker:
+    build:
+      context: ..
+      dockerfile: deploy/worker/Dockerfile
+    profiles: [screenshots]
+    restart: unless-stopped
+    init: true
+    mem_limit: 2g
+    shm_size: 256m
+    pids_limit: 256
+    security_opt: ["seccomp=./worker/seccomp_profile.json"]
+    environment:
+      MONITOR_URL: http://web:8080
+      ALLOW_INTERNAL_HTTP: "1"
+      MONITOR_WORKER_TOKEN: ${MONITOR_WORKER_TOKEN:?set MONITOR_WORKER_TOKEN}
+      WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-1}
+      WORKER_DISK_LIMIT_MIB: ${WORKER_DISK_LIMIT_MIB:-512}
+      WORKER_DATA_DIR: /home/vm-monitor-worker
+    volumes:
+      - ${MONITOR_DATA_DIR:-/home/vm-monitor-server}/worker:/home/vm-monitor-worker
+    logging: *nolog
+    networks: [probes]
+networks:
+  backend:
+    internal: true
+  probes: {}
+  notifications: {}
