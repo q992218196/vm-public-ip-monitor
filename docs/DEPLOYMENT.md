@@ -193,11 +193,12 @@ cd deploy
 # 若需要默认双任务并发，请在现有 .env 中设置 WORKER_CONCURRENCY=2
 docker compose --profile screenshots build app web worker
 docker compose run --rm --no-deps app php artisan migrate --force
+docker compose run --rm --no-deps app php artisan db:seed --class=MonitorSeeder --force
 docker compose up -d --no-deps --force-recreate app web queue scheduler
 docker compose --profile screenshots up -d --no-deps --force-recreate worker
 ```
 
-迁移命令使用新镜像中的一次性应用容器，此时原有数据库与 Redis 服务应保持运行。如果 `.env` 中仍是 `WORKER_CONCURRENCY=1`，worker 仍会串行探测。端口证据需要把新编译的 Agent 部署到宿主机，并由新告警触发窗口产生；历史证据不会凭空补齐。
+迁移命令使用新镜像中的一次性应用容器，此时原有数据库与 Redis 服务应保持运行。新增索引以 PostgreSQL 并发方式创建；在大表上仍可能持续较久并占用 I/O 和临时磁盘空间，请在升级前检查 `/home` 剩余空间并安排低峰时段。Seeder 只补充缺少的默认检测规则，不覆盖已修改的规则。若 `.env` 中仍是 `WORKER_CONCURRENCY=1`，worker 仍会串行探测。端口证据与 VPN 握手识别需要把新版 Agent 部署到宿主机，并由新的采集窗口产生；历史证据不会凭空补齐。
 
 Agent 升级重新运行安装器，保留一个 `vm-agent.previous`。回滚时停止服务，将该文件恢复为 `vm-agent`，核对兼容配置后启动。内存硬限额变更也需要重新运行安装器。
 

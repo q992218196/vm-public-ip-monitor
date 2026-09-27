@@ -6,6 +6,7 @@ use App\Models\Alert;
 use App\Models\Batch;
 use App\Models\Node;
 use App\Models\ProbeTask;
+use App\Models\ProtocolObservation;
 use App\Models\TrafficMetric;
 use App\Models\Website;
 use App\Services\Analyzer;
@@ -38,6 +39,7 @@ class Maintain extends Command
             }
         }
         TrafficMetric::where('window_end', '<', now()->subDays(config('monitor.metrics_days')))->delete();
+        ProtocolObservation::where('window_end', '<', now()->subDays(config('monitor.protocol_days')))->delete();
         // Keep inbox IDs longer than the accepted replay horizon, preventing old
         // retries from creating a second copy after metric retention.
         Batch::whereNotNull('processed_at')->where('window_end', '<', now()->subDays(16))->delete();

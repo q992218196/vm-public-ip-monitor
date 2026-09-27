@@ -4,11 +4,11 @@ namespace Tests\Feature;
 
 use App\Filament\Resources\NodeResource;
 use App\Filament\Resources\NodeResource\Pages\ManageNodes;
-use App\Filament\Resources\AlertResource\Pages\ManageAlerts;
 use App\Jobs\ProcessBatch;
 use App\Models\Batch;
 use App\Models\Alert;
 use App\Models\Node;
+use App\Models\ProtocolObservation;
 use App\Models\User;
 use App\Models\Website;
 use App\Services\ProbeQueue;
@@ -216,15 +216,9 @@ class MonitorTest extends TestCase
         $admin->role = 'admin';
         $admin->save();
         $this->actingAs($admin);
-        Filament::setCurrentPanel(Filament::getPanel('admin'));
         $alert = Alert::where('kind', 'new_website')->firstOrFail();
-        Livewire::test(ManageAlerts::class)
-            ->filterTable('node_id', $node->id)
-            ->filterTable('ip', ['ip' => '203.0.113.10'])
-            ->filterTable('severity', 'low')
-            ->assertCanSeeTableRecords([$alert])
-            ->callTableBulkAction('handle', [$alert], ['status' => 'acknowledged', 'resolution' => '已核对资产'])
-            ->assertHasNoActionErrors();
+        $this->get('/admin/alerts?node='.$node->id.'&ip=203.0.113.10&severity=low')->assertOk()->assertSee($alert->title);
+        $this->post(route('alerts.bulk'), ['ids' => [$alert->id], 'status' => 'acknowledged', 'resolution' => '已核对资产'])->assertRedirect();
         $this->assertDatabaseHas('alerts', ['id' => $alert->id, 'status' => 'acknowledged', 'resolution' => '已核对资产']);
         $this->assertDatabaseHas('audit_logs', ['action' => 'alerts_bulk_handled']);
     }
@@ -260,9 +254,8 @@ class MonitorTest extends TestCase
         $admin->role = 'admin';
         $admin->save();
         $this->actingAs($admin);
-        Filament::setCurrentPanel(Filament::getPanel('admin'));
-        $listRecord = Livewire::test(ManageAlerts::class)->instance()->getTableRecords()->getCollection()->first();
-        $this->assertArrayNotHasKey('evidence', $listRecord->getAttributes());
+        $list = $this->get('/admin/alerts?per_page=500')->assertOk();
+        $this->assertStringNotContainsString('target_endpoints', $list->getContent());
         $this->get(route('alerts.evidence', $alert))->assertOk()->assertSee('1.1.1.1:22')->assertSee('443');
         $export = $this->get('/exports/alerts')->assertOk()->streamedContent();
         $this->assertStringNotContainsString('target_endpoints', $export);
@@ -292,7 +285,92 @@ class MonitorTest extends TestCase
         $admin->save();
         $this->actingAs($admin);
         $this->get('/admin/websites')->assertOk()->assertSee('test.example');
+        $this->post(route('websites.category', $site), ['manual_category' => '人工复核'])->assertRedirect();
+        $this->assertSame('人工复核', $site->fresh()->manual_category);
+        $this->post(route('websites.probe', $site))->assertRedirect();
+        $this->post(route('websites.manual'), ['ip' => '203.0.113.10', 'port' => 18080, 'scheme' => 'http', 'host' => 'manual.example'])->assertRedirect();
+        $this->assertDatabaseHas('websites', ['host' => 'manual.example', 'port' => 18080]);
+        $this->get(route('websites.details', $site))->assertOk()->assertSee('这是一段网站描述');
         $export = $this->get('/exports/websites')->assertOk()->streamedContent();
         $this->assertStringContainsString('这是一段网站描述', $export);
+    }
+
+    public function test_large_lists_and_bulk_post_stay_small(): void
+    {
+        $node = $this->node();
+        $now = now();
+        $alerts = [];
+        for ($i = 0; $i < 500; $i++) {
+            $alerts[] = [
+                'node_id' => $node->id, 'dedup_key' => hash('sha256', 'large-alert-'.$i),
+                'kind' => 'horizontal_scan', 'severity' => 'high', 'title' => '扫描 '.$i,
+                'status' => 'open', 'evidence' => json_encode(['large_private_evidence' => str_repeat('x', 10000)]),
+                'first_seen_at' => $now, 'last_seen_at' => $now, 'created_at' => $now, 'updated_at' => $now,
+            ];
+        }
+        Alert::insert($alerts);
+        $admin = User::factory()->create();
+        $admin->role = 'admin';
+        $admin->save();
+        $this->actingAs($admin);
+        $response = $this->get('/admin/alerts?per_page=500')->assertOk();
+        $this->assertLessThan(1000000, strlen($response->getContent()));
+        $this->assertStringNotContainsString('large_private_evidence', $response->getContent());
+        $ids = Alert::query()->pluck('id')->all();
+        $this->post(route('alerts.bulk'), ['ids' => $ids, 'status' => 'resolved', 'resolution' => '已复核'])->assertRedirect();
+        $this->assertSame(500, Alert::where('status', 'resolved')->count());
+    }
+
+    public function test_vpn_alert_requires_bounded_bidirectional_signature(): void
+    {
+        $this->seed(MonitorSeeder::class);
+        $node = $this->node();
+        $payload = $this->payload();
+        $payload['vpn'] = [[
+            'ip' => '203.0.113.10', 'peer_ip' => '1.1.1.1', 'local_port' => 40000,
+            'peer_port' => 51820, 'protocol' => 'wireguard', 'initiator' => 'vm',
+            'request_count' => 1, 'response_count' => 1, 'request_length' => 148,
+            'response_length' => 92, 'request_header' => '010000007b000000',
+            'response_header' => '02000000c8010000',
+        ]];
+        $this->upload($node, $payload)->assertOk();
+        ProcessBatch::dispatchSync(Batch::first()->id);
+        $alert = Alert::where('kind', 'vpn_protocol')->firstOrFail();
+        $this->assertSame('wireguard', $alert->evidence['protocol']);
+        $this->assertSame('1.1.1.1', $alert->evidence['peer_ip']);
+        $this->assertDatabaseCount('protocol_observations', 1);
+        $viewer = User::factory()->create();
+        $viewer->role = 'viewer';
+        $viewer->save();
+        $this->actingAs($viewer)->get(route('protocol-observations.evidence', ProtocolObservation::firstOrFail()))
+            ->assertOk()->assertJsonPath('evidence.protocol', 'wireguard');
+    }
+
+    public function test_website_cursor_pages_exclude_large_classification(): void
+    {
+        $node = $this->node();
+        $this->upload($node, $this->payload())->assertOk();
+        ProcessBatch::dispatchSync(Batch::first()->id);
+        $assetId = Website::firstOrFail()->ip_asset_id;
+        $now = now();
+        $sites = [];
+        for ($i = 0; $i < 500; $i++) {
+            $sites[] = [
+                'ip_asset_id' => $assetId, 'fingerprint' => hash('sha256', 'large-site-'.$i),
+                'port' => 8000 + $i, 'scheme' => 'http', 'host' => 'site'.$i.'.example',
+                'source' => 'manual', 'status' => 'verified', 'classification' => json_encode(['large_classification' => str_repeat('x', 10000)]),
+                'first_seen_at' => $now, 'last_seen_at' => $now, 'created_at' => $now, 'updated_at' => $now,
+            ];
+        }
+        Website::insert($sites);
+        $admin = User::factory()->create();
+        $admin->role = 'admin';
+        $admin->save();
+        $this->actingAs($admin);
+        $response = $this->get('/admin/websites?per_page=500')->assertOk();
+        $this->assertLessThan(1000000, strlen($response->getContent()));
+        $this->assertStringNotContainsString('large_classification', $response->getContent());
+        $cursor = Website::query()->orderByDesc('last_seen_at')->orderByDesc('id')->cursorPaginate(500)->nextCursor();
+        $this->get('/admin/websites?per_page=500&cursor='.urlencode($cursor->encode()))->assertOk()->assertSee('本页 1 条');
     }
 }

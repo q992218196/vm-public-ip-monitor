@@ -25,6 +25,20 @@ type Site struct {
 	Host   string `json:"host"`
 	Source string `json:"source"`
 }
+type VPNObservation struct {
+	IP             string `json:"ip"`
+	PeerIP         string `json:"peer_ip"`
+	LocalPort      uint16 `json:"local_port"`
+	PeerPort       uint16 `json:"peer_port"`
+	Protocol       string `json:"protocol"`
+	Initiator      string `json:"initiator"`
+	RequestCount   int    `json:"request_count"`
+	ResponseCount  int    `json:"response_count"`
+	RequestLength  int    `json:"request_length"`
+	ResponseLength int    `json:"response_length"`
+	RequestHeader  string `json:"request_header"`
+	ResponseHeader string `json:"response_header"`
+}
 type Health struct {
 	Version           string   `json:"version"`
 	Captured          uint64   `json:"captured"`
@@ -41,10 +55,11 @@ type Health struct {
 	Interfaces        []string `json:"interfaces"`
 }
 type Batch struct {
-	ID          string   `json:"batch_id"`
-	WindowStart string   `json:"window_start"`
-	WindowEnd   string   `json:"window_end"`
-	Health      Health   `json:"health"`
-	Metrics     []Metric `json:"metrics"`
-	Sites       []Site   `json:"sites"`
+	ID          string           `json:"batch_id"`
+	WindowStart string           `json:"window_start"`
+	WindowEnd   string           `json:"window_end"`
+	Health      Health           `json:"health"`
+	Metrics     []Metric         `json:"metrics"`
+	Sites       []Site           `json:"sites"`
+	VPN         []VPNObservation `json:"vpn"`
 }

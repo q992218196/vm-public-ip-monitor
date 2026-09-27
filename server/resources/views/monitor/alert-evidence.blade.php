@@ -39,6 +39,19 @@
     @if (! empty($alert->evidence['sample']['target_endpoints'] ?? []))
         <section class="card"><h2>目标地址与端口（最多 32 项）</h2><ul>@foreach ($alert->evidence['sample']['target_endpoints'] as $endpoint)<li>{{ $endpoint }}</li>@endforeach</ul>@if ($alert->evidence['sample']['endpoint_samples_truncated'] ?? false)<p>地址样本已截断。</p>@endif</section>
     @endif
+    @if ($alert->kind === 'vpn_protocol')
+        <section class="card"><h2>协议握手证据</h2><dl>
+            <div><dt>匹配协议</dt><dd>{{ \App\Support\Labels::get($alert->evidence['protocol'] ?? null) }}</dd></div>
+            <div><dt>对端 IP</dt><dd>{{ $alert->evidence['peer_ip'] ?? '—' }}</dd></div>
+            <div><dt>本机／对端端口</dt><dd>{{ $alert->evidence['local_port'] ?? '—' }} / {{ $alert->evidence['peer_port'] ?? '—' }}</dd></div>
+            <div><dt>握手发起方</dt><dd>{{ ($alert->evidence['initiator'] ?? '') === 'vm' ? 'VM' : '对端' }}</dd></div>
+            <div><dt>请求／响应数量</dt><dd>{{ $alert->evidence['request_count'] ?? 0 }} / {{ $alert->evidence['response_count'] ?? 0 }}</dd></div>
+            <div><dt>请求／响应长度</dt><dd>{{ $alert->evidence['request_length'] ?? 0 }} / {{ $alert->evidence['response_length'] ?? 0 }} 字节</dd></div>
+            <div><dt>请求／响应报文头</dt><dd>{{ $alert->evidence['request_header'] ?? '—' }} / {{ $alert->evidence['response_header'] ?? '—' }}</dd></div>
+        </dl>
+        @if ($alert->evidence['observation_id'] ?? null) <p><a href="{{ route('protocol-observations.evidence', $alert->evidence['observation_id']) }}">下载该窗口的独立 JSON 证据</a></p> @endif
+        <p>被动识别结果不能证明隧道建立、认证成功、VM 内具体进程或用途违规；请结合业务授权和其他日志核查。</p></section>
+    @endif
     <section class="card"><h2>原始证据</h2><pre>{{ json_encode($alert->evidence, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT) }}</pre></section>
     @if ($alert->resolution)
         <section class="card"><h2>处理记录</h2><p>{{ $alert->resolution }}</p></section>

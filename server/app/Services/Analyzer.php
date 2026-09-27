@@ -9,6 +9,7 @@ use App\Models\Exclusion;
 use App\Models\IpAsset;
 use App\Models\IpObservation;
 use App\Models\Node;
+use App\Models\ProtocolObservation;
 use App\Models\Rule;
 use App\Models\TrafficMetric;
 use App\Models\Website;
@@ -46,6 +47,41 @@ class Analyzer
             }
             if ($website->last_seen_at->lt($at)) {
                 $website->update(['last_seen_at' => $at]);
+            }
+        }
+        $vpnRule = $this->rules->where('kind', 'vpn_protocol')->sortByDesc(fn ($rule) => $rule->node_id !== null)->first();
+        foreach ($p['vpn'] ?? [] as $observation) {
+            $asset = $this->observe($observation['ip'], $node, $at);
+            $stored = ProtocolObservation::create([
+                'batch_id' => $batch->id,
+                'node_id' => $node->id,
+                'ip_asset_id' => $asset->id,
+                'protocol' => $observation['protocol'],
+                'peer_ip' => $observation['peer_ip'],
+                'local_port' => $observation['local_port'],
+                'peer_port' => $observation['peer_port'],
+                'window_start' => $batch->window_start,
+                'window_end' => $at,
+                'evidence' => $observation,
+            ]);
+            if ($vpnRule) {
+                if ($this->exclusions->contains(fn ($exclusion) => Ip::contains($exclusion->cidr, $asset->ip))) {
+                    continue;
+                }
+                if (min($observation['request_count'], $observation['response_count']) < $vpnRule->threshold) {
+                    continue;
+                }
+                $label = match ($observation['protocol']) {
+                    'wireguard' => 'WireGuard', 'openvpn' => 'OpenVPN', 'ikev2' => 'IKEv2/IPsec',
+                };
+                $evidence = $observation + [
+                    'observation_id' => $stored->id,
+                    'method' => '双向握手报文结构匹配',
+                    'confidence' => 'protocol_signature',
+                    'note' => '仅证明观察到与协议握手一致的报文结构；不证明隧道已建立、认证成功或用途违规。',
+                ];
+                $salt = implode('|', [$observation['protocol'], $observation['peer_ip'], $observation['local_port'], $observation['peer_port']]);
+                $this->alert($node, $asset, 'vpn_protocol', $vpnRule->severity, '观察到 '.$label.' 双向握手特征', $evidence, $at, $vpnRule->cooldown_seconds, $salt);
             }
         }
         $h = $p['health'];

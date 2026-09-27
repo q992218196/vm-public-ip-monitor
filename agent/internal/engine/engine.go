@@ -35,6 +35,15 @@ type seen struct {
 	iface string
 	at    time.Time
 }
+type vpnKey struct {
+	VM, Peer            netip.Addr
+	LocalPort, PeerPort uint16
+	Protocol            string
+	Session             uint64
+}
+type vpnState struct {
+	observation wire.VPNObservation
+}
 type Engine struct {
 	mu         sync.Mutex
 	c          config.Config
@@ -43,13 +52,14 @@ type Engine struct {
 	syns       map[flowKey]time.Time
 	streams    map[flowKey]*stream
 	sites      map[string]wire.Site
+	vpn        map[vpnKey]*vpnState
 	duplicates map[uint64]seen
 	health     wire.Health
 	start      time.Time
 }
 
 func New(c config.Config, now time.Time) *Engine {
-	e := &Engine{c: c, ips: map[netip.Addr]*ipState{}, syns: map[flowKey]time.Time{}, streams: map[flowKey]*stream{}, sites: map[string]wire.Site{}, duplicates: map[uint64]seen{}, start: now}
+	e := &Engine{c: c, ips: map[netip.Addr]*ipState{}, syns: map[flowKey]time.Time{}, streams: map[flowKey]*stream{}, sites: map[string]wire.Site{}, vpn: map[vpnKey]*vpnState{}, duplicates: map[uint64]seen{}, start: now}
 	for _, s := range c.CIDRs {
 		p, err := netip.ParsePrefix(s)
 		if err == nil {
@@ -113,6 +123,14 @@ func (e *Engine) Process(b []byte, wireLen int, iface string, now time.Time) {
 		if s := e.state(p.Dst); s != nil {
 			s.m.BytesIn += uint64(p.Size)
 			s.m.PacketsIn++
+		}
+	}
+	if signature, matched := packet.VPN(p); matched {
+		if src {
+			e.observeVPN(p.Src, p.Dst, p.SrcPort, p.DstPort, "vm", signature)
+		}
+		if dst {
+			e.observeVPN(p.Dst, p.Src, p.DstPort, p.SrcPort, "peer", signature)
 		}
 	}
 	if p.Protocol != 6 {
@@ -208,6 +226,33 @@ func (e *Engine) Process(b []byte, wireLen int, iface string, now time.Time) {
 	}
 	e.sites[key] = site
 }
+func (e *Engine) observeVPN(vm, peer netip.Addr, localPort, peerPort uint16, sender string, signature packet.VPNSignature) {
+	key := vpnKey{VM: vm, Peer: peer, LocalPort: localPort, PeerPort: peerPort, Protocol: signature.Protocol, Session: signature.Session}
+	state := e.vpn[key]
+	if state == nil {
+		if len(e.vpn) >= 2048 {
+			e.health.StateDropped++
+			return
+		}
+		state = &vpnState{observation: wire.VPNObservation{IP: vm.String(), PeerIP: peer.String(), LocalPort: localPort, PeerPort: peerPort, Protocol: signature.Protocol}}
+		e.vpn[key] = state
+	}
+	o := &state.observation
+	if signature.Phase == "request" {
+		o.RequestCount++
+		if o.RequestCount == 1 {
+			o.Initiator = sender
+			o.RequestLength = signature.Length
+			o.RequestHeader = signature.HeaderHex
+		}
+	} else {
+		o.ResponseCount++
+		if o.ResponseCount == 1 {
+			o.ResponseLength = signature.Length
+			o.ResponseHeader = signature.HeaderHex
+		}
+	}
+}
 func authPort(p uint16) bool {
 	switch p {
 	case 21, 22, 23, 25, 110, 143, 389, 445, 465, 587, 993, 995, 1433, 3306, 3389, 5432, 5900, 6379:
@@ -243,7 +288,7 @@ func (e *Engine) Snapshot(now time.Time) wire.Batch {
 	if _, err := rand.Read(id); err != nil {
 		panic(err)
 	}
-	b := wire.Batch{ID: hex.EncodeToString(id), WindowStart: e.start.UTC().Format(time.RFC3339Nano), WindowEnd: now.UTC().Format(time.RFC3339Nano), Health: e.health, Metrics: []wire.Metric{}, Sites: []wire.Site{}}
+	b := wire.Batch{ID: hex.EncodeToString(id), WindowStart: e.start.UTC().Format(time.RFC3339Nano), WindowEnd: now.UTC().Format(time.RFC3339Nano), Health: e.health, Metrics: []wire.Metric{}, Sites: []wire.Site{}, VPN: []wire.VPNObservation{}}
 	for _, s := range e.ips {
 		s.m.UniqueTargets = len(s.targets)
 		ts := make([]string, 0, len(s.targets))
@@ -279,9 +324,21 @@ func (e *Engine) Snapshot(now time.Time) wire.Batch {
 	for _, s := range e.sites {
 		b.Sites = append(b.Sites, s)
 	}
+	for _, s := range e.vpn {
+		if s.observation.RequestCount > 0 && s.observation.ResponseCount > 0 {
+			b.VPN = append(b.VPN, s.observation)
+		}
+	}
+	sort.Slice(b.VPN, func(i, j int) bool {
+		if b.VPN[i].IP == b.VPN[j].IP {
+			return b.VPN[i].PeerIP < b.VPN[j].PeerIP
+		}
+		return b.VPN[i].IP < b.VPN[j].IP
+	})
 	sort.Slice(b.Metrics, func(i, j int) bool { return b.Metrics[i].IP < b.Metrics[j].IP })
 	e.ips = map[netip.Addr]*ipState{}
 	e.sites = map[string]wire.Site{}
+	e.vpn = map[vpnKey]*vpnState{}
 	e.health = wire.Health{}
 	e.start = now
 	return b

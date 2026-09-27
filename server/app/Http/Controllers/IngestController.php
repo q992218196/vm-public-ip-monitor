@@ -21,7 +21,13 @@ class IngestController extends Controller
             'health' => 'required|array', 'health.version' => 'required|string|max:32',
             'health.interfaces' => 'sometimes|array|max:8', 'health.interfaces.*' => 'string|max:64',
             'health.*' => ['nullable'],
-            'metrics' => 'present|array|max:8192', 'sites' => 'present|array|max:4096',
+            'metrics' => 'present|array|max:8192', 'sites' => 'present|array|max:4096', 'vpn' => 'sometimes|array|max:2048',
+            'vpn.*.ip' => 'required|ip', 'vpn.*.peer_ip' => 'required|ip',
+            'vpn.*.local_port' => 'required|integer|min:1|max:65535', 'vpn.*.peer_port' => 'required|integer|min:1|max:65535',
+            'vpn.*.protocol' => 'required|in:wireguard,openvpn,ikev2', 'vpn.*.initiator' => 'required|in:vm,peer',
+            'vpn.*.request_count' => 'required|integer|min:1|max:1000000', 'vpn.*.response_count' => 'required|integer|min:1|max:1000000',
+            'vpn.*.request_length' => 'required|integer|min:8|max:65535', 'vpn.*.response_length' => 'required|integer|min:8|max:65535',
+            'vpn.*.request_header' => 'required|string|regex:/^[a-f0-9]{16}$/', 'vpn.*.response_header' => 'required|string|regex:/^[a-f0-9]{16}$/',
             'metrics.*.ip' => 'required|ip', 'metrics.*.targets' => 'present|array|max:16', 'metrics.*.targets.*' => 'ip',
             'metrics.*.ports' => 'sometimes|array|max:64', 'metrics.*.ports.*' => 'integer|min:1|max:65535',
             'metrics.*.target_endpoints' => 'sometimes|array|max:32', 'metrics.*.target_endpoints.*' => 'string|max:64',
@@ -39,9 +45,13 @@ class IngestController extends Controller
         }
         $node = $r->attributes->get('node');
         $seen = [];
-        foreach (['metrics', 'sites'] as $type) {
+        $v['vpn'] ??= [];
+        foreach (['metrics', 'sites', 'vpn'] as $type) {
             foreach ($v[$type] as &$item) {
                 $item['ip'] = Ip::normalize($item['ip']);
+                if ($type === 'vpn') {
+                    $item['peer_ip'] = Ip::normalize($item['peer_ip']);
+                }
                 if (! Ip::inRanges($item['ip'], $node->cidrs)) {
                     throw ValidationException::withMessages([$type => 'IP 不在该节点授权 CIDR 中']);
                 }

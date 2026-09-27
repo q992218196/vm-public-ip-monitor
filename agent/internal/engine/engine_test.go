@@ -42,6 +42,44 @@ func frame(src, dst string, sp, dp uint16, seq uint32, flags byte, payload strin
 	copy(p[off+20:], payload)
 	return p
 }
+func udpFrame(src, dst string, sp, dp uint16, payload []byte) []byte {
+	a, b := netip.MustParseAddr(src), netip.MustParseAddr(dst)
+	p := make([]byte, 14+20+8+len(payload))
+	binary.BigEndian.PutUint16(p[12:14], 0x0800)
+	p[14] = 0x45
+	binary.BigEndian.PutUint16(p[16:18], uint16(20+8+len(payload)))
+	p[23] = 17
+	copy(p[26:30], a.AsSlice())
+	copy(p[30:34], b.AsSlice())
+	binary.BigEndian.PutUint16(p[34:36], sp)
+	binary.BigEndian.PutUint16(p[36:38], dp)
+	binary.BigEndian.PutUint16(p[38:40], uint16(8+len(payload)))
+	copy(p[42:], payload)
+	return p
+}
+func TestVPNRequiresMatchingBidirectionalHandshake(t *testing.T) {
+	now := time.Now()
+	e := New(cfg(), now)
+	req := make([]byte, 148)
+	req[0] = 1
+	binary.LittleEndian.PutUint32(req[4:8], 123)
+	reqPacket := udpFrame("203.0.113.1", "1.1.1.1", 40000, 51820, req)
+	e.Process(reqPacket, len(reqPacket), "a", now)
+	if got := e.Snapshot(now.Add(time.Second)).VPN; len(got) != 0 {
+		t.Fatalf("one-way probe must not be reported: %+v", got)
+	}
+	e.Process(reqPacket, len(reqPacket), "a", now.Add(2*time.Second))
+	response := make([]byte, 92)
+	response[0] = 2
+	binary.LittleEndian.PutUint32(response[4:8], 456)
+	binary.LittleEndian.PutUint32(response[8:12], 123)
+	responsePacket := udpFrame("1.1.1.1", "203.0.113.1", 51820, 40000, response)
+	e.Process(responsePacket, len(responsePacket), "a", now.Add(3*time.Second))
+	got := e.Snapshot(now.Add(30 * time.Second)).VPN
+	if len(got) != 1 || got[0].Protocol != "wireguard" || got[0].PeerIP != "1.1.1.1" || got[0].PeerPort != 51820 || got[0].Initiator != "vm" {
+		t.Fatalf("unexpected VPN evidence: %+v", got)
+	}
+}
 func TestAttemptsAndCrossInterfaceDuplicates(t *testing.T) {
 	now := time.Now()
 	e := New(cfg(), now)
