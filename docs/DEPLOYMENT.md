@@ -4,7 +4,7 @@
 
 管理端部署到仍受支持的 Linux 系统，建议 Debian 13。宿主机支持目标为 CentOS 7、CentOS Stream 8、Debian 13，实际兼容性需要对应机器验证。CentOS 7 和 Stream 8 已停止官方维护。
 
-管理端需要 Docker Engine、Compose v2、Python 3、HTTPS 反向代理。宿主机需要 systemd、Python 2.7+ 或 3、CA 证书；不需要 PHP、Docker、Node.js、libpcap 或 VM 内 Agent。
+管理端需要 Docker Engine、Compose v2、Python 3。项目提供可选的 Caddy HTTPS 入口，也可使用已有的反向代理。宿主机需要 systemd、Python 2.7+ 或 3、CA 证书；不需要 PHP、Docker、Node.js、libpcap 或 VM 内 Agent。
 
 起步测试管理机可用 4–8 核、16 GiB 内存、SSD；这是试点起点，不是几十台宿主机的容量承诺。截图工作进程可迁到独立机器。容量按事件量与保留期压测。
 
@@ -24,6 +24,7 @@ bash prepare.sh
 ```dotenv
 MONITOR_DATA_DIR=/home/vm-monitor-server
 APP_URL=https://monitor.your-domain.example
+MONITOR_DOMAIN=monitor.your-domain.example
 MONITOR_AUTO_PROBE=false
 ```
 
@@ -52,7 +53,19 @@ docker compose up -d queue scheduler
 
 ## 3. HTTPS
 
-Compose 只将 Web 绑定到管理机 `127.0.0.1:8080`，数据库、Redis 和 PHP-FPM 不对公网发布。用已有 Nginx/Caddy 在同一管理机终止 HTTPS，再转发到该地址。下面是 Nginx 的核心配置片段，证书路径使用你已有的实际证书：
+Compose 只将 Web 绑定到管理机 `127.0.0.1:8080`，数据库、Redis 和 PHP-FPM 不对公网发布。确认域名 A／AAAA 记录指向管理机，并在云平台安全组和主机防火墙开放 TCP 80、443。可以使用项目自带的 Caddy 入口自动申请并续期证书：
+
+```sh
+cd /home/vm-monitor-src/deploy
+sudo mkdir -p /home/vm-monitor-server/caddy/{data,config}
+docker compose --profile https up -d https
+docker compose ps https
+curl -I https://monitor.your-domain.example/admin/login
+```
+
+将示例域名替换为 `.env` 中的实际 `MONITOR_DOMAIN`。Caddy 的证书、配置及有界运行日志都保存在 `${MONITOR_DATA_DIR}/caddy`；证书申请失败时查看 `caddy/data/caddy-runtime.log`。若在容器启动之后才修改 `APP_URL`，执行 `docker compose up -d --no-deps --force-recreate app web queue scheduler` 使环境变量生效，然后启动 HTTPS 入口。
+
+已有 Nginx/Caddy 时，不启动 `https` 配置组，而是在同一管理机终止 HTTPS 并转发到 `127.0.0.1:8080`。下面是 Nginx 的核心配置片段，证书路径使用你已有的实际证书：
 
 ```nginx
 server {

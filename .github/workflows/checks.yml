@@ -59,6 +59,9 @@ jobs:
       - run: bash deploy/prepare.sh
       - run: docker compose --profile screenshots build app web worker
         working-directory: deploy
+      - run: docker compose --profile https config --quiet
+        working-directory: deploy
+      - run: docker run --rm -e MONITOR_DOMAIN=monitor.example.com -v "$PWD/deploy/caddy/Caddyfile:/etc/caddy/Caddyfile:ro" caddy:2.11.4-alpine caddy validate --config /etc/caddy/Caddyfile
       - run: |
           docker run --name vm-monitor-fpm-smoke -d vm-monitor-app:local
           trap 'docker rm -f vm-monitor-fpm-smoke >/dev/null 2>&1 || true' EXIT
