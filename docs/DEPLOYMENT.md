@@ -37,6 +37,7 @@ sudo mkdir -p /home/vm-monitor-server/worker/tmp
 sudo chown -R 1000:1000 /home/vm-monitor-server/worker
 docker compose build app web
 docker compose up -d postgres redis app web
+docker compose ps app
 docker compose exec app php artisan migrate --force
 docker compose exec app php artisan db:seed --class=MonitorSeeder --force
 docker compose exec app php artisan monitor:admin admin@your-domain.example
@@ -46,6 +47,8 @@ docker compose up -d queue scheduler
 密码通过交互输入，至少 12 位。没有内置默认管理员密码。
 
 初始化不会自动添加节点、不会自动改变宿主机网络、不会向第三方发通知。
+
+`app` 应保持 `Up`。若它反复重启，查看默认数据目录中的 `/home/vm-monitor-server/storage/logs/php-fpm.log`；自定义 `MONITOR_DATA_DIR` 时使用对应路径。容器日志驱动已关闭，因此 `docker compose logs app` 不显示此日志。
 
 ## 3. HTTPS
 

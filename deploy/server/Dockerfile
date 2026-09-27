@@ -12,6 +12,7 @@ RUN mkdir -p storage/framework/cache/data storage/framework/sessions storage/fra
     && php artisan filament:assets \
     && chown -R www-data:www-data storage bootstrap/cache
 COPY deploy/server/php.ini /usr/local/etc/php/conf.d/monitor.ini
+COPY deploy/server/fpm.conf /usr/local/etc/php-fpm.d/zz-monitor.conf
 COPY deploy/server/entrypoint.sh /usr/local/bin/monitor-entrypoint
 RUN chmod +x /usr/local/bin/monitor-entrypoint
 ENTRYPOINT ["monitor-entrypoint"]
