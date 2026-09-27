@@ -7,9 +7,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends libpq-dev libic
 COPY --from=composer /usr/bin/composer /usr/local/bin/composer
 WORKDIR /var/www/html
 COPY server/ ./
-RUN composer install --no-dev --prefer-dist --no-interaction --optimize-autoloader \
+RUN mkdir -p storage/framework/cache/data storage/framework/sessions storage/framework/views storage/app/private storage/logs bootstrap/cache \
+    && composer install --no-dev --prefer-dist --no-interaction --optimize-autoloader \
     && php artisan filament:assets \
-    && mkdir -p storage/framework/cache storage/framework/sessions storage/framework/views storage/app/private storage/logs \
     && chown -R www-data:www-data storage bootstrap/cache
 COPY deploy/server/php.ini /usr/local/etc/php/conf.d/monitor.ini
 COPY deploy/server/entrypoint.sh /usr/local/bin/monitor-entrypoint

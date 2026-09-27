@@ -24,7 +24,7 @@ jobs:
           POSTGRES_USER: monitor
           POSTGRES_PASSWORD: test-only-password
         ports: ['5432:5432']
-        options: --health-cmd 'pg_isready -U monitor -d monitor_test' --health-interval 10s --health-retries 10
+        options: --health-cmd=pg_isready --health-interval=10s --health-retries=10
     steps:
       - uses: actions/checkout@v4
       - uses: shivammathur/setup-php@v2
