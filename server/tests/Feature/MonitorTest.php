@@ -317,6 +317,7 @@ class MonitorTest extends TestCase
         $this->assertLessThan(1000000, strlen($response->getContent()));
         $this->assertStringNotContainsString('large_private_evidence', $response->getContent());
         $ids = Alert::query()->pluck('id')->all();
+        $this->assertLessThan(10000, strlen(http_build_query(['ids' => $ids, 'status' => 'resolved', 'resolution' => '已复核'])));
         $this->post(route('alerts.bulk'), ['ids' => $ids, 'status' => 'resolved', 'resolution' => '已复核'])->assertRedirect();
         $this->assertSame(500, Alert::where('status', 'resolved')->count());
     }
