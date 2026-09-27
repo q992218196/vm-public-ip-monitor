@@ -7,6 +7,9 @@ umask 077
 config=$(readlink -f "$1"); binary=$(readlink -f "$2")
 python_bin=$(command -v python3 || command -v python || true)
 [[ -n "$python_bin" ]] || { echo 'Python 2.7+ or 3 is required by installer'; exit 1; }
+command -v systemctl >/dev/null || { echo 'systemctl is required by installer'; exit 1; }
+version=$(systemctl --version | awk 'NR==1 {print $2}')
+[[ $version =~ ^[0-9]+$ ]] || { echo 'Unable to detect systemd version'; exit 1; }
 mapfile -t settings < <("$python_bin" - "$config" <<'PY'
 from __future__ import print_function
 import json,re,sys
@@ -26,7 +29,6 @@ chmod 700 "$data" "$data"/{config,bin,logs,spool,tmp}
 if [[ -f "$data/bin/vm-agent" ]]; then cp -p "$data/bin/vm-agent" "$data/bin/vm-agent.previous"; fi
 install -m 700 "$binary" "$data/bin/vm-agent.new"
 mv -f "$data/bin/vm-agent.new" "$data/bin/vm-agent"
-version=$(systemd --version | head -1 | awk '{print $2}')
 if (( version >= 231 )); then limit="MemoryMax=${hard}M"; else limit="MemoryLimit=${hard}M"; fi
 cat > /etc/systemd/system/vm-monitor-agent.service <<EOF
 [Unit]

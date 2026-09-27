@@ -13,6 +13,7 @@ jobs:
         working-directory: agent
       - run: go vet ./...
         working-directory: agent
+      - run: bash -n deploy/agent/install.sh
       - run: bash deploy/agent/build.sh
   server:
     runs-on: ubuntu-latest
