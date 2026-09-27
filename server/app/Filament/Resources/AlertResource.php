@@ -42,17 +42,24 @@ class AlertResource extends MonitorResource
 
     public static function table(Table $t): Table
     {
-        return $t->defaultSort('last_seen_at', 'desc')->selectCurrentPageOnly()->maxSelectableRecords(500)->columns([
+        return $t->defaultSort('last_seen_at', 'desc')->selectCurrentPageOnly()->maxSelectableRecords(500)
+            ->modifyQueryUsing(fn (Builder $query, bool $isResolvingRecord): Builder => $isResolvingRecord ? $query : $query->select(['id', 'node_id', 'ip_asset_id', 'kind', 'title', 'severity', 'status', 'occurrences', 'last_seen_at']))
+            ->columns([
             TextColumn::make('title')->label('告警')->searchable(), TextColumn::make('ipAsset.ip')->label('公网 IP')->searchable()->copyable(), TextColumn::make('node.name')->label('观察节点'), TextColumn::make('severity')->formatStateUsing(fn ($state) => Labels::get($state))->label('级别')->badge()->color(fn (string $state) => match ($state) {
                 'high' => 'danger','medium' => 'warning',default => 'info'
-            }), TextColumn::make('status')->formatStateUsing(fn ($state) => Labels::get($state))->label('状态')->badge(), TextColumn::make('occurrences')->label('次数'), TextColumn::make('last_seen_at')->label('最后触发')->dateTime()->timezone(config('monitor.display_timezone')),
+            }), TextColumn::make('status')->formatStateUsing(fn ($state) => Labels::get($state))->label('状态')->badge()->color(fn (string $state) => match ($state) {
+                'open' => 'danger', 'acknowledged' => 'warning', 'resolved' => 'success', default => 'gray',
+            }), TextColumn::make('occurrences')->label('次数'), TextColumn::make('last_seen_at')->label('最后触发')->dateTime()->timezone(config('monitor.display_timezone')),
         ])->filters([
             SelectFilter::make('status')->label('处理状态')->options(['open' => '待处理', 'acknowledged' => '已确认', 'resolved' => '已解决']),
             SelectFilter::make('node_id')->label('节点')->relationship('node', 'name')->searchable()->preload(),
             Filter::make('ip')->label('公网 IP')->schema([TextInput::make('ip')->label('公网 IP')->placeholder('输入完整 IPv4 或 IPv6 地址')])
                 ->query(fn (Builder $query, array $data): Builder => $query->when(filled($data['ip'] ?? null), fn (Builder $query): Builder => $query->whereHas('ipAsset', fn (Builder $asset): Builder => $asset->where('ip', trim($data['ip']))))),
             SelectFilter::make('severity')->label('级别')->options(['high' => '高', 'medium' => '中', 'low' => '低']),
-        ])->headerActions([Action::make('export')->label('导出告警')->url(route('exports', 'alerts'))])->recordActions([static::detailAction(), EditAction::make()->label('处理')])->toolbarActions([
+        ])->headerActions([Action::make('export')->label('导出告警')->url(route('exports', 'alerts'))])->recordActions([
+            Action::make('detail')->label('详情')->url(fn (Alert $record): string => route('alerts.evidence', $record))->openUrlInNewTab(),
+            EditAction::make()->label('处理'),
+        ])->toolbarActions([
             BulkAction::make('handle')->label('批量处理')->visible(fn () => auth()->user()?->role === 'admin')->schema([
                 Select::make('status')->label('处理状态')->options(['acknowledged' => '已确认', 'resolved' => '已解决', 'open' => '重新打开'])->required(),
                 Textarea::make('resolution')->label('处理记录')->maxLength(4000)->required(),

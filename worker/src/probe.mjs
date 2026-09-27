@@ -34,12 +34,15 @@ export async function probe(task,limits={}) {
     if (!response || !permittedURL(page.url(), t)) throw new Error('No valid HTTP response or off-origin redirect');
     await page.waitForTimeout(1000);
     const title = (await page.title()).slice(0, 255);
+    const description = (await page.locator('meta[name="description" i], meta[property="og:description" i], meta[name="twitter:description" i]')
+      .evaluateAll(elements => elements.map(element => element.getAttribute('content') || '').find(value => value.trim()) || '').catch(() => ''))
+      .replace(/\s+/g, ' ').trim().slice(0, 1024);
     const text = (await page.locator('body').innerText({timeout: 3000}).catch(() => '')).slice(0, 64000);
     const screenshot = await page.screenshot({type: 'png', fullPage: false, timeout: 10000});
     if(diskExceeded)throw new Error('Worker disk budget exceeded during probe');
-    const classified = classify(title, text);
+    const classified = classify(title, `${description}\n${text}`);
     classified.classification.reasons.push('仅首页；第三方资源及跨站跳转默认阻止');
-    return {status: 'verified', title, http_status: response.status(), final_url: page.url().slice(0,2048), ...classified,
-      content_hash: createHash('sha256').update(title + '\n' + text).digest('hex'), screenshot: screenshot.length <= 2*1024*1024 ? screenshot.toString('base64') : null};
+    return {status: 'verified', title, description, http_status: response.status(), final_url: page.url().slice(0,2048), ...classified,
+      content_hash: createHash('sha256').update(title + '\n' + description + '\n' + text).digest('hex'), screenshot: screenshot.length <= 2*1024*1024 ? screenshot.toString('base64') : null};
   } finally {clearTimeout(watchdog);clearInterval(diskWatch);if(browser)await browser.close().catch(()=>{});await proxy.close();}
 }

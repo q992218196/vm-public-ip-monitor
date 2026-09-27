@@ -101,6 +101,21 @@ func TestScanCountsDistinctPortsWithoutSYNACK(t *testing.T) {
 	if m.TCPAttempts != 60 || m.MaxPortsPerTarget != 60 || m.UniqueTargets != 1 {
 		t.Fatalf("%+v", m)
 	}
+	if len(m.Ports) != 60 || m.Ports[0] != 1 || m.Ports[59] != 60 || len(m.TargetEndpoints) != 32 || !m.EndpointSamplesTruncated || m.PortSamplesTruncated {
+		t.Fatalf("missing bounded port evidence: %+v", m)
+	}
+}
+func TestPortEvidenceIsBounded(t *testing.T) {
+	now := time.Now()
+	e := New(cfg(), now)
+	for port := uint16(1); port <= 70; port++ {
+		p := frame("203.0.113.1", "1.1.1.1", 40000+port, port, 1, 2, "")
+		e.Process(p, len(p), "a", now)
+	}
+	m := e.Snapshot(now.Add(time.Second)).Metrics[0]
+	if len(m.Ports) != 64 || m.Ports[0] != 1 || m.Ports[63] != 64 || !m.PortSamplesTruncated {
+		t.Fatalf("unexpected port sample: %+v", m)
+	}
 }
 func TestOutOfOrderStreamIsNotInvented(t *testing.T) {
 	now := time.Now()

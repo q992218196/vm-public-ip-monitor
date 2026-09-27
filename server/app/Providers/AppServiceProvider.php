@@ -9,6 +9,9 @@ use App\Models\IpAsset;
 use App\Models\Node;
 use App\Models\Rule;
 use App\Models\Website;
+use Filament\Forms\Components\Select;
+use Filament\Tables\Columns\SelectColumn;
+use Filament\Tables\Filters\SelectFilter;
 use Filament\Tables\Table;
 use Illuminate\Cache\RateLimiting\Limit;
 use Illuminate\Http\Request;
@@ -31,6 +34,9 @@ class AppServiceProvider extends ServiceProvider
      */
     public function boot(): void
     {
+        Select::configureUsing(fn (Select $select) => $select->native(false));
+        SelectFilter::configureUsing(fn (SelectFilter $filter) => $filter->native(false));
+        SelectColumn::configureUsing(fn (SelectColumn $column) => $column->native(false));
         Table::configureUsing(fn (Table $table) => $table
             ->stackedOnMobile()
             ->paginationPageOptions([10, 25, 50, 100, 200, 500])

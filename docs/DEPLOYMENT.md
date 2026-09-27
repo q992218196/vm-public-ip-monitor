@@ -98,7 +98,7 @@ docker compose --profile screenshots up -d worker
 
 工作容器以镜像内的 `pwuser` 运行，UID/GID 随基础镜像而定，因此先查询实际编号再授权数据目录；自定义 `MONITOR_DATA_DIR` 时替换上述路径。若容器启动前就退出，可在 `deploy` 目录运行 `docker compose --profile screenshots run --rm --no-deps worker` 查看直接错误。
 
-默认并发 1，容器内存上限 2 GiB，Chromium 以非 root 用户、沙箱和上游 seccomp 配置运行。使用额外网络隔离限制工作机到管理内网和云元数据地址的访问。
+默认同时探测 2 个任务，可通过 `WORKER_CONCURRENCY=1..4` 调节。每个并发任务启动独立 Chromium；容器内存上限 2 GiB，增加并发前应观察内存和失败率，资源紧张时设为 1。升级已有部署时 `.env` 会保留原来的值，需要手动将 `WORKER_CONCURRENCY` 设为 2 后重建 worker 容器。Chromium 以非 root 用户、沙箱和上游 seccomp 配置运行。使用额外网络隔离限制工作机到管理内网和云元数据地址的访问。
 
 浏览器请求经任务专用代理，只能访问登记的目标 IP、协议、端口及 Host。浏览器不继承管理端凭据。第三方资源、跨站跳转、WebSocket、下载和表单提交默认阻止。某些网站因此只能得到不完整截图；这是明确的限制。
 
@@ -183,6 +183,21 @@ docker compose exec app php artisan monitor:discover 节点UUID 实际IPv4网段
 SMTP 通知：在 `.env` 配置 `MONITOR_ALERT_EMAIL`、`MAIL_MAILER=smtp` 及真实 SMTP 参数，再重建相关容器。首次出现的合并告警会排队发送邮件；重试采用至少一次语义，极端故障时可能重复投递。未配置收件人时不会发送。
 
 升级前备份数据库、`.env` 和 storage。升级服务端后执行迁移，重启队列与调度器。不要在生产使用 `migrate:fresh`。
+
+本次网站描述字段与独立告警详情页的升级示例：
+
+```sh
+cd /home/vm-monitor-src
+git pull
+cd deploy
+# 若需要默认双任务并发，请在现有 .env 中设置 WORKER_CONCURRENCY=2
+docker compose --profile screenshots build app web worker
+docker compose run --rm --no-deps app php artisan migrate --force
+docker compose up -d --no-deps --force-recreate app web queue scheduler
+docker compose --profile screenshots up -d --no-deps --force-recreate worker
+```
+
+迁移命令使用新镜像中的一次性应用容器，此时原有数据库与 Redis 服务应保持运行。如果 `.env` 中仍是 `WORKER_CONCURRENCY=1`，worker 仍会串行探测。端口证据需要把新编译的 Agent 部署到宿主机，并由新告警触发窗口产生；历史证据不会凭空补齐。
 
 Agent 升级重新运行安装器，保留一个 `vm-agent.previous`。回滚时停止服务，将该文件恢复为 `vm-agent`，核对兼容配置后启动。内存硬限额变更也需要重新运行安装器。
 

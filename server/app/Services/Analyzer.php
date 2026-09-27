@@ -113,7 +113,14 @@ class Analyzer
                 'tcp_connection_burst' => '按窗口累积 TCP 发起计数，可能包含正常高并发连接',
                 default => '按当前观察节点估算的出站速率',
             };
-            $this->alert($node, $asset, $rule->kind, $rule->severity, $title, ['rule_id' => $rule->id, 'value' => $value, 'threshold' => $rule->threshold, 'window_seconds' => $rule->window_seconds, 'sample' => $rows->last()?->evidence, 'confidence' => 'behavioral', 'note' => $note], $batch->window_end, $rule->cooldown_seconds, (string) $rule->id);
+            $sample = match ($rule->kind) {
+                'horizontal_scan' => $rows->sortByDesc(fn ($row) => $row->evidence['unique_targets'] ?? 0)->first(),
+                'vertical_scan' => $rows->sortByDesc(fn ($row) => $row->evidence['max_ports_per_target'] ?? 0)->first(),
+                'suspected_bruteforce' => $rows->sortByDesc(fn ($row) => $row->evidence['auth_attempts'] ?? 0)->first(),
+                'single_target_attempts' => $rows->sortByDesc(fn ($row) => $row->evidence['max_attempts_per_target'] ?? 0)->first(),
+                default => $rows->last(),
+            };
+            $this->alert($node, $asset, $rule->kind, $rule->severity, $title, ['rule_id' => $rule->id, 'value' => $value, 'threshold' => $rule->threshold, 'window_seconds' => $rule->window_seconds, 'sample' => $sample?->evidence, 'confidence' => 'behavioral', 'note' => $note], $batch->window_end, $rule->cooldown_seconds, (string) $rule->id);
         }
     }
 

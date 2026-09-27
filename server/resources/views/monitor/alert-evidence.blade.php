@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>告警 #{{ $alert->id }} · VM 流量监控</title>
+    <style>
+        body{margin:0;background:#f4f7fa;color:#173047;font:15px/1.65 system-ui,-apple-system,"Segoe UI",sans-serif}
+        main{max-width:1060px;margin:0 auto;padding:28px 20px 64px}
+        a{color:#0f766e;text-decoration:none}a:hover{text-decoration:underline}
+        .card{background:#fff;border:1px solid #e1e8ed;border-radius:16px;padding:22px;margin-top:18px;box-shadow:0 12px 32px -26px #173047}
+        h1{font-size:1.7rem;line-height:1.3;margin:16px 0}h2{font-size:1.1rem;margin:0 0 14px}
+        dl{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:14px;margin:0}dt{color:#64748b;font-size:.85rem}dd{margin:2px 0 0;font-weight:600;overflow-wrap:anywhere}
+        .badge{display:inline-block;padding:2px 10px;border-radius:999px;background:#fee2e2;color:#b91c1c}.badge.acknowledged{background:#fef3c7;color:#92400e}.badge.resolved{background:#dcfce7;color:#15803d}
+        pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#102334;color:#e5f6f2;padding:18px;border-radius:12px;max-height:65vh;overflow:auto;font-size:13px}
+        ul{padding-left:1.3rem}li{overflow-wrap:anywhere}
+        @media(max-width:600px){main{padding:16px 12px 40px}.card{padding:16px}h1{font-size:1.35rem}}
+    </style>
+</head>
+<body>
+<main>
+    <a href="{{ url('/admin/alerts') }}">← 返回告警中心</a>
+    <h1>{{ $alert->title }}</h1>
+    <span class="badge {{ $alert->status }}">#{{ $alert->id }} · {{ \App\Support\Labels::get($alert->status) }}</span>
+    <section class="card">
+        <h2>基本信息</h2>
+        <dl>
+            <div><dt>公网 IP</dt><dd>{{ $alert->ipAsset?->ip ?? '—' }}</dd></div>
+            <div><dt>观察节点</dt><dd>{{ $alert->node?->name ?? '—' }}</dd></div>
+            <div><dt>级别</dt><dd>{{ \App\Support\Labels::get($alert->severity) }}</dd></div>
+            <div><dt>类型</dt><dd>{{ \App\Support\Labels::get($alert->kind) }}</dd></div>
+            <div><dt>触发次数</dt><dd>{{ $alert->occurrences }}</dd></div>
+            <div><dt>最后触发</dt><dd>{{ $alert->last_seen_at?->timezone(config('monitor.display_timezone'))?->format('Y-m-d H:i:s') }}</dd></div>
+        </dl>
+    </section>
+    @if (! empty($alert->evidence['sample']['ports'] ?? []))
+        <section class="card"><h2>观测到的目标端口（最多 64 项）</h2><p>{{ implode('、', $alert->evidence['sample']['ports']) }}</p>@if ($alert->evidence['sample']['port_samples_truncated'] ?? false)<p>端口样本已截断，完整目标数请参考原始证据。</p>@endif</section>
+    @endif
+    @if (! empty($alert->evidence['sample']['target_endpoints'] ?? []))
+        <section class="card"><h2>目标地址与端口（最多 32 项）</h2><ul>@foreach ($alert->evidence['sample']['target_endpoints'] as $endpoint)<li>{{ $endpoint }}</li>@endforeach</ul>@if ($alert->evidence['sample']['endpoint_samples_truncated'] ?? false)<p>地址样本已截断。</p>@endif</section>
+    @endif
+    <section class="card"><h2>原始证据</h2><pre>{{ json_encode($alert->evidence, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT) }}</pre></section>
+    @if ($alert->resolution)
+        <section class="card"><h2>处理记录</h2><p>{{ $alert->resolution }}</p></section>
+    @endif
+</main>
+</body>
+</html>

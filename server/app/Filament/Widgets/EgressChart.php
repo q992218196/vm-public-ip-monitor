@@ -4,11 +4,16 @@ namespace App\Filament\Widgets;
 
 use App\Models\Node;
 use App\Models\TrafficMetric;
+use Filament\Forms\Components\Select;
+use Filament\Schemas\Schema;
 use Filament\Widgets\ChartWidget;
+use Filament\Widgets\ChartWidget\Concerns\HasFiltersSchema;
 use Illuminate\Support\Facades\Cache;
 
 class EgressChart extends ChartWidget
 {
+    use HasFiltersSchema;
+
     protected ?string $heading = '单个观察节点的出站流量';
 
     protected ?string $description = '最近一小时；各节点分别观察，不相加推断全局 VM 流量。';
@@ -20,14 +25,16 @@ class EgressChart extends ChartWidget
         return 'line';
     }
 
-    protected function getFilters(): ?array
+    public function filtersSchema(Schema $schema): Schema
     {
-        return Node::orderBy('name')->pluck('name', 'id')->all();
+        return $schema->components([
+            Select::make('node')->label('观察节点')->options(fn (): array => Node::orderBy('name')->pluck('name', 'id')->all()),
+        ]);
     }
 
     protected function getData(): array
     {
-        $node = $this->filter ?: Node::orderBy('name')->value('id');
+        $node = $this->filters['node'] ?? Node::orderBy('name')->value('id');
         return Cache::remember('monitor:egress:'.($node ?? 'none'), 20, function () use ($node): array {
             $rows = TrafficMetric::where('node_id', $node)->where('window_start', '>=', now()->subHour())->selectRaw('window_start, window_end, SUM(bytes_out) AS total_bytes')->groupBy('window_start', 'window_end')->orderBy('window_end')->get();
 

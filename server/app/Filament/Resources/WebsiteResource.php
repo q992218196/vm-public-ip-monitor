@@ -41,11 +41,18 @@ class WebsiteResource extends MonitorResource
     public static function table(Table $t): Table
     {
         return $t->defaultSort('last_seen_at', 'desc')->columns([
-            TextColumn::make('ipAsset.ip')->label('公网 IP')->searchable()->copyable(), TextColumn::make('host')->label('域名线索')->searchable()->placeholder('仅 IP'), TextColumn::make('port')->label('端口')->sortable(), TextColumn::make('scheme')->label('协议'), TextColumn::make('status')->formatStateUsing(fn ($state) => Labels::get($state))->label('验证状态')->badge(), TextColumn::make('title')->label('标题')->searchable()->limit(30), TextColumn::make('category')->label('自动分类')->badge()->color(fn (?string $state) => in_array($state, ['疑似博彩', '疑似成人内容', '疑似诈骗引流']) ? 'danger' : 'gray'), TextColumn::make('manual_category')->label('人工分类'), TextColumn::make('last_probed_at')->label('最近验证')->since(),
+            TextColumn::make('ipAsset.ip')->label('公网 IP')->searchable()->copyable(),
+            TextColumn::make('host')->label('域名线索')->searchable()->placeholder('仅 IP')->url(fn (Website $record): ?string => $record->publicUrl())->openUrlInNewTab()->tooltip('在新标签页按域名和端口访问；浏览器 DNS 可能指向其他 IP'),
+            TextColumn::make('port')->label('端口'), TextColumn::make('scheme')->label('协议'),
+            TextColumn::make('source')->label('线索来源')->formatStateUsing(fn ($state) => Labels::get($state))->toggleable(isToggledHiddenByDefault: true),
+            TextColumn::make('status')->formatStateUsing(fn ($state) => Labels::get($state))->label('验证状态')->badge(),
+            TextColumn::make('title')->label('标题')->searchable()->limit(30),
+            TextColumn::make('description')->label('网站描述')->limit(90)->toggleable(isToggledHiddenByDefault: true),
+            TextColumn::make('category')->label('自动分类')->badge()->color(fn (?string $state) => in_array($state, ['疑似博彩', '疑似成人内容', '疑似诈骗引流']) ? 'danger' : 'gray'), TextColumn::make('manual_category')->label('人工分类'), TextColumn::make('last_probed_at')->label('最近验证')->since(),
         ])->filters([
             Filter::make('needs_review')->label('待人工复核')->query(fn (Builder $query): Builder => $query->whereIn('category', ['疑似博彩', '疑似成人内容', '疑似诈骗引流'])->whereNull('manual_category')),
             SelectFilter::make('status')->label('验证状态')->options(['observed' => '待验证线索', 'candidate' => '探测候选', 'verified' => '已验证', 'failed' => '失败']),
-        ])->headerActions([Action::make('add')->label('添加已知 IP 网站')->visible(fn () => auth()->user()?->role === 'admin')->schema([
+        ])->headerActions([Action::make('export')->label('导出网站')->url(route('exports', 'websites')), Action::make('add')->label('添加已知 IP 网站')->visible(fn () => auth()->user()?->role === 'admin')->schema([
             Select::make('ip_asset_id')->label('已发现的公网 IP')->options(fn () => IpAsset::limit(1000)->pluck('ip', 'id'))->searchable()->getSearchResultsUsing(fn (string $search) => IpAsset::where('ip', 'like', '%'.$search.'%')->limit(50)->pluck('ip', 'id'))->required(), TextInput::make('port')->label('端口')->numeric()->minValue(1)->maxValue(65535)->required(), Select::make('scheme')->options(['http' => 'HTTP', 'https' => 'HTTPS'])->required(), TextInput::make('host')->label('域名（可留空）')->maxLength(253)->regex('/^[a-zA-Z0-9.\-]*$/'),
         ])->action(function (array $data) {
             abort_unless(auth()->user()?->role === 'admin', 403);

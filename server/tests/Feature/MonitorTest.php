@@ -243,4 +243,56 @@ class MonitorTest extends TestCase
         $component->callAction('create', data: ['name' => 'Invalid', 'enabled' => true, 'cidrs' => ['bad-cidr'], 'settings' => ['interfaces' => ['eth0'], 'data_dir' => '/home/vm-monitor']])->assertHasActionErrors();
         $this->assertDatabaseCount('nodes', 1);
     }
+
+    public function test_alert_list_excludes_evidence_and_detail_loads_only_requested_alert(): void
+    {
+        $node = $this->node();
+        $payload = $this->payload();
+        $payload['metrics'][0]['ports'] = [22, 443];
+        $payload['metrics'][0]['target_endpoints'] = ['1.1.1.1:22', '1.1.1.1:443'];
+        $this->seed(MonitorSeeder::class);
+        $this->upload($node, $payload)->assertOk();
+        ProcessBatch::dispatchSync(Batch::first()->id);
+        $alert = Alert::where('kind', 'horizontal_scan')->firstOrFail();
+        $this->assertSame([22, 443], $alert->evidence['sample']['ports']);
+
+        $admin = User::factory()->create();
+        $admin->role = 'admin';
+        $admin->save();
+        $this->actingAs($admin);
+        Filament::setCurrentPanel(Filament::getPanel('admin'));
+        $listRecord = Livewire::test(ManageAlerts::class)->instance()->getTableRecords()->getCollection()->first();
+        $this->assertArrayNotHasKey('evidence', $listRecord->getAttributes());
+        $this->get(route('alerts.evidence', $alert))->assertOk()->assertSee('1.1.1.1:22')->assertSee('443');
+        $export = $this->get('/exports/alerts')->assertOk()->streamedContent();
+        $this->assertStringNotContainsString('target_endpoints', $export);
+    }
+
+    public function test_website_description_export_and_domain_link(): void
+    {
+        config(['monitor.worker_token' => $this->token]);
+        $node = $this->node();
+        $this->upload($node, $this->payload())->assertOk();
+        ProcessBatch::dispatchSync(Batch::first()->id);
+        $site = Website::firstOrFail();
+        $this->assertSame('https://test.example:18443/', $site->publicUrl());
+        $site->update(['host' => 'internal.local']);
+        $this->assertNull($site->publicUrl());
+        $site->update(['host' => 'test.example']);
+        app(ProbeQueue::class)->enqueue($site);
+        $claim = $this->withToken($this->token)->postJson('/api/v1/worker/claim')->assertOk()->json('task');
+        $this->withToken($this->token)->postJson('/api/v1/worker/tasks/'.$claim['id'].'/complete', [
+            'lease_token' => $claim['lease_token'], 'status' => 'verified', 'title' => '测试网站',
+            'description' => '这是一段网站描述', 'http_status' => 200,
+        ])->assertOk();
+        $this->assertSame('这是一段网站描述', $site->fresh()->description);
+
+        $admin = User::factory()->create();
+        $admin->role = 'admin';
+        $admin->save();
+        $this->actingAs($admin);
+        $this->get('/admin/websites')->assertOk()->assertSee('test.example');
+        $export = $this->get('/exports/websites')->assertOk()->streamedContent();
+        $this->assertStringContainsString('这是一段网站描述', $export);
+    }
 }

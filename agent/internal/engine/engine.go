@@ -255,6 +255,25 @@ func (e *Engine) Snapshot(now time.Time) wire.Batch {
 			ts = ts[:16]
 		}
 		s.m.Targets = ts
+		portSet := map[uint16]bool{}
+		endpoints := make([]string, 0, len(s.edges))
+		for endpoint := range s.edges {
+			portSet[endpoint.Port()] = true
+			endpoints = append(endpoints, endpoint.String())
+		}
+		ports := make([]int, 0, len(portSet))
+		for port := range portSet {
+			ports = append(ports, int(port))
+		}
+		sort.Ints(ports)
+		s.m.PortSamplesTruncated = len(ports) > 64
+		s.m.EndpointSamplesTruncated = len(endpoints) > 32
+		s.m.Ports = make([]uint16, 0, min(len(ports), 64))
+		for _, port := range ports[:min(len(ports), 64)] {
+			s.m.Ports = append(s.m.Ports, uint16(port))
+		}
+		sort.Strings(endpoints)
+		s.m.TargetEndpoints = endpoints[:min(len(endpoints), 32)]
 		b.Metrics = append(b.Metrics, s.m)
 	}
 	for _, s := range e.sites {

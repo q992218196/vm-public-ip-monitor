@@ -1,18 +1,22 @@
 package wire
 
 type Metric struct {
-	IP                   string   `json:"ip"`
-	BytesOut             uint64   `json:"bytes_out"`
-	BytesIn              uint64   `json:"bytes_in"`
-	PacketsOut           uint64   `json:"packets_out"`
-	PacketsIn            uint64   `json:"packets_in"`
-	TCPAttempts          uint64   `json:"tcp_attempts"`
-	UniqueTargets        int      `json:"unique_targets"`
-	MaxPortsPerTarget    int      `json:"max_ports_per_target"`
-	MaxAttemptsPerTarget int      `json:"max_attempts_per_target"`
-	AuthAttempts         int      `json:"auth_attempts"`
-	Targets              []string `json:"targets"`
-	CardinalityCapped    bool     `json:"cardinality_capped"`
+	IP                       string   `json:"ip"`
+	BytesOut                 uint64   `json:"bytes_out"`
+	BytesIn                  uint64   `json:"bytes_in"`
+	PacketsOut               uint64   `json:"packets_out"`
+	PacketsIn                uint64   `json:"packets_in"`
+	TCPAttempts              uint64   `json:"tcp_attempts"`
+	UniqueTargets            int      `json:"unique_targets"`
+	MaxPortsPerTarget        int      `json:"max_ports_per_target"`
+	MaxAttemptsPerTarget     int      `json:"max_attempts_per_target"`
+	AuthAttempts             int      `json:"auth_attempts"`
+	Targets                  []string `json:"targets"`
+	Ports                    []uint16 `json:"ports"`
+	TargetEndpoints          []string `json:"target_endpoints"`
+	PortSamplesTruncated     bool     `json:"port_samples_truncated"`
+	EndpointSamplesTruncated bool     `json:"endpoint_samples_truncated"`
+	CardinalityCapped        bool     `json:"cardinality_capped"`
 }
 type Site struct {
 	IP     string `json:"ip"`

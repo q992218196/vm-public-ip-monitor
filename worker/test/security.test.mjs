@@ -24,4 +24,5 @@ test('review hints retain uncertainty and do not flag ordinary pages',()=>{
   assert.ok(flagged.classification.confidence < 0.8);
   assert.equal(classify('企业介绍', '联系我们').classification.review_required, false);
   assert.equal(classify('新闻', '普通资讯').classification.review_required, false);
+  assert.equal(classify('企业介绍', '网站描述：在线博彩平台').category, '疑似博彩');
 });

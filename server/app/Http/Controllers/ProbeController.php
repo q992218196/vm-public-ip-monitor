@@ -27,7 +27,7 @@ class ProbeController extends Controller
     public function complete(Request $r, ProbeTask $task, Screenshots $screenshots)
     {
         $v = $r->validate(['lease_token' => 'required|string|size:64', 'status' => 'required|in:verified,failed',
-            'title' => 'nullable|string|max:255', 'http_status' => 'nullable|integer|min:100|max:599', 'final_url' => 'nullable|string|max:2048',
+            'title' => 'nullable|string|max:255', 'description' => 'nullable|string|max:1024', 'http_status' => 'nullable|integer|min:100|max:599', 'final_url' => 'nullable|string|max:2048',
             'category' => 'nullable|string|max:64', 'classification' => 'nullable|array', 'classification.confidence' => 'nullable|numeric|min:0|max:1',
             'classification.reasons' => 'nullable|array|max:20', 'classification.reasons.*' => 'string|max:255',
             'classification.method' => 'nullable|string|max:64', 'classification.review_required' => 'nullable|boolean', 'content_hash' => 'nullable|string|size:64',
@@ -43,7 +43,7 @@ class ProbeController extends Controller
             }
             $data = ['status' => $v['status'], 'last_error' => $v['error'] ?? null, 'last_probed_at' => now()];
             if ($v['status'] === 'verified') {
-                $data += ['title' => $v['title'] ?? null, 'http_status' => $v['http_status'] ?? null, 'final_url' => $v['final_url'] ?? null, 'category' => $v['category'] ?? 'unknown', 'classification' => $v['classification'] ?? null, 'content_hash' => $v['content_hash'] ?? null, 'screenshot_path' => $path];
+                $data += ['title' => $v['title'] ?? null, 'description' => $v['description'] ?? null, 'http_status' => $v['http_status'] ?? null, 'final_url' => $v['final_url'] ?? null, 'category' => $v['category'] ?? 'unknown', 'classification' => $v['classification'] ?? null, 'content_hash' => $v['content_hash'] ?? null, 'screenshot_path' => $path];
             }
             $site->update($data);
             $task->update(['status' => $v['status'] === 'verified' ? 'complete' : 'failed', 'last_error' => $v['error'] ?? null, 'lease_token' => null, 'leased_until' => null]);

@@ -7,7 +7,7 @@ import {cleanTemp} from './temp.mjs';
 const base = new URL(process.env.MONITOR_URL || 'https://monitor.example.com');
 const token = process.env.MONITOR_WORKER_TOKEN || '';
 const dataDir = process.env.WORKER_DATA_DIR || '/home/vm-monitor-worker';
-const concurrency = Number(process.env.WORKER_CONCURRENCY || 1);
+const concurrency = Number(process.env.WORKER_CONCURRENCY || 2);
 const diskLimitMiB=Number(process.env.WORKER_DISK_LIMIT_MIB||512);
 if (base.protocol !== 'https:' && !(process.env.ALLOW_INTERNAL_HTTP === '1' && base.protocol === 'http:')) throw new Error('HTTPS required; explicit internal Docker HTTP opt-in available');
 if (token.length < 32 || !Number.isInteger(concurrency) || concurrency < 1 || concurrency > 4) throw new Error('Configure worker token and concurrency 1..4');
