@@ -110,6 +110,20 @@ jobs:
           php tools/import-monitor-users.php
           php -r '$db=new PDO("mysql:host=127.0.0.1;dbname=buildadmin","buildadmin","test-only-password");$users=$db->query("SELECT email,password FROM ba_admin WHERE status=\"enable\" ORDER BY email")->fetchAll(PDO::FETCH_ASSOC);if(count($users)!==2 || !password_verify("test-admin-password-2026",$users[0]["password"]))exit(1);'
         working-directory: admin
+      - run: |
+          set -euo pipefail
+          php -r '$db=new PDO("pgsql:host=127.0.0.1;dbname=monitor_test","monitor","test-only-password");$db->exec("CREATE TABLE nodes (id uuid primary key,name text,enabled boolean,cidrs jsonb,last_seen_at timestamp,health jsonb)");'
+          sed -i "s/'admin_login_captcha'   => true/'admin_login_captcha'   => false/" config/buildadmin.php
+          php -S 127.0.0.1:8099 -t public public/index.php >/tmp/buildadmin-http.log 2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+          sleep 2
+          curl -fsS -H 'server: true' -d 'username=admin@example.test&password=test-admin-password-2026' http://127.0.0.1:8099/admin/Index/login >/tmp/buildadmin-login.json
+          token=$(python3 -c 'import json; print(json.load(open("/tmp/buildadmin-login.json"))["data"]["userInfo"]["token"])')
+          curl -fsS -H 'server: true' -H "batoken: $token" 'http://127.0.0.1:8099/admin/Monitor/index?resource=nodes' >/tmp/buildadmin-nodes.json
+          curl -fsS -H 'server: true' -H "batoken: $token" 'http://127.0.0.1:8099/admin/Monitor/count?resource=nodes' >/tmp/buildadmin-count.json
+          python3 -c 'import json; nodes=json.load(open("/tmp/buildadmin-nodes.json")); count=json.load(open("/tmp/buildadmin-count.json")); assert nodes["code"]==1 and nodes["data"]["list"]==[] and count["data"]["total"]==0'
+        working-directory: admin
       - run: npm ci --no-audit --no-fund && npm run typecheck && npm run build
         working-directory: admin/web
   containers:
