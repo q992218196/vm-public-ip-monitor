@@ -2,13 +2,20 @@
 
 use App\Http\Controllers\ExportController;
 use App\Http\Controllers\MonitorActionController;
-use App\Models\Website;
 use App\Models\Alert;
+use App\Models\Node;
 use App\Models\ProtocolObservation;
+use App\Models\Website;
 use Illuminate\Support\Facades\Route;
 
 Route::get('/', fn () => redirect('/admin'));
 Route::middleware('auth')->group(function () {
+    Route::get('/nodes/{node}/evidence', function (Node $node) {
+        abort_unless(in_array(auth()->user()->role, ['admin', 'viewer'], true), 403);
+
+        return response()->json(['name' => $node->name, 'data' => $node->toArray()])
+            ->header('Cache-Control', 'private, no-store');
+    })->name('nodes.evidence');
     Route::post('/alerts/bulk-handle', [MonitorActionController::class, 'bulkAlerts'])->name('alerts.bulk');
     Route::get('/alerts/{alert}/evidence', function (Alert $alert) {
         abort_unless(in_array(auth()->user()->role, ['admin', 'viewer'], true), 403);

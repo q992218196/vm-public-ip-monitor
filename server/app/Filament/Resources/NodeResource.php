@@ -14,7 +14,9 @@ use Filament\Forms\Components\Toggle;
 use Filament\Schemas\Schema;
 use Filament\Tables\Columns\IconColumn;
 use Filament\Tables\Columns\TextColumn;
+use Filament\Tables\Enums\ColumnManagerLayout;
 use Filament\Tables\Table;
+use Illuminate\Support\Js;
 
 class NodeResource extends MonitorResource
 {
@@ -50,7 +52,7 @@ class NodeResource extends MonitorResource
             TextColumn::make('name')->label('节点')->searchable(), TextColumn::make('id')->label('节点 ID')->copyable()->toggleable(), IconColumn::make('enabled')->label('启用')->boolean(),
             TextColumn::make('cidrs')->label('CIDR')->listWithLineBreaks()->limitList(3), TextColumn::make('last_seen_at')->label('最近上报')->since()->placeholder('尚未接入'),
             TextColumn::make('health.rss_bytes')->label('进程内存')->formatStateUsing(fn ($state) => round($state / 1048576).' MiB'), TextColumn::make('health.kernel_drops')->label('窗口丢包')->numeric(),
-        ])->recordActions([static::detailAction(), EditAction::make(), Action::make('config')->label('下载接入配置')->visible(fn () => auth()->user()?->role === 'admin')->requiresConfirmation()->modalDescription('生成新凭据并撤销旧凭据。下载文件包含密钥，请以 0600 权限保存。')->action(function (Node $record) {
+        ])->columnManagerLayout(ColumnManagerLayout::Modal)->recordActions([Action::make('detail')->label('详情')->alpineClickHandler(fn (Node $record): string => 'window.monitorShowEvidence('.Js::from(route('nodes.evidence', $record)).')'), EditAction::make(), Action::make('config')->label('下载接入配置')->visible(fn () => auth()->user()?->role === 'admin')->requiresConfirmation()->modalDescription('生成新凭据并撤销旧凭据。下载文件包含密钥，请以 0600 权限保存。')->action(function (Node $record) {
             abort_unless(auth()->user()?->role === 'admin', 403);
             $token = bin2hex(random_bytes(32));
             $record->update(['token_hash' => hash('sha256', $token)]);

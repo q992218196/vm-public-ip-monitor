@@ -26,3 +26,12 @@ test('review hints retain uncertainty and do not flag ordinary pages',()=>{
   assert.equal(classify('新闻', '普通资讯').classification.review_required, false);
   assert.equal(classify('企业介绍', '网站描述：在线博彩平台').category, '疑似博彩');
 });
+test('payment and loan pages are review hints, not illegality findings',()=>{
+  const payment=classify('收款服务', '网站描述：提供在线支付服务和支付网关');
+  assert.equal(payment.category, '支付平台线索');
+  assert.equal(payment.classification.review_required, true);
+  const loan=classify('借款申请', '网站描述：在线贷款平台');
+  assert.equal(loan.category, '贷款平台线索');
+  assert.equal(loan.classification.review_required, true);
+  assert.equal(classify('财经新闻', '关于支付和贷款的政策报道').classification.review_required, false);
+});

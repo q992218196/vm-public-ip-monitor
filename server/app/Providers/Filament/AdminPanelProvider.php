@@ -29,6 +29,7 @@ class AdminPanelProvider extends PanelProvider
             ->id('admin')
             ->path('admin')
             ->login()
+            ->profile(isSimple: false)
             ->brandName('VM 流量监控')
             ->spa()
             ->maxContentWidth(Width::Full)

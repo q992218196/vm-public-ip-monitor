@@ -48,9 +48,9 @@ class WebsiteResource extends MonitorResource
             TextColumn::make('status')->formatStateUsing(fn ($state) => Labels::get($state))->label('验证状态')->badge(),
             TextColumn::make('title')->label('标题')->searchable()->limit(30),
             TextColumn::make('description')->label('网站描述')->limit(90)->toggleable(isToggledHiddenByDefault: true),
-            TextColumn::make('category')->label('自动分类')->badge()->color(fn (?string $state) => in_array($state, ['疑似博彩', '疑似成人内容', '疑似诈骗引流']) ? 'danger' : 'gray'), TextColumn::make('manual_category')->label('人工分类'), TextColumn::make('last_probed_at')->label('最近验证')->since(),
+            TextColumn::make('category')->label('自动分类')->badge()->color(fn (?string $state) => in_array($state, ['疑似博彩', '疑似成人内容', '疑似诈骗引流']) ? 'danger' : (in_array($state, ['支付平台线索', '贷款平台线索']) ? 'warning' : 'gray')), TextColumn::make('manual_category')->label('人工分类'), TextColumn::make('last_probed_at')->label('最近验证')->since(),
         ])->filters([
-            Filter::make('needs_review')->label('待人工复核')->query(fn (Builder $query): Builder => $query->whereIn('category', ['疑似博彩', '疑似成人内容', '疑似诈骗引流'])->whereNull('manual_category')),
+            Filter::make('needs_review')->label('待人工复核')->query(fn (Builder $query): Builder => $query->whereIn('category', ['疑似博彩', '疑似成人内容', '疑似诈骗引流', '支付平台线索', '贷款平台线索'])->whereNull('manual_category')),
             SelectFilter::make('status')->label('验证状态')->options(['observed' => '待验证线索', 'candidate' => '探测候选', 'verified' => '已验证', 'failed' => '失败']),
         ])->headerActions([Action::make('export')->label('导出网站')->url(route('exports', 'websites')), Action::make('add')->label('添加已知 IP 网站')->visible(fn () => auth()->user()?->role === 'admin')->schema([
             Select::make('ip_asset_id')->label('已发现的公网 IP')->options(fn () => IpAsset::limit(1000)->pluck('ip', 'id'))->searchable()->getSearchResultsUsing(fn (string $search) => IpAsset::where('ip', 'like', '%'.$search.'%')->limit(50)->pluck('ip', 'id'))->required(), TextInput::make('port')->label('端口')->numeric()->minValue(1)->maxValue(65535)->required(), Select::make('scheme')->options(['http' => 'HTTP', 'https' => 'HTTPS'])->required(), TextInput::make('host')->label('域名（可留空）')->maxLength(253)->regex('/^[a-zA-Z0-9.\-]*$/'),

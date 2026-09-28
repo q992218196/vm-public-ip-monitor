@@ -3,6 +3,8 @@ const reviewRules = [
   ['疑似博彩', ['在线博彩', '真人赌场', '体育投注', '百家乐', '老虎机', 'online casino', 'sports betting']],
   ['疑似成人内容', ['成人视频', '色情视频', '成人直播', 'porn video', 'adult video', 'live sex']],
   ['疑似诈骗引流', ['刷单返佣', '稳赚不赔', '保本高收益', '先交保证金', 'guaranteed returns']],
+  ['支付平台线索', ['支付平台', '在线支付服务', '第三方支付', '支付网关', '电子钱包', 'payment gateway', 'payment platform', 'digital wallet']],
+  ['贷款平台线索', ['贷款平台', '在线贷款', '网络借贷', '借款申请', '贷款申请', 'loan application', 'online lending', 'personal loans']],
 ];
 const siteRules = [
   ['管理后台', ['管理后台', '管理员登录', 'admin login', 'dashboard login', 'phpmyadmin']],

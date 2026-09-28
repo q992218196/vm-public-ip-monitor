@@ -40,9 +40,22 @@
     box-shadow: 0 10px 28px -22px rgba(20, 48, 70, .36);
 }
 
-.fi-ta-ctn {
-    overflow: hidden;
+.fi-ta-ctn,
+.fi-ta-ctn:not(.fi-ta-ctn-with-header) {
+    overflow: visible;
 }
+
+.monitor-progress{position:fixed;inset:0 0 auto;z-index:9999;height:3px;pointer-events:none;opacity:0;background:linear-gradient(90deg,#14b8a6 0%,#0f766e 50%,#14b8a6 100%);background-size:200% 100%;transition:opacity .12s}
+.monitor-progress.is-active{opacity:1;animation:monitor-progress 1.1s linear infinite}
+@keyframes monitor-progress{to{background-position:-200% 0}}
+.monitor-evidence-dialog{width:min(90vw,850px);max-height:85vh;margin:auto;padding:0;border:1px solid #cbd5e1;border-radius:1rem;background:#fff;color:#173047;box-shadow:0 24px 80px #0f172a55}
+.monitor-evidence-dialog::backdrop{background:#0f172a88}
+.monitor-evidence-header{display:flex;align-items:center;justify-content:space-between;gap:1rem;padding:1rem 1.25rem;border-bottom:1px solid #e2e8f0}
+.monitor-evidence-header h2{margin:0;font-size:1.1rem;font-weight:700}
+.monitor-evidence-header button{padding:.4rem .75rem;border-radius:.5rem;background:#0f766e;color:#fff;cursor:pointer}
+.monitor-evidence-status{margin:0;padding:1rem 1.25rem;color:#64748b}
+.monitor-evidence-content{max-height:65vh;margin:0;padding:0 1.25rem 1.25rem;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;font-size:.8rem}
+.dark .monitor-evidence-dialog{border-color:#475569;background:#1f2937;color:#e2e8f0}
 
 .fi-ta-row:hover {
     background: var(--monitor-tint);

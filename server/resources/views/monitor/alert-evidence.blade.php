@@ -33,6 +33,17 @@
             <div><dt>最后触发</dt><dd>{{ $alert->last_seen_at?->timezone(config('monitor.display_timezone'))?->format('Y-m-d H:i:s') }}</dd></div>
         </dl>
     </section>
+    @if ($alert->kind === 'capture_degraded')
+        <section class="card"><h2>采集覆盖说明</h2>
+            <p>这表示 Agent 在该采集窗口内出现丢包或丢弃状态，窗口数据可能不完整；它不是 VM 发起异常流量的证据。</p>
+            <dl>
+                <div><dt>内核丢包</dt><dd>{{ $alert->evidence['kernel_drops'] ?? 0 }}</dd></div>
+                <div><dt>内存状态丢弃</dt><dd>{{ $alert->evidence['state_dropped'] ?? 0 }}</dd></div>
+                <div><dt>本地队列丢弃</dt><dd>{{ $alert->evidence['spool_dropped'] ?? 0 }}</dd></div>
+            </dl>
+            <p>请检查节点采集接口、Agent 资源上限和磁盘空间。计数恢复为零后，后续窗口才可视为恢复覆盖。</p>
+        </section>
+    @endif
     @if (! empty($alert->evidence['sample']['ports'] ?? []))
         <section class="card"><h2>观测到的目标端口（最多 64 项）</h2><p>{{ implode('、', $alert->evidence['sample']['ports']) }}</p>@if ($alert->evidence['sample']['port_samples_truncated'] ?? false)<p>端口样本已截断，完整目标数请参考原始证据。</p>@endif</section>
     @endif

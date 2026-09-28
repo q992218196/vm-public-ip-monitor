@@ -239,6 +239,53 @@ class MonitorTest extends TestCase
         $this->assertDatabaseCount('nodes', 1);
     }
 
+    public function test_node_evidence_is_loaded_independently_of_the_table(): void
+    {
+        $node = $this->node();
+        $node->update(['health' => ['kernel_drops' => 2]]);
+        $this->getJson(route('nodes.evidence', $node))->assertUnauthorized();
+
+        $viewer = User::factory()->create();
+        $viewer->role = 'viewer';
+        $viewer->save();
+        $this->actingAs($viewer)
+            ->getJson(route('nodes.evidence', $node))
+            ->assertOk()
+            ->assertJsonPath('data.health.kernel_drops', 2)
+            ->assertJsonMissingPath('data.token_hash');
+    }
+
+    public function test_admin_can_open_profile_to_change_email_and_password(): void
+    {
+        $admin = User::factory()->create();
+        $admin->role = 'admin';
+        $admin->save();
+
+        $this->actingAs($admin);
+        $this->get(Filament::getPanel('admin')->getProfileUrl())->assertOk();
+    }
+
+    public function test_resolving_new_website_alert_does_not_reopen_it_on_next_observation(): void
+    {
+        $node = $this->node();
+        $payload = $this->payload();
+        $payload['sites'][0]['host'] = 'account.skrill.com';
+        $this->upload($node, $payload)->assertOk();
+        ProcessBatch::dispatchSync(Batch::firstOrFail()->id);
+        $alert = Alert::where('kind', 'new_website')->firstOrFail();
+        $alert->update(['status' => 'resolved']);
+
+        $this->travel(1)->days();
+        $payload['batch_id'] = Str::uuid()->toString();
+        $payload['window_start'] = now()->subSeconds(30)->toIso8601String();
+        $payload['window_end'] = now()->toIso8601String();
+        $this->upload($node, $payload)->assertOk();
+        ProcessBatch::dispatchSync(Batch::where('batch_id', $payload['batch_id'])->firstOrFail()->id);
+        $this->assertDatabaseCount('websites', 1);
+        $this->assertSame(1, Alert::where('kind', 'new_website')->count());
+        $this->assertSame('resolved', $alert->fresh()->status);
+    }
+
     public function test_alert_list_excludes_evidence_and_detail_loads_only_requested_alert(): void
     {
         $node = $this->node();

@@ -44,7 +44,7 @@ class ManageWebsites extends Page
             ->when($filters['ip'] ?? null, fn (Builder $query, string $ip): Builder => $query->whereHas('ipAsset', fn (Builder $asset): Builder => $asset->where('ip', $ip)))
             ->when($filters['host'] ?? null, fn (Builder $query, string $host): Builder => $query->where('host', 'like', strtolower($host).'%'))
             ->when($filters['status'] ?? null, fn (Builder $query, string $status): Builder => $query->where('status', $status))
-            ->when($filters['review'] ?? null, fn (Builder $query): Builder => $query->whereIn('category', ['疑似博彩', '疑似成人内容', '疑似诈骗引流'])->whereNull('manual_category'))
+            ->when($filters['review'] ?? null, fn (Builder $query): Builder => $query->whereIn('category', ['疑似博彩', '疑似成人内容', '疑似诈骗引流', '支付平台线索', '贷款平台线索'])->whereNull('manual_category'))
             ->orderByDesc('last_seen_at')->orderByDesc('id');
 
         return [
