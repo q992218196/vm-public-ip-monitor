@@ -106,7 +106,7 @@ jobs:
       - run: php think migrate:run
         working-directory: admin
       - run: |
-          php -r '$db=new PDO("pgsql:host=127.0.0.1;dbname=monitor_test","monitor","test-only-password");$db->exec("CREATE TABLE users (id bigint primary key,name varchar(255),email varchar(255),password varchar(255),role varchar(32))");$p=password_hash("test-admin-password-2026",PASSWORD_BCRYPT);$s=$db->prepare("INSERT INTO users VALUES (1,?,?,?,?)");$s->execute(["Admin","admin@example.test",$p,"admin"]);$s->execute(["Viewer","viewer@example.test",$p,"viewer"]);'
+          php -r '$db=new PDO("pgsql:host=127.0.0.1;dbname=monitor_test","monitor","test-only-password");$db->exec("CREATE TABLE users (id bigint primary key,name varchar(255),email varchar(255),password varchar(255),role varchar(32))");$p=password_hash("test-admin-password-2026",PASSWORD_BCRYPT);$s=$db->prepare("INSERT INTO users VALUES (?,?,?,?,?)");$s->execute([1,"Admin","admin@example.test",$p,"admin"]);$s->execute([2,"Viewer","viewer@example.test",$p,"viewer"]);'
           php tools/import-monitor-users.php
           php -r '$db=new PDO("mysql:host=127.0.0.1;dbname=buildadmin","buildadmin","test-only-password");$users=$db->query("SELECT email,password FROM ba_admin WHERE status=\"enable\" ORDER BY email")->fetchAll(PDO::FETCH_ASSOC);if(count($users)!==2 || !password_verify("test-admin-password-2026",$users[0]["password"]))exit(1);'
         working-directory: admin

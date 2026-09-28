@@ -35,9 +35,7 @@ class AdminInfo extends Backend
 
     public function edit(): void
     {
-        $pk  = $this->model->getPk();
-        $id  = $this->request->param($pk);
-        $row = $this->model->find($id);
+        $row = $this->model->find($this->auth->id);
         if (!$row) {
             $this->error(__('Record not found'));
         }
