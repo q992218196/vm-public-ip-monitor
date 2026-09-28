@@ -27,7 +27,9 @@ Route::middleware('auth')->group(function () {
             'window_start' => $observation->window_start?->toIso8601String(),
             'window_end' => $observation->window_end?->toIso8601String(),
             'evidence' => $observation->evidence,
-            'interpretation' => '双向握手报文结构匹配；不证明认证成功、隧道建立或用途违规。',
+            'interpretation' => in_array($observation->protocol, ['wireguard', 'openvpn', 'ikev2'], true)
+                ? '双向握手报文结构匹配；不证明认证成功、隧道建立或用途违规。'
+                : '多对端双向连接与多目标出站相关的疑似样态；不能确认具体代理协议或用途。',
         ], 200, [
             'Cache-Control' => 'private, no-store',
             'Content-Disposition' => 'attachment; filename="protocol-observation-'.$observation->id.'.json"',

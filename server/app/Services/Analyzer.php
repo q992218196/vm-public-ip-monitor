@@ -84,6 +84,43 @@ class Analyzer
                 $this->alert($node, $asset, 'vpn_protocol', $vpnRule->severity, '观察到 '.$label.' 双向握手特征', $evidence, $at, $vpnRule->cooldown_seconds, $salt);
             }
         }
+        $proxyRule = $this->rules->where('kind', 'proxy_suspect')->sortByDesc(fn ($rule) => $rule->node_id !== null)->first();
+        foreach ($p['proxies'] ?? [] as $observation) {
+            $asset = $this->observe($observation['ip'], $node, $at);
+            $candidates = match ($observation['transport']) {
+                'opaque_tcp' => ['Shadowsocks (SS)', 'ShadowsocksR (SSR)', 'VMess'],
+                'opaque_udp' => ['Shadowsocks (SS)', 'ShadowsocksR (SSR)', 'Hysteria（混淆）'],
+                'tls' => ['Trojan/Trojan-Go', 'VLESS', 'AnyTLS', 'VMess', 'Shadowsocks (SS)/SSR（插件）'],
+                'quic' => ['Hysteria', '其他 QUIC 应用'],
+            };
+            $recordEvidence = $observation + [
+                'candidate_protocols' => $candidates,
+                'method' => '同端口多对端双向加密传输外观与同窗口多目标出站行为相关',
+                'confidence' => 'behavioral_suspect',
+                'note' => '只能说明流量样态可疑；候选协议不能区分或确认，出站目标也可能属于其他业务。普通网站、游戏或其他加密服务可能出现相同特征。',
+            ];
+            $stored = ProtocolObservation::create([
+                'batch_id' => $batch->id,
+                'node_id' => $node->id,
+                'ip_asset_id' => $asset->id,
+                'protocol' => $observation['transport'],
+                'peer_ip' => $observation['peer_samples'][0],
+                'local_port' => $observation['local_port'],
+                'peer_port' => 0,
+                'window_start' => $batch->window_start,
+                'window_end' => $at,
+                'evidence' => $recordEvidence,
+            ]);
+            if (! $proxyRule || $observation['peer_count'] < max(3, $proxyRule->threshold) || $observation['egress_target_count'] < 5) {
+                continue;
+            }
+            if ($this->exclusions->contains(fn ($exclusion) => Ip::contains($exclusion->cidr, $asset->ip))) {
+                continue;
+            }
+            $evidence = $recordEvidence + ['observation_id' => $stored->id];
+            $salt = implode('|', [$observation['local_port'], $observation['transport']]);
+            $this->alert($node, $asset, 'proxy_suspect', $proxyRule->severity, '疑似加密代理样态（未确认协议）', $evidence, $at, $proxyRule->cooldown_seconds, $salt);
+        }
         $h = $p['health'];
         if (($h['kernel_drops'] ?? 0) + ($h['state_dropped'] ?? 0) + ($h['spool_dropped'] ?? 0) > 0) {
             $this->alert($node, null, 'capture_degraded', 'medium', '采集覆盖下降', $h, $at, 600);

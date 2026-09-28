@@ -9,6 +9,7 @@ use App\Models\Batch;
 use App\Models\Alert;
 use App\Models\Node;
 use App\Models\ProtocolObservation;
+use App\Models\Rule;
 use App\Models\User;
 use App\Models\Website;
 use App\Services\ProbeQueue;
@@ -345,6 +346,54 @@ class MonitorTest extends TestCase
         $viewer->save();
         $this->actingAs($viewer)->get(route('protocol-observations.evidence', ProtocolObservation::firstOrFail()))
             ->assertOk()->assertJsonPath('evidence.protocol', 'wireguard');
+    }
+
+    public function test_proxy_clue_is_scoped_and_kept_distinct_from_protocol_confirmation(): void
+    {
+        $this->seed(MonitorSeeder::class);
+        $node = $this->node();
+        $payload = $this->payload();
+        $payload['proxies'] = [[
+            'ip' => '203.0.113.10', 'local_port' => 8443, 'transport' => 'tls',
+            'peer_count' => 3, 'session_count' => 4,
+            'bytes_from_peers' => 12000, 'bytes_to_peers' => 34000,
+            'peer_samples' => ['198.51.100.1', '198.51.100.2', '198.51.100.3'],
+            'egress_target_count' => 5,
+            'egress_target_samples' => ['192.0.2.1', '192.0.2.2'],
+        ]];
+        $invalid = $payload;
+        $invalid['proxies'][0]['ip'] = '198.51.100.10';
+        $this->upload($node, $invalid)->assertUnprocessable();
+        $this->upload($node, $payload)->assertOk();
+        ProcessBatch::dispatchSync(Batch::firstOrFail()->id);
+        $alert = Alert::where('kind', 'proxy_suspect')->firstOrFail();
+        $this->assertSame('behavioral_suspect', $alert->evidence['confidence']);
+        $this->assertContains('AnyTLS', $alert->evidence['candidate_protocols']);
+        $this->assertSame('tls', ProtocolObservation::firstOrFail()->protocol);
+        $viewer = User::factory()->create();
+        $viewer->role = 'viewer';
+        $viewer->save();
+        $this->actingAs($viewer)->get(route('alerts.evidence', $alert))->assertOk()->assertSee('不能确认 SS');
+        $this->get(route('protocol-observations.evidence', ProtocolObservation::firstOrFail()))
+            ->assertOk()->assertJsonPath('evidence.transport', 'tls');
+    }
+
+    public function test_proxy_rule_threshold_can_suppress_alert_without_losing_observation(): void
+    {
+        $this->seed(MonitorSeeder::class);
+        Rule::where('kind', 'proxy_suspect')->update(['threshold' => 5]);
+        $node = $this->node();
+        $payload = $this->payload();
+        $payload['proxies'] = [[
+            'ip' => '203.0.113.10', 'local_port' => 443, 'transport' => 'quic',
+            'peer_count' => 3, 'session_count' => 3, 'bytes_from_peers' => 9000,
+            'bytes_to_peers' => 12000, 'peer_samples' => ['198.51.100.1'],
+            'egress_target_count' => 5, 'egress_target_samples' => ['192.0.2.1'],
+        ]];
+        $this->upload($node, $payload)->assertOk();
+        ProcessBatch::dispatchSync(Batch::firstOrFail()->id);
+        $this->assertDatabaseCount('protocol_observations', 1);
+        $this->assertDatabaseMissing('alerts', ['kind' => 'proxy_suspect']);
     }
 
     public function test_website_cursor_pages_exclude_large_classification(): void

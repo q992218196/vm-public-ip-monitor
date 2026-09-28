@@ -2,11 +2,56 @@ package engine
 
 import (
 	"encoding/binary"
+	"fmt"
 	"net/netip"
 	"testing"
 	"time"
 	"vm-monitor/agent/internal/config"
 )
+
+func TestProxySuspicionNeedsBidirectionalPeersAndEgressFanout(t *testing.T) {
+	now := time.Now()
+	e := New(cfg(), now)
+	clientPayload := make([]byte, 700)
+	for i := range clientPayload {
+		clientPayload[i] = byte(i)
+	}
+	serverPayload := string(make([]byte, 700))
+	for i := 1; i <= 3; i++ {
+		peer := fmt.Sprintf("198.51.100.%d", i)
+		syn := frame(peer, "203.0.113.1", uint16(40000+i), 8443, 1, 2, "")
+		e.Process(syn, len(syn), "a", now)
+		for chunk := 0; chunk < 2; chunk++ {
+			client := frame(peer, "203.0.113.1", uint16(40000+i), 8443, uint32(2+chunk*700), 24, string(clientPayload))
+			server := frame("203.0.113.1", peer, 8443, uint16(40000+i), uint32(2+chunk*700), 24, serverPayload)
+			e.Process(client, len(client), "a", now.Add(time.Duration(chunk+1)*time.Second))
+			e.Process(server, len(server), "a", now.Add(time.Duration(chunk+4)*time.Second))
+		}
+	}
+	if got := e.Snapshot(now.Add(10 * time.Second)).Proxies; len(got) != 0 {
+		t.Fatalf("without independent outbound targets this is not a proxy clue: %+v", got)
+	}
+	for i := 1; i <= 3; i++ {
+		peer := fmt.Sprintf("198.51.100.%d", i)
+		syn := frame(peer, "203.0.113.1", uint16(41000+i), 8443, 1, 2, "")
+		e.Process(syn, len(syn), "a", now.Add(11*time.Second))
+		for chunk := 0; chunk < 2; chunk++ {
+			client := frame(peer, "203.0.113.1", uint16(41000+i), 8443, uint32(2+chunk*700), 24, string(clientPayload))
+			server := frame("203.0.113.1", peer, 8443, uint16(41000+i), uint32(2+chunk*700), 24, serverPayload)
+			e.Process(client, len(client), "a", now.Add(time.Duration(12+chunk)*time.Second))
+			e.Process(server, len(server), "a", now.Add(time.Duration(15+chunk)*time.Second))
+		}
+	}
+	for i := 1; i <= 5; i++ {
+		target := fmt.Sprintf("192.0.2.%d", i)
+		outbound := frame("203.0.113.1", target, uint16(50000+i), 443, 1, 2, "")
+		e.Process(outbound, len(outbound), "a", now.Add(17*time.Second))
+	}
+	got := e.Snapshot(now.Add(30 * time.Second)).Proxies
+	if len(got) != 1 || got[0].Transport != "opaque_tcp" || got[0].PeerCount != 3 || got[0].EgressTargetCount != 5 || got[0].LocalPort != 8443 {
+		t.Fatalf("unexpected bounded proxy clue: %+v", got)
+	}
+}
 
 func cfg() config.Config {
 	return config.Config{CIDRs: []string{"203.0.113.0/24", "2001:db8::/48"}, MaxIPs: 10, MaxFlows: 1000, MaxReassembly: 10, MaxSites: 20}

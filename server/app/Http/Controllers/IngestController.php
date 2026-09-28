@@ -21,7 +21,15 @@ class IngestController extends Controller
             'health' => 'required|array', 'health.version' => 'required|string|max:32',
             'health.interfaces' => 'sometimes|array|max:8', 'health.interfaces.*' => 'string|max:64',
             'health.*' => ['nullable'],
-            'metrics' => 'present|array|max:8192', 'sites' => 'present|array|max:4096', 'vpn' => 'sometimes|array|max:2048',
+            'metrics' => 'present|array|max:8192', 'sites' => 'present|array|max:4096', 'vpn' => 'sometimes|array|max:2048', 'proxies' => 'sometimes|array|max:256',
+            'proxies.*.ip' => 'required|ip', 'proxies.*.local_port' => 'required|integer|min:1|max:65535',
+            'proxies.*.transport' => 'required|in:opaque_tcp,opaque_udp,tls,quic',
+            'proxies.*.peer_count' => 'required|integer|min:3|max:4096', 'proxies.*.session_count' => 'required|integer|min:3|max:4096',
+            'proxies.*.bytes_from_peers' => 'required|integer|min:0|max:1000000000000000',
+            'proxies.*.bytes_to_peers' => 'required|integer|min:0|max:1000000000000000',
+            'proxies.*.peer_samples' => 'required|array|min:1|max:8', 'proxies.*.peer_samples.*' => 'ip',
+            'proxies.*.egress_target_count' => 'required|integer|min:5|max:256',
+            'proxies.*.egress_target_samples' => 'required|array|min:1|max:8', 'proxies.*.egress_target_samples.*' => 'ip',
             'vpn.*.ip' => 'required|ip', 'vpn.*.peer_ip' => 'required|ip',
             'vpn.*.local_port' => 'required|integer|min:1|max:65535', 'vpn.*.peer_port' => 'required|integer|min:1|max:65535',
             'vpn.*.protocol' => 'required|in:wireguard,openvpn,ikev2', 'vpn.*.initiator' => 'required|in:vm,peer',
@@ -46,11 +54,16 @@ class IngestController extends Controller
         $node = $r->attributes->get('node');
         $seen = [];
         $v['vpn'] ??= [];
-        foreach (['metrics', 'sites', 'vpn'] as $type) {
+        $v['proxies'] ??= [];
+        foreach (['metrics', 'sites', 'vpn', 'proxies'] as $type) {
             foreach ($v[$type] as &$item) {
                 $item['ip'] = Ip::normalize($item['ip']);
                 if ($type === 'vpn') {
                     $item['peer_ip'] = Ip::normalize($item['peer_ip']);
+                }
+                if ($type === 'proxies') {
+                    $item['peer_samples'] = array_map(Ip::normalize(...), $item['peer_samples']);
+                    $item['egress_target_samples'] = array_map(Ip::normalize(...), $item['egress_target_samples']);
                 }
                 if (! Ip::inRanges($item['ip'], $node->cidrs)) {
                     throw ValidationException::withMessages([$type => 'IP 不在该节点授权 CIDR 中']);

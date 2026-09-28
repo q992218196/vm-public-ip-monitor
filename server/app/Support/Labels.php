@@ -15,6 +15,7 @@ final class Labels
             'horizontal_scan' => '横向扫描','vertical_scan' => '端口扫描','suspected_bruteforce' => '认证端口重复连接',
             'single_target_attempts' => '单目标高频连接','tcp_connection_burst' => 'TCP 连接突增','egress_mbps' => '出站流量',
             'vpn_protocol' => 'VPN 握手特征', 'wireguard' => 'WireGuard', 'openvpn' => 'OpenVPN', 'ikev2' => 'IKEv2/IPsec',
+            'proxy_suspect' => '疑似加密代理', 'opaque_tcp' => '不透明 TCP', 'opaque_udp' => '不透明 UDP', 'tls' => 'TLS 外观', 'quic' => 'QUIC 外观',
             default => $state ?? '—',
         };
     }

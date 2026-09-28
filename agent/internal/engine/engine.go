@@ -44,6 +44,28 @@ type vpnKey struct {
 type vpnState struct {
 	observation wire.VPNObservation
 }
+type proxyFlow struct {
+	vm, peer               netip.Addr
+	localPort              uint16
+	transport              string
+	fromPackets, toPackets int
+	fromBytes, toBytes     uint64
+	firstAt, lastAt        time.Time
+}
+type proxyServiceKey struct {
+	vm        netip.Addr
+	localPort uint16
+	transport string
+}
+type proxyService struct {
+	peers     map[netip.Addr]bool
+	sessions  int
+	fromBytes uint64
+	toBytes   uint64
+}
+
+const maxProxyFlows = 16384
+
 type Engine struct {
 	mu         sync.Mutex
 	c          config.Config
@@ -53,13 +75,14 @@ type Engine struct {
 	streams    map[flowKey]*stream
 	sites      map[string]wire.Site
 	vpn        map[vpnKey]*vpnState
+	proxyFlows map[flowKey]*proxyFlow
 	duplicates map[uint64]seen
 	health     wire.Health
 	start      time.Time
 }
 
 func New(c config.Config, now time.Time) *Engine {
-	e := &Engine{c: c, ips: map[netip.Addr]*ipState{}, syns: map[flowKey]time.Time{}, streams: map[flowKey]*stream{}, sites: map[string]wire.Site{}, vpn: map[vpnKey]*vpnState{}, duplicates: map[uint64]seen{}, start: now}
+	e := &Engine{c: c, ips: map[netip.Addr]*ipState{}, syns: map[flowKey]time.Time{}, streams: map[flowKey]*stream{}, sites: map[string]wire.Site{}, vpn: map[vpnKey]*vpnState{}, proxyFlows: map[flowKey]*proxyFlow{}, duplicates: map[uint64]seen{}, start: now}
 	for _, s := range c.CIDRs {
 		p, err := netip.ParsePrefix(s)
 		if err == nil {
@@ -132,6 +155,8 @@ func (e *Engine) Process(b []byte, wireLen int, iface string, now time.Time) {
 		if dst {
 			e.observeVPN(p.Dst, p.Src, p.DstPort, p.SrcPort, "peer", signature)
 		}
+	} else {
+		e.observeProxy(p, src, dst, now)
 	}
 	if p.Protocol != 6 {
 		return
@@ -226,6 +251,54 @@ func (e *Engine) Process(b []byte, wireLen int, iface string, now time.Time) {
 	}
 	e.sites[key] = site
 }
+func (e *Engine) observeProxy(p packet.Packet, src, dst bool, now time.Time) {
+	if src == dst || (p.Protocol != 6 && p.Protocol != 17) {
+		return
+	}
+	var key flowKey
+	if dst {
+		key = flowKey{p.Src, p.Dst, p.SrcPort, p.DstPort}
+	} else {
+		key = flowKey{p.Dst, p.Src, p.DstPort, p.SrcPort}
+	}
+	flow := e.proxyFlows[key]
+	if flow == nil {
+		if !dst || (p.Protocol == 6 && (!p.SYN || p.ACK)) {
+			return
+		}
+		if len(e.proxyFlows) >= min(e.c.MaxFlows, maxProxyFlows) {
+			e.health.StateDropped++
+			return
+		}
+		transport := ""
+		if p.Protocol == 17 {
+			transport = packet.ProxyTransport(p)
+			if transport == "" {
+				return
+			}
+		}
+		flow = &proxyFlow{vm: p.Dst, peer: p.Src, localPort: p.DstPort, transport: transport, firstAt: now}
+		e.proxyFlows[key] = flow
+	}
+	if len(p.Payload) == 0 {
+		return
+	}
+	if dst {
+		if flow.transport == "" {
+			flow.transport = packet.ProxyTransport(p)
+			if flow.transport == "" {
+				delete(e.proxyFlows, key)
+				return
+			}
+		}
+		flow.fromPackets++
+		flow.fromBytes += uint64(len(p.Payload))
+	} else {
+		flow.toPackets++
+		flow.toBytes += uint64(len(p.Payload))
+	}
+	flow.lastAt = now
+}
 func (e *Engine) observeVPN(vm, peer netip.Addr, localPort, peerPort uint16, sender string, signature packet.VPNSignature) {
 	key := vpnKey{VM: vm, Peer: peer, LocalPort: localPort, PeerPort: peerPort, Protocol: signature.Protocol, Session: signature.Session}
 	state := e.vpn[key]
@@ -288,7 +361,51 @@ func (e *Engine) Snapshot(now time.Time) wire.Batch {
 	if _, err := rand.Read(id); err != nil {
 		panic(err)
 	}
-	b := wire.Batch{ID: hex.EncodeToString(id), WindowStart: e.start.UTC().Format(time.RFC3339Nano), WindowEnd: now.UTC().Format(time.RFC3339Nano), Health: e.health, Metrics: []wire.Metric{}, Sites: []wire.Site{}, VPN: []wire.VPNObservation{}}
+	b := wire.Batch{ID: hex.EncodeToString(id), WindowStart: e.start.UTC().Format(time.RFC3339Nano), WindowEnd: now.UTC().Format(time.RFC3339Nano), Health: e.health, Metrics: []wire.Metric{}, Sites: []wire.Site{}, VPN: []wire.VPNObservation{}, Proxies: []wire.ProxyObservation{}}
+	services := map[proxyServiceKey]*proxyService{}
+	for _, flow := range e.proxyFlows {
+		if flow.transport == "" || flow.transport == "ignored" || flow.fromPackets < 2 || flow.toPackets < 2 || flow.fromBytes < 1024 || flow.toBytes < 1024 || flow.lastAt.Sub(flow.firstAt) < 3*time.Second {
+			continue
+		}
+		key := proxyServiceKey{flow.vm, flow.localPort, flow.transport}
+		service := services[key]
+		if service == nil {
+			service = &proxyService{peers: map[netip.Addr]bool{}}
+			services[key] = service
+		}
+		service.peers[flow.peer] = true
+		service.sessions++
+		service.fromBytes += flow.fromBytes
+		service.toBytes += flow.toBytes
+	}
+	for key, service := range services {
+		state := e.ips[key.vm]
+		if state == nil || len(service.peers) < 3 || len(state.targets) < 5 {
+			continue
+		}
+		if len(b.Proxies) >= 256 {
+			e.health.StateDropped++
+			continue
+		}
+		peers := make([]string, 0, len(service.peers))
+		for peer := range service.peers {
+			peers = append(peers, peer.String())
+		}
+		sort.Strings(peers)
+		targets := make([]string, 0, len(state.targets))
+		for target := range state.targets {
+			targets = append(targets, target.String())
+		}
+		sort.Strings(targets)
+		b.Proxies = append(b.Proxies, wire.ProxyObservation{IP: key.vm.String(), LocalPort: key.localPort, Transport: key.transport, PeerCount: len(peers), SessionCount: service.sessions, BytesFromPeers: service.fromBytes, BytesToPeers: service.toBytes, PeerSamples: peers[:min(8, len(peers))], EgressTargetCount: len(targets), EgressTargetSamples: targets[:min(8, len(targets))]})
+	}
+	sort.Slice(b.Proxies, func(i, j int) bool {
+		if b.Proxies[i].IP == b.Proxies[j].IP {
+			return b.Proxies[i].LocalPort < b.Proxies[j].LocalPort
+		}
+		return b.Proxies[i].IP < b.Proxies[j].IP
+	})
+	b.Health = e.health
 	for _, s := range e.ips {
 		s.m.UniqueTargets = len(s.targets)
 		ts := make([]string, 0, len(s.targets))
@@ -339,6 +456,7 @@ func (e *Engine) Snapshot(now time.Time) wire.Batch {
 	e.ips = map[netip.Addr]*ipState{}
 	e.sites = map[string]wire.Site{}
 	e.vpn = map[vpnKey]*vpnState{}
+	e.proxyFlows = map[flowKey]*proxyFlow{}
 	e.health = wire.Health{}
 	e.start = now
 	return b

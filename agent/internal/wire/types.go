@@ -39,6 +39,18 @@ type VPNObservation struct {
 	RequestHeader  string `json:"request_header"`
 	ResponseHeader string `json:"response_header"`
 }
+type ProxyObservation struct {
+	IP                  string   `json:"ip"`
+	LocalPort           uint16   `json:"local_port"`
+	Transport           string   `json:"transport"`
+	PeerCount           int      `json:"peer_count"`
+	SessionCount        int      `json:"session_count"`
+	BytesFromPeers      uint64   `json:"bytes_from_peers"`
+	BytesToPeers        uint64   `json:"bytes_to_peers"`
+	PeerSamples         []string `json:"peer_samples"`
+	EgressTargetCount   int      `json:"egress_target_count"`
+	EgressTargetSamples []string `json:"egress_target_samples"`
+}
 type Health struct {
 	Version           string   `json:"version"`
 	Captured          uint64   `json:"captured"`
@@ -55,11 +67,12 @@ type Health struct {
 	Interfaces        []string `json:"interfaces"`
 }
 type Batch struct {
-	ID          string           `json:"batch_id"`
-	WindowStart string           `json:"window_start"`
-	WindowEnd   string           `json:"window_end"`
-	Health      Health           `json:"health"`
-	Metrics     []Metric         `json:"metrics"`
-	Sites       []Site           `json:"sites"`
-	VPN         []VPNObservation `json:"vpn"`
+	ID          string             `json:"batch_id"`
+	WindowStart string             `json:"window_start"`
+	WindowEnd   string             `json:"window_end"`
+	Health      Health             `json:"health"`
+	Metrics     []Metric           `json:"metrics"`
+	Sites       []Site             `json:"sites"`
+	VPN         []VPNObservation   `json:"vpn"`
+	Proxies     []ProxyObservation `json:"proxies"`
 }

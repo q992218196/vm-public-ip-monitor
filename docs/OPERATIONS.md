@@ -46,7 +46,7 @@ Content-Type: application/json
 
 服务端在单个数据库事务内保存批次后确认。唯一键为 `(node_id,batch_id)`。持久化 inbox 由调度器每10秒扫描并送入队列；Redis 临时不可用不会丢失已确认的 inbox。分析任务自身也幂等。
 
-每批最多8 MiB、8192个 IP、4096条网站线索；每节点每分钟最多120次请求。时间窗口最多600秒，允许未来5分钟偏差和过去14天补传。
+每批最多8 MiB、8192个 IP、4096条网站线索、2048条 VPN 握手观察与256条疑似代理端口线索；每节点每分钟最多120次请求。时间窗口最多600秒，允许未来5分钟偏差和过去14天补传。
 
 Agent 只上传统计窗口和有界样本，不回传完整抓包。以 500 个活跃公网 IP、30 秒窗口、每 IP 分别保留 1／4／16／32 个目标与端口样本的模拟 JSON 计算，Agent 到管理端约为 0.05／0.065／0.124／0.171 Mbps，全天约 0.54／0.70／1.34／1.85 GB。实际值随活跃 IP、目标数、网站线索、重试及采集丢失而变；这是无压缩载荷的容量估算，不是限速保证。单批上限 8 MiB，积压补传时瞬时带宽可能更高。镜像／SPAN 把被观察流量送到采集接口所需的链路带宽另计。
 
@@ -75,6 +75,10 @@ Agent 每 IP 最多保存256个目标和256个目标/端口组合。告警证据
 Agent 从 UDP 报文结构识别 [WireGuard 握手](https://www.wireguard.com/protocol/)、[OpenVPN 未额外保护的 V2 控制握手](https://openvpn.net/community-docs/openvpn-protocol.html) 和 [IKEv2 初始交换](https://www.rfc-editor.org/rfc/rfc7296)。同一 VM、对端 IP、端口及会话在同一采集窗口内同时出现匹配的发起与响应，才生成协议观察记录与告警；仅端口号或单个探测包不会触发。每窗口最多保留 2048 个候选会话，只有双向匹配者上报；达到上限会计入采集丢弃状态。证据包含 VM／对端 IP、两端端口、请求／响应次数、长度和各 8 字节报文头十六进制，不保存完整 VPN 内容。
 
 每条匹配保存为独立观察记录，默认保留 30 天（`MONITOR_PROTOCOL_DAYS`），告警详情可下载该窗口的 JSON。规则“VPN 双向握手特征”默认启用且阈值为 1，可按节点关闭或调整。报文结构仍可能被伪造，识别不能证明认证成功、隧道建立、VM 内进程、用户身份或用途违规；对客户应表述为“观测到与某协议一致的双向握手特征”。只看到单向流量、跨越采集窗口、OpenVPN `tls-auth`／`tls-crypt` 保护、WireGuard 仅数据包、封装未解码或丢包都可能漏报。Shadowsocks、VMess/VLESS、Trojan、REALITY、Hysteria/TUIC 等可伪装为常见 TLS/QUIC 流量，当前不会仅凭端口、SNI 或加密流量形态给出准确协议结论。
+
+疑似加密代理规则覆盖与 SS、SSR、VMess、Trojan/Trojan-Go、Hysteria、VLESS、AnyTLS 兼容的**传输外观**，不做具体协议指认。Agent 对入站 TCP 首个载荷只区分 TLS 与高熵不透明数据，对 UDP 只区分可见 QUIC 初始报文与高熵不透明数据；HTTP、SSH 等常见明文开头不纳入。只在同一 30 秒默认窗口、同一 VM 公网 IP 和服务端口看到至少 3 个不同对端的双向会话（每会话双方至少 2 个载荷包、各 1 KiB、持续 3 秒），且同一 VM 至少主动连接 5 个不同出站目标时，上报低级别行为线索。后台默认规则阈值为 3 个对端，可关闭或提高阈值；独立证据保留对端、出站目标样本与字节数，不上传完整报文或密钥。Agent 最多跟踪 `min(max_flows, 16384)` 个候选连接、每窗口最多上报 256 个端口线索，额外状态纳入内存预算。
+
+这是一种高门槛行为筛选，**不能证明存在代理服务，更不能区分七种协议**。普通 HTTPS/HTTP3 网站、游戏或其他加密业务也可能符合条件；低流量、单客户端、单上游、QUIC 隐藏或报文分片会漏报。规则窗口以 Agent 上报窗口为准，`window_seconds` 不跨窗口合并代理会话。给客户的表述应为“观察到疑似加密代理样态，需结合授权业务和其他日志复核”；不要将候选协议名称写成检测结论。依据：[Shadowsocks AEAD-2022](https://shadowsocks.org/doc/sip022.html)、[Trojan](https://trojan-gfw.github.io/trojan/protocol.html)、[Hysteria 2](https://v2.hysteria.network/docs/developers/Protocol/)、[AnyTLS](https://github.com/anytls/anytls-go/blob/main/docs/protocol.md) 官方协议说明。
 
 ## 网站自动验证与内容复核
 

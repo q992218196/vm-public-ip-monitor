@@ -52,6 +52,20 @@
         @if ($alert->evidence['observation_id'] ?? null) <p><a href="{{ route('protocol-observations.evidence', $alert->evidence['observation_id']) }}">下载该窗口的独立 JSON 证据</a></p> @endif
         <p>被动识别结果不能证明隧道建立、认证成功、VM 内具体进程或用途违规；请结合业务授权和其他日志核查。</p></section>
     @endif
+    @if ($alert->kind === 'proxy_suspect')
+        <section class="card"><h2>疑似加密代理流量线索</h2><dl>
+            <div><dt>外层传输</dt><dd>{{ \App\Support\Labels::get($alert->evidence['transport'] ?? null) }}</dd></div>
+            <div><dt>VM 服务端口</dt><dd>{{ $alert->evidence['local_port'] ?? '—' }}</dd></div>
+            <div><dt>不同对端／双向会话</dt><dd>{{ $alert->evidence['peer_count'] ?? 0 }} / {{ $alert->evidence['session_count'] ?? 0 }}</dd></div>
+            <div><dt>接收／发送载荷</dt><dd>{{ $alert->evidence['bytes_from_peers'] ?? 0 }} / {{ $alert->evidence['bytes_to_peers'] ?? 0 }} 字节</dd></div>
+            <div><dt>VM 出站目标数</dt><dd>{{ $alert->evidence['egress_target_count'] ?? 0 }}</dd></div>
+        </dl>
+        <p>对端样本：{{ implode('、', $alert->evidence['peer_samples'] ?? []) }}</p>
+        <p>出站目标样本：{{ implode('、', $alert->evidence['egress_target_samples'] ?? []) }}</p>
+        <p>可能兼容的协议：{{ implode('、', $alert->evidence['candidate_protocols'] ?? []) }}。这些名称不是识别结论。</p>
+        @if ($alert->evidence['observation_id'] ?? null) <p><a href="{{ route('protocol-observations.evidence', $alert->evidence['observation_id']) }}">下载该窗口的独立 JSON 证据</a></p> @endif
+        <p>仅为行为相关性线索，不能确认 SS、SSR、VMess、Trojan、Hysteria、VLESS 或 AnyTLS；普通加密业务可能有相同外观，须人工复核。</p></section>
+    @endif
     <section class="card"><h2>原始证据</h2><pre>{{ json_encode($alert->evidence, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT) }}</pre></section>
     @if ($alert->resolution)
         <section class="card"><h2>处理记录</h2><p>{{ $alert->resolution }}</p></section>
