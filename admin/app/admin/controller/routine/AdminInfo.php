@@ -41,7 +41,7 @@ class AdminInfo extends Backend
         }
 
         if ($this->request->isPost()) {
-            $data = $this->request->post();
+            $data = array_intersect_key($this->request->post(), array_flip(['nickname', 'email', 'mobile', 'motto', 'avatar', 'password']));
             if (!$data) {
                 $this->error(__('Parameter %s can not be empty', ['']));
             }

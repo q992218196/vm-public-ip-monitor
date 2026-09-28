@@ -134,8 +134,11 @@ jobs:
           curl -fsS -H 'server: true' -H "batoken: $viewer_token" 'http://127.0.0.1:8099/admin/Monitor/count?resource=alerts' >/tmp/buildadmin-viewer-count.json
           curl -sS -H 'server: true' -H "batoken: $viewer_token" -H 'Content-Type: application/json' -d '{"ids":[1],"status":"open","resolution":"unauthorized"}' http://127.0.0.1:8099/admin/Monitor/bulkAlerts >/tmp/buildadmin-viewer-write.json
           python3 -c 'import json; assert json.load(open("/tmp/buildadmin-viewer-count.json"))["data"]["total"]==1 and json.load(open("/tmp/buildadmin-viewer-write.json"))["code"]==403'
+          curl -fsS -H 'server: true' -H "batoken: $viewer_token" -d 'id=2&nickname=ViewerUpdated' http://127.0.0.1:8099/admin/routine.AdminInfo/edit >/tmp/buildadmin-profile.json
+          python3 -c 'import json; assert json.load(open("/tmp/buildadmin-profile.json"))["code"]==1'
+          php -r '$db=new PDO("mysql:host=127.0.0.1;dbname=buildadmin","buildadmin","test-only-password");$rows=$db->query("SELECT email,nickname FROM ba_admin WHERE email IN (\"admin@example.test\",\"viewer@example.test\") ORDER BY email")->fetchAll(PDO::FETCH_ASSOC);if($rows[0]["nickname"]!=="Admin" || $rows[1]["nickname"]!=="ViewerUpdated")exit(1);'
         working-directory: admin
-      - run: npm ci --no-audit --no-fund && npm run typecheck && npm run build
+      - run: npm ci --no-audit --no-fund && npm run typecheck && npm run lint && npm run build
         working-directory: admin/web
   containers:
     runs-on: ubuntu-latest

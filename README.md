@@ -2,6 +2,8 @@
 
 面向 KVM 宿主机的公网 IP 监控系统。VM 内不安装软件；每台宿主机运行一个 Go Agent。Laravel 13 负责采集、分析和探测 API；管理后台已迁移至 BuildAdmin（ThinkPHP 8 + Vue 3）。
 
+`admin/` 基于 [BuildAdmin v2.3.8](https://github.com/build-admin/buildadmin) 定制，保留其 Apache-2.0 许可证；完整切换与回退步骤见 [部署教程](docs/DEPLOYMENT.md)。
+
 ## 当前实现
 
 - IPv4／IPv6 CIDR 过滤，同一 CIDR 可配置到多个节点。

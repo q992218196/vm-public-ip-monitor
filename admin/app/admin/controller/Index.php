@@ -73,7 +73,7 @@ class Index extends Backend
 
             $rule = [
                 'username|' . __('Username') => 'require|length:3,255',
-                'password|' . __('Password') => 'require|length:8,128',
+                'password|' . __('Password') => 'require|length:8,4096',
             ];
             $data = [
                 'username' => $username,

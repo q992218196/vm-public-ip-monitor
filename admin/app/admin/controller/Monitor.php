@@ -263,7 +263,10 @@ class Monitor extends Backend
             if (isset($data['enabled'])) $data['enabled'] = (bool)$data['enabled'];
         }
         if ($resource === 'ips' && isset($data['label']) && mb_strlen((string)$data['label']) > 255) $this->error('标签过长');
-        if ($resource === 'websites' && isset($data['manual_category']) && mb_strlen((string)$data['manual_category']) > 64) $this->error('人工分类过长');
+        if ($resource === 'websites' && array_key_exists('manual_category', $data)) {
+            if (mb_strlen((string)$data['manual_category']) > 64) $this->error('人工分类过长');
+            $data['manual_category'] = trim((string)$data['manual_category']) ?: null;
+        }
         if ($resource === 'rules') {
             if ($creating && (empty($data['name']) || empty($data['kind']) || empty($data['threshold']))) $this->error('规则名称、类型和阈值必填');
             if (isset($data['name']) && (trim((string)$data['name']) === '' || mb_strlen((string)$data['name']) > 255)) $this->error('规则名称无效');
