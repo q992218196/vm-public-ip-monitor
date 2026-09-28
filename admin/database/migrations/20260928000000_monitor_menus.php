@@ -8,13 +8,13 @@ class MonitorMenus extends Migrator
     public function up(): void
     {
         $this->table('admin')->changeColumn('email', 'string', ['limit' => 255, 'default' => '', 'null' => false])->save();
+        echo "Monitor migration: account schema ready\n";
         Db::name('config')->where('name', 'site_name')->update(['value' => 'VM 公网流量监控']);
+        echo "Monitor migration: site config ready\n";
         if (!Db::name('admin_rule')->where('name', 'monitor')->find()) {
-            $now = time();
             $root = Db::name('admin_rule')->insertGetId([
                 'pid' => 0, 'type' => 'menu_dir', 'title' => 'VM 流量监控', 'name' => 'monitor',
                 'path' => 'monitor', 'icon' => 'fa fa-shield', 'weigh' => 998,
-                'create_time' => $now, 'update_time' => $now,
             ]);
             $items = [
                 'nodes' => '采集节点', 'ips' => '公网 IP', 'websites' => '网站资产',
@@ -29,10 +29,10 @@ class MonitorMenus extends Migrator
                     'icon' => 'fa fa-circle-o', 'menu_type' => 'tab',
                     'component' => '/src/views/backend/monitor/index.vue',
                     'weigh' => 100 - $position++,
-                    'create_time' => $now, 'update_time' => $now,
                 ]);
             }
         }
+        echo "Monitor migration: menus ready\n";
         if (!Db::name('admin_group')->where('name', '监控只读')->find()) {
             $ruleIds = Db::name('admin_rule')->whereLike('name', 'monitor%')->column('id');
             $accountIds = Db::name('admin_rule')->whereIn('name', ['routine', 'routine/adminInfo', 'routine/adminInfo/index', 'routine/adminInfo/edit'])->column('id');
@@ -41,9 +41,9 @@ class MonitorMenus extends Migrator
             Db::name('admin_group')->insert([
                 'pid' => 0, 'name' => '监控只读',
                 'rules' => implode(',', array_unique(array_merge(array_filter([$dashboard, $dashboardIndex]), $ruleIds, $accountIds))),
-                'create_time' => time(), 'update_time' => time(),
             ]);
         }
+        echo "Monitor migration: viewer group ready\n";
         Db::name('admin_rule')->where('pid', 0)->whereNotIn('name', ['dashboard', 'auth', 'routine', 'monitor'])->update(['status' => 0]);
     }
 
