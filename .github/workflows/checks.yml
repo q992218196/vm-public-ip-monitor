@@ -101,7 +101,7 @@ jobs:
         with:
           name: admin-composer-lock
           path: admin/composer.lock
-      - run: php -l app/admin/controller/Monitor.php && php -l database/migrations/20260928000000_monitor_menus.php && php -l tools/import-monitor-users.php
+      - run: php -l app/admin/controller/Monitor.php && php -l app/common/connector/MonitorPgsql.php && php -l database/migrations/20260928000000_monitor_menus.php && php -l tools/import-monitor-users.php
         working-directory: admin
       - run: php think migrate:run
         working-directory: admin
@@ -116,7 +116,7 @@ jobs:
           sed -i "s/'admin_login_captcha'   => true/'admin_login_captcha'   => false/" config/buildadmin.php
           php -S 127.0.0.1:8099 -t public public/index.php >/tmp/buildadmin-http.log 2>&1 &
           server_pid=$!
-          trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+          trap 'status=$?; if [ "$status" -ne 0 ]; then cat /tmp/buildadmin-http.log; fi; kill "$server_pid" 2>/dev/null || true' EXIT
           sleep 2
           curl -fsS -H 'server: true' -d 'username=admin@example.test&password=test-admin-password-2026' http://127.0.0.1:8099/admin/Index/login >/tmp/buildadmin-login.json
           token=$(python3 -c 'import json; print(json.load(open("/tmp/buildadmin-login.json"))["data"]["userInfo"]["token"])')
@@ -133,6 +133,8 @@ jobs:
       - run: bash deploy/prepare.sh
       - run: docker compose --profile screenshots build app web worker
         working-directory: deploy
+      - run: docker compose -f compose.yml -f compose.buildadmin.yml build buildadmin-app buildadmin-web
+        working-directory: deploy
       - run: docker compose --profile https config --quiet
         working-directory: deploy
       - run: docker compose -f compose.yml -f compose.buildadmin.yml --profile https config --quiet
@@ -144,6 +146,11 @@ jobs:
           trap 'docker rm -f vm-monitor-fpm-smoke >/dev/null 2>&1 || true' EXIT
           sleep 3
           test "$(docker inspect -f '{{.State.Running}}' vm-monitor-fpm-smoke)" = true
+      - run: |
+          docker run --name vm-monitor-buildadmin-fpm-smoke -d vm-monitor-buildadmin-app:local
+          trap 'docker rm -f vm-monitor-buildadmin-fpm-smoke >/dev/null 2>&1 || true' EXIT
+          sleep 3
+          test "$(docker inspect -f '{{.State.Running}}' vm-monitor-buildadmin-fpm-smoke)" = true
       - run: |
           trap 'docker compose --profile screenshots down --remove-orphans >/dev/null 2>&1 || true' EXIT
           worker_uid=$(docker compose --profile screenshots run --rm --no-deps --entrypoint id worker -u)

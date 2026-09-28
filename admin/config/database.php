@@ -59,7 +59,8 @@ return [
         ],
 
         'monitor' => [
-            'type' => 'pgsql',
+            'type' => \app\common\connector\MonitorPgsql::class,
+            'builder' => \think\db\builder\Pgsql::class,
             'hostname' => getenv('MONITOR_DB_HOST') ?: 'postgres',
             'database' => getenv('MONITOR_DB_DATABASE') ?: 'monitor',
             'username' => getenv('MONITOR_DB_USERNAME') ?: 'monitor',
