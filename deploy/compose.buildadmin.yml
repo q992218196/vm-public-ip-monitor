@@ -1,0 +1,69 @@
+services:
+  buildadmin-db:
+    image: mysql:8.4
+    restart: unless-stopped
+    mem_limit: 1g
+    environment:
+      MYSQL_DATABASE: buildadmin
+      MYSQL_USER: buildadmin
+      MYSQL_PASSWORD: ${BUILDADMIN_DB_PASSWORD:?set BUILDADMIN_DB_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${BUILDADMIN_DB_PASSWORD:?set BUILDADMIN_DB_PASSWORD}
+    volumes:
+      - ${MONITOR_DATA_DIR:-/home/vm-monitor-server}/buildadmin/mysql:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u buildadmin -p\"$$MYSQL_PASSWORD\" --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+    logging:
+      driver: none
+    networks: [backend]
+  buildadmin-app:
+    image: vm-monitor-buildadmin-app:local
+    build:
+      context: ..
+      dockerfile: deploy/buildadmin/Dockerfile
+      target: app
+    restart: unless-stopped
+    mem_limit: 1g
+    environment:
+      APP_DEBUG: "false"
+      BUILDADMIN_DB_HOST: buildadmin-db
+      BUILDADMIN_DB_DATABASE: buildadmin
+      BUILDADMIN_DB_USERNAME: buildadmin
+      BUILDADMIN_DB_PASSWORD: ${BUILDADMIN_DB_PASSWORD:?set BUILDADMIN_DB_PASSWORD}
+      BUILDADMIN_TOKEN_KEY: ${BUILDADMIN_TOKEN_KEY:?set BUILDADMIN_TOKEN_KEY}
+      BUILDADMIN_DISABLE_TERMINAL: "1"
+      MONITOR_DB_HOST: postgres
+      MONITOR_DB_DATABASE: monitor
+      MONITOR_DB_USERNAME: monitor
+      MONITOR_DB_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD}
+      MONITOR_PUBLIC_URL: ${APP_URL:?set APP_URL}
+    volumes:
+      - ${MONITOR_DATA_DIR:-/home/vm-monitor-server}/buildadmin/runtime:/var/www/html/runtime
+      - ${MONITOR_DATA_DIR:-/home/vm-monitor-server}/buildadmin/uploads:/var/www/html/public/uploads
+      - ${MONITOR_DATA_DIR:-/home/vm-monitor-server}/storage:/monitor-storage:ro
+    depends_on:
+      buildadmin-db:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    logging:
+      driver: none
+    networks: [backend]
+  buildadmin-web:
+    image: vm-monitor-buildadmin-web:local
+    build:
+      context: ..
+      dockerfile: deploy/buildadmin/Dockerfile
+      target: web
+    restart: unless-stopped
+    ports: ["127.0.0.1:8081:8081"]
+    depends_on: [buildadmin-app]
+    logging:
+      driver: none
+    networks: [backend, probes]
+  https:
+    volumes:
+      - ./caddy/Caddyfile.buildadmin:/etc/caddy/Caddyfile:ro
+    depends_on: [web, buildadmin-web]

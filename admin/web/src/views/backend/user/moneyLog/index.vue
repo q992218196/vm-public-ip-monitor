@@ -1,0 +1,147 @@
+<template>
+    <div class="default-main ba-table-box">
+        <el-alert class="ba-table-alert" v-if="baTable.table.remark" :title="baTable.table.remark" type="info" show-icon />
+
+        <!-- 表格顶部菜单 -->
+        <TableHeader
+            :buttons="['refresh', 'add', 'comSearch', 'quickSearch', 'columnDisplay']"
+            :quick-search-placeholder="
+                t('Quick search placeholder', { fields: t('user.moneyLog.User name') + '/' + t('user.moneyLog.User nickname') })
+            "
+        >
+            <el-button v-if="!isEmpty(state.userInfo)" v-blur class="table-header-operate">
+                <span class="table-header-operate-text">
+                    {{ state.userInfo.username + '(ID:' + state.userInfo.id + ') ' + t('user.moneyLog.balance') + ':' + state.userInfo.money }}
+                </span>
+            </el-button>
+        </TableHeader>
+
+        <!-- 表格 -->
+        <!-- 要使用`el-table`组件原有的属性，直接加在Table标签上即可 -->
+        <Table />
+
+        <!-- 表单 -->
+        <PopupForm />
+    </div>
+</template>
+
+<script setup lang="ts">
+import { debounce, isEmpty, parseInt } from 'lodash-es'
+import { provide, reactive, watch } from 'vue'
+import { useI18n } from 'vue-i18n'
+import { useRoute } from 'vue-router'
+import PopupForm from './popupForm.vue'
+import { add, url } from '/@/api/backend/user/moneyLog'
+import { baTableApi } from '/@/api/common'
+import TableHeader from '/@/components/table/header/index.vue'
+import Table from '/@/components/table/index.vue'
+import baTableClass from '/@/utils/baTable'
+
+defineOptions({
+    name: 'user/moneyLog',
+})
+
+const { t } = useI18n()
+const route = useRoute()
+const defalutUser = (route.query.user_id ?? '') as string
+const state = reactive({
+    userInfo: {} as anyObj,
+})
+
+const baTable = new baTableClass(
+    new baTableApi(url),
+    {
+        column: [
+            { type: 'selection', align: 'center', operator: false },
+            { label: t('Id'), prop: 'id', align: 'center', operator: '=', operatorPlaceholder: t('Id'), width: 70 },
+            { label: t('user.moneyLog.User ID'), prop: 'user_id', align: 'center', width: 70 },
+            { label: t('user.moneyLog.User name'), prop: 'user.username', align: 'center', operator: 'LIKE', operatorPlaceholder: t('Fuzzy query') },
+            {
+                label: t('user.moneyLog.User nickname'),
+                prop: 'user.nickname',
+                align: 'center',
+                operator: 'LIKE',
+                operatorPlaceholder: t('Fuzzy query'),
+            },
+            { label: t('user.moneyLog.Change balance'), prop: 'money', align: 'center', operator: 'RANGE', sortable: 'custom' },
+            { label: t('user.moneyLog.Before change'), prop: 'before', align: 'center', operator: 'RANGE', sortable: 'custom' },
+            { label: t('user.moneyLog.After change'), prop: 'after', align: 'center', operator: 'RANGE', sortable: 'custom' },
+            {
+                label: t('user.moneyLog.remarks'),
+                prop: 'memo',
+                align: 'center',
+                operator: 'LIKE',
+                operatorPlaceholder: t('Fuzzy query'),
+                showOverflowTooltip: true,
+            },
+            { label: t('Create time'), prop: 'create_time', align: 'center', render: 'datetime', sortable: 'custom', operator: 'RANGE', width: 160 },
+        ],
+        dblClickNotEditColumn: ['all'],
+    },
+    {
+        defaultItems: {
+            user_id: defalutUser,
+            memo: '',
+        },
+    }
+)
+
+// 表单提交后
+baTable.after.onSubmit = () => {
+    getUserInfo(baTable.comSearch.form.user_id)
+}
+baTable.after.onTableHeaderAction = ({ event }) => {
+    // 刷新后
+    if (event == 'refresh') {
+        getUserInfo(baTable.comSearch.form.user_id)
+    }
+}
+
+baTable.before.onTableAction = ({ event }) => {
+    // 公共搜索
+    if (event === 'com-search') {
+        baTable.table.filter!.search = baTable.getComSearchData()
+
+        for (const key in baTable.table.filter!.search) {
+            if (['money', 'before', 'after'].includes(baTable.table.filter!.search[key].field)) {
+                const val = (baTable.table.filter!.search[key].val as string).split(',')
+                const newVal: (string | number)[] = []
+                for (const k in val) {
+                    newVal.push(isNaN(parseFloat(val[k])) ? '' : parseFloat(val[k]) * 100)
+                }
+                baTable.table.filter!.search[key].val = newVal.join(',')
+            }
+        }
+
+        baTable.onTableHeaderAction('refresh', { event: 'com-search', data: baTable.table.filter!.search })
+        return false
+    }
+}
+
+baTable.mount()
+baTable.getData()
+
+provide('baTable', baTable)
+
+const getUserInfo = debounce((userId: string) => {
+    if (userId && parseInt(userId) > 0) {
+        add(userId).then((res) => {
+            state.userInfo = res.data.user
+        })
+    } else {
+        state.userInfo = {}
+    }
+}, 300)
+
+getUserInfo(baTable.comSearch.form.user_id)
+
+watch(
+    () => baTable.comSearch.form.user_id,
+    (newVal) => {
+        baTable.form.defaultItems!.user_id = newVal
+        getUserInfo(newVal)
+    }
+)
+</script>
+
+<style scoped lang="scss"></style>

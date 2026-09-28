@@ -86,7 +86,43 @@ server {
 
 访问 `https://你的域名/admin`。应用生成 HTTPS 链接，生产 Session Cookie 仅通过 HTTPS 发送。Agent 强制验证 HTTPS 证书；不要关闭校验来解决证书问题。
 
-## 4. 截图工作服务
+## 4. 完整切换到 BuildAdmin 管理后台
+
+BuildAdmin 承担登录、账号权限、首页及全部监控管理页面。原 Laravel 服务仍接收 Agent 数据并处理分析与截图任务，因此切换后台不会改变宿主机 Agent 的上报地址。BuildAdmin 使用独立 MySQL 保存账号和菜单，直接读取现有 PostgreSQL 监控数据；MySQL 数据默认保存在 `${MONITOR_DATA_DIR}/buildadmin/mysql`。
+
+先更新项目代码，然后在管理服务器的 `deploy` 目录执行：
+
+```sh
+cd /home/vm-monitor-src/deploy
+bash prepare.sh
+sudo mkdir -p /home/vm-monitor-server/buildadmin/{mysql,runtime,uploads}
+docker compose -f compose.yml -f compose.buildadmin.yml build buildadmin-app buildadmin-web
+docker compose -f compose.yml -f compose.buildadmin.yml up -d buildadmin-db buildadmin-app buildadmin-web
+docker compose -f compose.yml -f compose.buildadmin.yml exec buildadmin-app php think migrate:run
+docker compose -f compose.yml -f compose.buildadmin.yml exec buildadmin-app php tools/import-monitor-users.php
+curl -I http://127.0.0.1:8081/
+```
+
+若使用自定义 `MONITOR_DATA_DIR`，目录创建命令也改为该路径。`prepare.sh` 会为旧 `.env` 补充 BuildAdmin 数据库密码和令牌密钥，不会重置现有密钥。迁移命令只初始化 BuildAdmin 的 MySQL 表，监控记录仍留在 PostgreSQL。账号导入程序复制原 Laravel 管理员及只读用户的邮箱、密码散列和权限；再次运行不会覆盖在新后台修改过的密码。BuildAdmin 上游自带的空密码演示管理员会被禁用。
+
+在切换公网入口前，先通过本机端口打开 `http://127.0.0.1:8081/#/admin/login` 验证旧管理员邮箱及密码。若从远程电脑测试，可以通过现有可信的 SSH 隧道转发本机端口；不要把 8081 直接暴露到公网。确认采集节点、告警、网站、规则、详情和账号页面正常后，再切换 Caddy：
+
+```sh
+docker compose -f compose.yml -f compose.buildadmin.yml --profile https up -d --no-deps --force-recreate https
+curl -I https://你的域名/
+```
+
+访问 `https://你的域名/#/admin/login`。公网 `/api/*` 仍送到原 Laravel 服务供 Agent 与截图 worker 使用，其余页面送到 BuildAdmin。旧 Laravel 管理 UI 不再由公网入口提供。告警中心显示筛选后的准确总数，单页可选 10、25、50、100、200、500 条；列表仅返回概要字段，详情与截图在点击时单独读取。
+
+如果切换后发现问题，可立即恢复旧公网入口，原有 PostgreSQL 和 Agent 无需回滚：
+
+```sh
+docker compose -f compose.yml --profile https up -d --no-deps --force-recreate https
+```
+
+回退后仍用原 Laravel 后台的账号信息登录；在 BuildAdmin 中变更的邮箱或密码不会自动同步回 Laravel。验证完成后才考虑停用旧管理登录入口，采集 API 仍需要 Laravel 服务运行。
+
+## 5. 截图工作服务
 
 ```sh
 docker compose --profile screenshots build worker
@@ -106,7 +142,7 @@ docker compose --profile screenshots up -d worker
 
 **IPv6 站点验证要求工作进程本身具有 IPv6 出口。** Docker 默认网络不一定具备该能力，宿主机能够访问 IPv6 不代表容器也能。按你的 Docker／路由环境配置 IPv6 网络后，从 worker 容器验证连通性；也可在专用且具备 IPv6 出口的工作机部署 worker。IPv6 不可达会显示探测失败，不能解释为站点不存在。被动 IPv6 流量采集不依赖管理端的 IPv6 出口。
 
-## 5. 创建节点并获取配置
+## 6. 创建节点并获取配置
 
 后台进入“采集节点”，新增节点：
 
@@ -127,7 +163,7 @@ docker compose exec app php artisan monitor:node-token 节点UUID
 
 此命令仅打印一次密钥，不要将输出放入工单、公共日志或代码仓库。
 
-## 6. 编译与安装 Agent
+## 7. 编译与安装 Agent
 
 开发机使用 Go 1.24 或更新且支持目标内核的版本：
 
@@ -150,7 +186,7 @@ CentOS 7 的旧 systemd 使用 `MemoryLimit`，新版本使用 `MemoryMax`。安
 
 如果 `/home` 挂载为 `noexec`，目录中的二进制不能执行。可将整个数据目录配置到允许执行的大分区路径；不要为安装程序随意取消生产分区的安全选项。
 
-## 7. 验证接入
+## 8. 验证接入
 
 ```sh
 systemctl status vm-monitor-agent --no-pager
@@ -165,7 +201,7 @@ du -sh /home/vm-monitor
 
 以可控 VM 验证：向公网发起正常连接、通过非标准端口访问测试站点、分别检查 IPv4 与 IPv6。确认后台显示的是正确公网 IP。不能因为节点在线就认定它看到了全部 VM 流量。
 
-## 8. 主动发现无访问的网站
+## 9. 主动发现无访问的网站
 
 使用已配置节点范围，对单个 IP 或小 IPv4 CIDR 排队：
 
@@ -178,7 +214,7 @@ docker compose exec app php artisan monitor:discover 节点UUID 实际IPv4网段
 
 任意 TCP Web 端口可以分批指定；不提供对大网段高频全端口扫描。后台可对已发现 IP 手动添加域名及端口，再验证虚拟主机站点。
 
-## 9. 通知、升级与卸载
+## 10. 通知、升级与卸载
 
 SMTP 通知：在 `.env` 配置 `MONITOR_ALERT_EMAIL`、`MAIL_MAILER=smtp` 及真实 SMTP 参数，再重建相关容器。首次出现的合并告警会排队发送邮件；重试采用至少一次语义，极端故障时可能重复投递。未配置收件人时不会发送。
 

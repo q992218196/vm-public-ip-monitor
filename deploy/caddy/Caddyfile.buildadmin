@@ -1,0 +1,19 @@
+{
+    log {
+        output file /data/caddy-runtime.log {
+            roll_size 8MiB
+            roll_keep 2
+        }
+        level INFO
+    }
+}
+
+{$MONITOR_DOMAIN} {
+    @agent path /api/*
+    handle @agent {
+        reverse_proxy web:8080
+    }
+    handle {
+        reverse_proxy buildadmin-web:8081
+    }
+}

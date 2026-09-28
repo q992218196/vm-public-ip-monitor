@@ -8,6 +8,11 @@ server/storage/logs/*
 server/storage/framework/*
 server/bootstrap/cache/*.php
 worker/node_modules
+admin/web/node_modules
+admin/web/dist
+admin/vendor
+admin/runtime
+admin/.env
 agent/.cache
 agent/bin
 dist

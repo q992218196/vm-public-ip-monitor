@@ -53,6 +53,65 @@ jobs:
           node-version: '22'
       - run: npm ci && npm test
         working-directory: worker
+  admin:
+    runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_DATABASE: buildadmin
+          MYSQL_USER: buildadmin
+          MYSQL_PASSWORD: test-only-password
+          MYSQL_ROOT_PASSWORD: test-only-root-password
+        ports: ['3306:3306']
+        options: --health-cmd="mysqladmin ping -h 127.0.0.1 -u buildadmin -ptest-only-password --silent" --health-interval=10s --health-retries=20
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_DB: monitor_test
+          POSTGRES_USER: monitor
+          POSTGRES_PASSWORD: test-only-password
+        ports: ['5432:5432']
+        options: --health-cmd=pg_isready --health-interval=10s --health-retries=10
+    env:
+      BUILDADMIN_DB_HOST: 127.0.0.1
+      BUILDADMIN_DB_DATABASE: buildadmin
+      BUILDADMIN_DB_USERNAME: buildadmin
+      BUILDADMIN_DB_PASSWORD: test-only-password
+      BUILDADMIN_TOKEN_KEY: test-only-buildadmin-token-key-32-bytes
+      MONITOR_DB_HOST: 127.0.0.1
+      MONITOR_DB_DATABASE: monitor_test
+      MONITOR_DB_USERNAME: monitor
+      MONITOR_DB_PASSWORD: test-only-password
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: bcmath, gd, mbstring, pdo_mysql, pdo_pgsql, zip
+          coverage: none
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: admin/web/package-lock.json
+      - run: composer install --no-dev --no-interaction --prefer-dist
+        working-directory: admin
+      - uses: actions/upload-artifact@v4
+        with:
+          name: admin-composer-lock
+          path: admin/composer.lock
+      - run: php -l app/admin/controller/Monitor.php && php -l database/migrations/20260928000000_monitor_menus.php && php -l tools/import-monitor-users.php
+        working-directory: admin
+      - run: php think migrate:run
+        working-directory: admin
+      - run: |
+          php -r '$db=new PDO("pgsql:host=127.0.0.1;dbname=monitor_test","monitor","test-only-password");$db->exec("CREATE TABLE users (id bigint primary key,name varchar(255),email varchar(255),password varchar(255),role varchar(32))");$p=password_hash("test-admin-password-2026",PASSWORD_BCRYPT);$s=$db->prepare("INSERT INTO users VALUES (1,?,?,?,?)");$s->execute(["Admin","admin@example.test",$p,"admin"]);$s->execute(["Viewer","viewer@example.test",$p,"viewer"]);'
+          php tools/import-monitor-users.php
+          php -r '$db=new PDO("mysql:host=127.0.0.1;dbname=buildadmin","buildadmin","test-only-password");$users=$db->query("SELECT email,password FROM ba_admin WHERE status=\"enable\" ORDER BY email")->fetchAll(PDO::FETCH_ASSOC);if(count($users)!==2 || !password_verify("test-admin-password-2026",$users[0]["password"]))exit(1);'
+        working-directory: admin
+      - run: npm ci --no-audit --no-fund && npm run typecheck && npm run build
+        working-directory: admin/web
   containers:
     runs-on: ubuntu-latest
     steps:
@@ -62,6 +121,9 @@ jobs:
         working-directory: deploy
       - run: docker compose --profile https config --quiet
         working-directory: deploy
+      - run: docker compose -f compose.yml -f compose.buildadmin.yml --profile https config --quiet
+        working-directory: deploy
+      - run: docker run --rm -e MONITOR_DOMAIN=monitor.example.com -v "$PWD/deploy/caddy/Caddyfile.buildadmin:/etc/caddy/Caddyfile:ro" caddy:2.11.4-alpine caddy validate --config /etc/caddy/Caddyfile
       - run: docker run --rm -e MONITOR_DOMAIN=monitor.example.com -v "$PWD/deploy/caddy/Caddyfile:/etc/caddy/Caddyfile:ro" caddy:2.11.4-alpine caddy validate --config /etc/caddy/Caddyfile
       - run: |
           docker run --name vm-monitor-fpm-smoke -d vm-monitor-app:local
