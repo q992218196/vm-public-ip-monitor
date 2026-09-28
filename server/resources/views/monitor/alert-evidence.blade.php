@@ -58,7 +58,7 @@
             <div><dt>VM 服务端口</dt><dd>{{ $alert->evidence['local_port'] ?? '—' }}</dd></div>
             <div><dt>不同对端／双向会话</dt><dd>{{ $alert->evidence['peer_count'] ?? 0 }} / {{ $alert->evidence['session_count'] ?? 0 }}</dd></div>
             <div><dt>接收／发送载荷</dt><dd>{{ $alert->evidence['bytes_from_peers'] ?? 0 }} / {{ $alert->evidence['bytes_to_peers'] ?? 0 }} 字节</dd></div>
-            <div><dt>VM 出站目标数</dt><dd>{{ $alert->evidence['egress_target_count'] ?? 0 }}</dd></div>
+            <div><dt>VM 主动发起 TCP 的出站目标数</dt><dd>{{ $alert->evidence['egress_target_count'] ?? 0 }}</dd></div>
         </dl>
         <p>对端样本：{{ implode('、', $alert->evidence['peer_samples'] ?? []) }}</p>
         <p>出站目标样本：{{ implode('、', $alert->evidence['egress_target_samples'] ?? []) }}</p>

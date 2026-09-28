@@ -95,7 +95,7 @@ class Analyzer
             };
             $recordEvidence = $observation + [
                 'candidate_protocols' => $candidates,
-                'method' => '同端口多对端双向加密传输外观与同窗口多目标出站行为相关',
+                'method' => '同端口多对端双向加密传输外观与同窗口多目标出站 TCP 连接相关',
                 'confidence' => 'behavioral_suspect',
                 'note' => '只能说明流量样态可疑；候选协议不能区分或确认，出站目标也可能属于其他业务。普通网站、游戏或其他加密服务可能出现相同特征。',
             ];
