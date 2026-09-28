@@ -6,10 +6,23 @@ use App\Models\Alert;
 use App\Models\Node;
 use App\Models\ProtocolObservation;
 use App\Models\Website;
+use App\Support\AlertFilters;
 use Illuminate\Support\Facades\Route;
 
 Route::get('/', fn () => redirect('/admin'));
 Route::middleware('auth')->group(function () {
+    Route::get('/alerts/count', function (\Illuminate\Http\Request $request) {
+        abort_unless(in_array(auth()->user()->role, ['admin', 'viewer'], true), 403);
+        $filters = $request->validate([
+            'node' => 'nullable|uuid',
+            'ip' => 'nullable|ip',
+            'severity' => 'nullable|in:low,medium,high',
+            'status' => 'nullable|in:open,acknowledged,resolved',
+        ]);
+
+        return response()->json(['total' => AlertFilters::apply(Alert::query(), $filters)->count()])
+            ->header('Cache-Control', 'private, no-store');
+    })->middleware('throttle:30,1')->name('alerts.count');
     Route::get('/nodes/{node}/evidence', function (Node $node) {
         abort_unless(in_array(auth()->user()->role, ['admin', 'viewer'], true), 403);
 

@@ -4,6 +4,7 @@
     let pending = 0;
     let navigation = false;
     let requestController;
+    let countController;
     const progress = document.createElement('div');
     progress.className = 'monitor-progress';
     progress.setAttribute('role', 'progressbar');
@@ -22,6 +23,7 @@
         document.body.append(progress);
         navigation = false;
         updateProgress();
+        updateAlertCount();
     });
     document.addEventListener('livewire:navigate-cancelled', () => {
         navigation = false;
@@ -48,6 +50,27 @@
     }
     document.addEventListener('livewire:init', registerLivewireProgress);
     registerLivewireProgress();
+
+    async function updateAlertCount() {
+        const target = document.querySelector('[data-monitor-alert-total]');
+        countController?.abort();
+        if (!target) return;
+        const controller = new AbortController();
+        countController = controller;
+        try {
+            const response = await fetch(target.dataset.countUrl, {
+                credentials: 'same-origin',
+                headers: {'Accept': 'application/json'},
+                signal: controller.signal,
+            });
+            if (!response.ok) throw new Error('统计失败');
+            const result = await response.json();
+            if (!controller.signal.aborted) target.textContent = `总计 ${Number(result.total).toLocaleString()} 条`;
+        } catch (error) {
+            if (!controller.signal.aborted) target.textContent = '总数暂不可用';
+        }
+    }
+    updateAlertCount();
 
     window.monitorShowEvidence = async (url) => {
         let dialog = document.getElementById('monitor-evidence-dialog');

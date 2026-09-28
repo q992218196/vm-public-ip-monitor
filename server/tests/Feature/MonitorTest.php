@@ -219,6 +219,10 @@ class MonitorTest extends TestCase
         $this->actingAs($admin);
         $alert = Alert::where('kind', 'new_website')->firstOrFail();
         $this->get('/admin/alerts?node='.$node->id.'&ip=203.0.113.10&severity=low')->assertOk()->assertSee($alert->title);
+        $this->getJson(route('alerts.count', ['node' => $node->id, 'ip' => '203.0.113.10', 'severity' => 'low']))
+            ->assertOk()->assertJsonPath('total', 1);
+        $this->getJson(route('alerts.count', ['severity' => 'high']))
+            ->assertOk()->assertJsonPath('total', 0);
         $this->post(route('alerts.bulk'), ['ids' => [$alert->id], 'status' => 'acknowledged', 'resolution' => '已核对资产'])->assertRedirect();
         $this->assertDatabaseHas('alerts', ['id' => $alert->id, 'status' => 'acknowledged', 'resolution' => '已核对资产']);
         $this->assertDatabaseHas('audit_logs', ['action' => 'alerts_bulk_handled']);

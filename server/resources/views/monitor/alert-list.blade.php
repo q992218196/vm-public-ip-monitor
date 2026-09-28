@@ -65,7 +65,7 @@
         @if (auth()->user()?->role === 'admin') </form> @endif
         <nav class="monitor-cursor-nav" aria-label="告警分页">
             @if ($alerts->previousPageUrl()) <a href="{{ $alerts->previousPageUrl() }}">← 上一页</a> @endif
-            <span>本页 {{ $alerts->count() }} 条</span>
+            <span>本页 {{ $alerts->count() }} 条 · <span data-monitor-alert-total data-count-url="{{ route('alerts.count', \Illuminate\Support\Arr::only($filters, ['node', 'ip', 'severity', 'status'])) }}" role="status">总计：统计中…</span></span>
             @if ($alerts->nextPageUrl()) <a href="{{ $alerts->nextPageUrl() }}">下一页 →</a> @endif
         </nav>
     </div>
