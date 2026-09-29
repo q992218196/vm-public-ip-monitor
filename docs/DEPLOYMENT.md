@@ -114,6 +114,14 @@ curl -I https://你的域名/
 
 访问 `https://你的域名/#/admin/login`。公网 `/api/*` 仍送到原 Laravel 服务供 Agent 与截图 worker 使用，其余页面送到 BuildAdmin。旧 Laravel 管理 UI 不再由公网入口提供。告警中心显示筛选后的准确总数，单页可选 10、25、50、100、200、500 条；列表仅返回概要字段，详情与截图在点击时单独读取。
 
+如果输入账号后又回到登录页，先检查登录接口是否真正到达后台控制器：
+
+```sh
+curl -fsS -H 'server: true' https://你的域名/admin/Index/login
+```
+
+正常 JSON 的 `data` 中应有布尔值 `captcha`。如果返回的是 `site`、`menus` 等首页字段，说明运行中的 `buildadmin-web` 使用了旧版 Nginx 配置；更新代码后执行 `docker compose -f compose.yml -f compose.buildadmin.yml up -d --no-deps --build --force-recreate buildadmin-web`，再运行上面的检查。此操作不重置数据库或账号。不要将密码放进诊断命令。
+
 如果切换后发现问题，可立即恢复旧公网入口，原有 PostgreSQL 和 Agent 无需回滚：
 
 ```sh

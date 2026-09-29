@@ -166,6 +166,14 @@ jobs:
           sleep 3
           test "$(docker inspect -f '{{.State.Running}}' vm-monitor-buildadmin-fpm-smoke)" = true
       - run: |
+          set -euo pipefail
+          trap 'docker compose -f compose.yml -f compose.buildadmin.yml down --remove-orphans >/dev/null 2>&1 || true' EXIT
+          docker compose -f compose.yml -f compose.buildadmin.yml up -d --no-build postgres buildadmin-db buildadmin-app buildadmin-web
+          docker compose -f compose.yml -f compose.buildadmin.yml exec -T buildadmin-app php think migrate:run
+          curl --retry 10 --retry-connrefused --retry-delay 2 -fsS -H 'server: true' http://127.0.0.1:8081/admin/Index/login >/tmp/buildadmin-nginx-login.json
+          python3 -c 'import json; data=json.load(open("/tmp/buildadmin-nginx-login.json")); assert data["code"]==1 and isinstance(data["data"]["captcha"],bool), data'
+        working-directory: deploy
+      - run: |
           trap 'docker compose --profile screenshots down --remove-orphans >/dev/null 2>&1 || true' EXIT
           worker_uid=$(docker compose --profile screenshots run --rm --no-deps --entrypoint id worker -u)
           worker_gid=$(docker compose --profile screenshots run --rm --no-deps --entrypoint id worker -g)
