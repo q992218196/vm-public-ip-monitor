@@ -179,7 +179,7 @@ func (s *Spool) SendOne(ctx context.Context) (bool, error) {
 		Accepted bool `json:"accepted"`
 	}
 	if res.StatusCode != 200 || json.Unmarshal(body, &ack) != nil || !ack.Accepted {
-		return false, fmt.Errorf("upload rejected HTTP %d (retained locally)", res.StatusCode)
+		return false, fmt.Errorf("upload rejected HTTP %d (retained locally)%s", res.StatusCode, rejectionReason(body))
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()

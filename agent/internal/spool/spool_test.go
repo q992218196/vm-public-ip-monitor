@@ -76,6 +76,22 @@ func TestPermanentRejectionDoesNotBlockQueue(t *testing.T) {
 	}
 }
 
+func TestRetryableRejectionShowsReasonAndRetainsBatch(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(429)
+		fmt.Fprint(w, `{"message":"Node inbox is full; wait for processing."}`)
+	}))
+	defer server.Close()
+	s, _ := New(config.Config{DataDir: t.TempDir(), SpoolLimitMiB: 1, DiskLimitMiB: 2, ServerURL: server.URL})
+	s.Put(wire.Batch{ID: "retry"})
+	if _, err := s.SendOne(context.Background()); err == nil || !strings.Contains(err.Error(), "Node inbox is full; wait for processing.") {
+		t.Fatalf("expected retryable reason, got %v", err)
+	}
+	if used, dropped := s.Status(); used == 0 || dropped != 0 {
+		t.Fatalf("retryable batch was lost: used=%d dropped=%d", used, dropped)
+	}
+}
+
 func TestNormalTrafficCannotEvictPriorityEvidence(t *testing.T) {
 	s, _ := New(config.Config{DataDir: t.TempDir(), SpoolLimitMiB: 1, DiskLimitMiB: 2})
 	if err := s.Put(wire.Batch{ID: "priority", WindowStart: strings.Repeat("x", 400000), Sites: []wire.Site{{IP: "203.0.113.1", Port: 80}}}); err != nil {
