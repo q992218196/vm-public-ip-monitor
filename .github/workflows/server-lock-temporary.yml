@@ -1,0 +1,20 @@
+name: regenerate-server-lock-temporary
+on:
+  push:
+    branches: [codex/remove-legacy-panel]
+jobs:
+  lock:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: intl, mbstring, pdo_pgsql, zip
+          coverage: none
+      - run: composer update --no-install --no-scripts --no-interaction --minimal-changes
+        working-directory: server
+      - uses: actions/upload-artifact@v4
+        with:
+          name: server-composer-lock
+          path: server/composer.lock

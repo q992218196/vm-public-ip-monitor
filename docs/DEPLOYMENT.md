@@ -1,122 +1,48 @@
-# 部署教程
+# 部署教程（BuildAdmin 管理后台）
 
-## 1. 拓扑与准备
+本项目由四部分组成：宿主机上的 Go Agent、接收和分析数据的 Laravel API、BuildAdmin 管理后台、可选的截图 worker。VM 内不安装软件。公网域名的 `/api/v1/*` 转到 Laravel API，其余管理页面由 BuildAdmin 提供；Laravel 不提供管理登录页面。
 
-管理端部署到仍受支持的 Linux 系统，建议 Debian 13。宿主机支持目标为 CentOS 7、CentOS Stream 8、Debian 13，实际兼容性需要对应机器验证。CentOS 7 和 Stream 8 已停止官方维护。
+## 1. 准备服务器
 
-管理端需要 Docker Engine、Compose v2、Python 3。项目提供可选的 Caddy HTTPS 入口，也可使用已有的反向代理。宿主机需要 systemd、Python 2.7+ 或 3、CA 证书；不需要 PHP、Docker、Node.js、libpcap 或 VM 内 Agent。
+管理服务器建议使用仍受支持的 Linux 系统（例如 Debian 13），安装 Docker Engine、Docker Compose v2、Git 和 Python 3。首次试点可从 4–8 核、16 GiB 内存和 SSD 开始，实际容量须按事件量、截图并发和保留期测量。宿主机 Agent 支持目标为 CentOS 7、CentOS Stream 8、Debian 13；安装前需在各系统实际验证。宿主机需要 systemd、CA 证书和 Python 2.7+ 或 3，不需要在 VM 内安装任何组件。
 
-起步测试管理机可用 4–8 核、16 GiB 内存、SSD；这是试点起点，不是几十台宿主机的容量承诺。截图工作进程可迁到独立机器。容量按事件量与保留期压测。
+域名的 A／AAAA 记录应指向管理服务器。开放 TCP 80、443；Web、数据库、Redis 和 PHP-FPM 仅在 Docker 网络或本机监听。监控数据、MySQL、PostgreSQL、Redis、截图和编译产物默认放在 `/home/vm-monitor-server`；可以在 `deploy/.env` 中用 `MONITOR_DATA_DIR` 改为其他大分区。不要把生产 VM 镜像分区用作截图或数据库的无界存储。
 
-不要在存放生产 VM 镜像的分区随意改变 Docker 全局配置。若要求容器镜像、构建缓存也全部存 `/home`，在专用管理机部署前，将 Docker 的 `data-root` 配置到 `/home/docker`；已有 Docker 的数据迁移需要单独规划。应用挂载目录不能控制 Docker 自身镜像存储位置。
-
-## 2. 初始化服务端
-
-把整个项目复制到管理机，例如 `/home/vm-monitor-src`：
+## 2. 全新安装
 
 ```sh
+sudo git clone https://github.com/q992218196/vm-public-ip-monitor.git /home/vm-monitor-src
 cd /home/vm-monitor-src/deploy
 bash prepare.sh
 ```
 
-脚本创建 `.env`、生成 APP_KEY、数据库密码及工作进程凭据，不输出密钥。编辑 `.env`：
-
-```dotenv
-MONITOR_DATA_DIR=/home/vm-monitor-server
-APP_URL=https://monitor.your-domain.example
-MONITOR_DOMAIN=monitor.your-domain.example
-MONITOR_AUTO_PROBE=false
-```
-
-不要在生产使用默认示例域名。第一次建议关闭自动探测，验证采集范围之后再开启。新部署的 `.env.example` 默认开启自动验证；试点时可以显式设为 `false`。
-
-试点确认公网 IP 范围、截图工作服务和内网隔离后，将现有 `.env` 的 `MONITOR_AUTO_PROBE` 改为 `true`，执行 `docker compose up -d --no-deps --force-recreate app queue scheduler`。开启后，后台每 5 分钟最多为 50 个尚未验证或超过 24 小时未验证的网站排队，同时待处理任务最多 1000 个。未启动截图 worker 时任务会排队，但不会生成截图。
-
-准备目录：
+编辑 `deploy/.env`，至少将 `APP_URL` 改为 `https://vm-monitor.lcayun.cn`（换域名时用自己的域名），并设置 `MONITOR_DOMAIN=vm-monitor.lcayun.cn`。`prepare.sh` 会生成随机密钥，切勿公开或在后续升级时重新生成。使用自定义数据目录时，下面所有 `/home/vm-monitor-server` 路径都要同步替换。
 
 ```sh
-sudo mkdir -p /home/vm-monitor-server/{storage,postgres,redis,worker,nginx-logs}
-sudo mkdir -p /home/vm-monitor-server/worker/tmp
-docker compose build app web
-docker compose up -d postgres redis app web
-docker compose ps app
-docker compose exec app php artisan migrate --force
-docker compose exec app php artisan db:seed --class=MonitorSeeder --force
-docker compose exec app php artisan monitor:admin admin@your-domain.example
-docker compose up -d queue scheduler
+sudo mkdir -p /home/vm-monitor-server/{storage,postgres,redis,nginx-logs,agent-dist,caddy/data,caddy/config,buildadmin/mysql,buildadmin/runtime,buildadmin/uploads,worker/tmp}
+docker compose -f compose.yml -f compose.buildadmin.yml build app web buildadmin-app buildadmin-web
+docker compose -f compose.yml -f compose.buildadmin.yml up -d postgres redis buildadmin-db
+docker compose -f compose.yml -f compose.buildadmin.yml run --rm --no-deps app php artisan migrate --force
+docker compose -f compose.yml -f compose.buildadmin.yml up -d app web queue scheduler buildadmin-app buildadmin-web
+docker compose -f compose.yml -f compose.buildadmin.yml exec buildadmin-app php think migrate:run
+docker compose -f compose.yml -f compose.buildadmin.yml exec buildadmin-app php tools/init-admin.php admin@your-domain.example
 ```
 
-密码通过交互输入，至少 12 位。没有内置默认管理员密码。
+最后一条命令会在终端交互输入并确认至少 12 位的密码，不会把密码放到命令行参数。请把邮箱换成自己的。该命令只初始化新数据库里尚未设置密码的管理员；若已有管理员，应在 BuildAdmin 的“管理员管理”或“个人资料”中修改，不能重复初始化。
 
-初始化不会自动添加节点、不会自动改变宿主机网络、不会向第三方发通知。
-
-`app` 应保持 `Up`。若它反复重启，查看默认数据目录中的 `/home/vm-monitor-server/storage/logs/php-fpm.log`；自定义 `MONITOR_DATA_DIR` 时使用对应路径。容器日志驱动已关闭，因此 `docker compose logs app` 不显示此日志。
-
-如果 Agent 连续收到 HTTP 502，而 `app` 与 `web` 容器都显示 `Up`，先执行 `docker compose -f compose.yml -f compose.buildadmin.yml restart web` 并检查公网 API 状态。旧版 Nginx 会缓存 `app` 容器启动时的 IP；只重建 `app` 后，仍运行的 `web` 可能继续连接旧 IP。新版 Web 配置使用 Docker 内置 DNS 动态解析；升级配置时需重建 `web` 镜像和容器。未部署 Agent 更新接口的旧服务端，对 `/api/v1/agent/update` 返回 404 是正常的；新版无令牌请求应返回 401。上传失败的 502 批次保留在节点本地并自动重试；422 批次已被 Agent 丢弃，需结合当时的服务端校验日志单独分析。
-
-## 3. HTTPS
-
-Compose 只将 Web 绑定到管理机 `127.0.0.1:8080`，数据库、Redis 和 PHP-FPM 不对公网发布。确认域名 A／AAAA 记录指向管理机，并在云平台安全组和主机防火墙开放 TCP 80、443。可以使用项目自带的 Caddy 入口自动申请并续期证书：
+在主控编译并提供 Linux amd64 Agent 下载文件，然后启动 HTTPS：
 
 ```sh
-cd /home/vm-monitor-src/deploy
-sudo mkdir -p /home/vm-monitor-server/caddy/{data,config}
-docker compose --profile https up -d https
-docker compose ps https
-curl -I https://monitor.your-domain.example/admin/login
-```
-
-将示例域名替换为 `.env` 中的实际 `MONITOR_DOMAIN`。Caddy 的证书、配置及有界运行日志都保存在 `${MONITOR_DATA_DIR}/caddy`；证书申请失败时查看 `caddy/data/caddy-runtime.log`。若在容器启动之后才修改 `APP_URL`，执行 `docker compose up -d --no-deps --force-recreate app web queue scheduler` 使环境变量生效，然后启动 HTTPS 入口。
-
-已有 Nginx/Caddy 时，不启动 `https` 配置组，而是在同一管理机终止 HTTPS 并转发到 `127.0.0.1:8080`。下面是 Nginx 的核心配置片段，证书路径使用你已有的实际证书：
-
-```nginx
-server {
-    listen 443 ssl;
-    server_name monitor.your-domain.example;
-    ssl_certificate /path/to/fullchain.pem;
-    ssl_certificate_key /path/to/privkey.pem;
-    client_max_body_size 9m;
-    location / {
-        proxy_pass http://127.0.0.1:8080;
-        proxy_set_header Host $host;
-        proxy_set_header X-Forwarded-Proto https;
-        proxy_read_timeout 130s;
-    }
-}
-```
-
-访问 `https://你的域名/admin`。应用生成 HTTPS 链接，生产 Session Cookie 仅通过 HTTPS 发送。Agent 强制验证 HTTPS 证书；不要关闭校验来解决证书问题。
-
-## 4. 完整切换到 BuildAdmin 管理后台
-
-BuildAdmin 承担登录、账号权限、首页及全部监控管理页面。原 Laravel 服务仍接收 Agent 数据并处理分析与截图任务，因此切换后台不会改变宿主机 Agent 的上报地址。BuildAdmin 使用独立 MySQL 保存账号和菜单，直接读取现有 PostgreSQL 监控数据；MySQL 数据默认保存在 `${MONITOR_DATA_DIR}/buildadmin/mysql`。
-
-先更新项目代码，然后在管理服务器的 `deploy` 目录执行：
-
-```sh
-cd /home/vm-monitor-src/deploy
-bash prepare.sh
-sudo mkdir -p /home/vm-monitor-server/buildadmin/{mysql,runtime,uploads}
-docker compose -f compose.yml -f compose.buildadmin.yml build buildadmin-app buildadmin-web
 docker compose -f compose.yml -f compose.buildadmin.yml --profile agent-build build agent-builder
 docker compose -f compose.yml -f compose.buildadmin.yml --profile agent-build run --rm agent-builder
-docker compose -f compose.yml -f compose.buildadmin.yml build app web
-docker compose -f compose.yml -f compose.buildadmin.yml run --rm --no-deps app php artisan migrate --force
-docker compose -f compose.yml -f compose.buildadmin.yml up -d --no-deps --force-recreate app web queue scheduler
-docker compose -f compose.yml -f compose.buildadmin.yml up -d buildadmin-db buildadmin-app buildadmin-web
-docker compose -f compose.yml -f compose.buildadmin.yml exec buildadmin-app php think migrate:run
-docker compose -f compose.yml -f compose.buildadmin.yml exec buildadmin-app php tools/import-monitor-users.php
-curl -I http://127.0.0.1:8081/
+docker compose -f compose.yml -f compose.buildadmin.yml --profile https up -d https
 ```
 
-若使用自定义 `MONITOR_DATA_DIR`，目录创建命令也改为该路径。`prepare.sh` 会为旧 `.env` 补充 BuildAdmin 数据库密码和令牌密钥，不会重置现有密钥。迁移命令只初始化 BuildAdmin 的 MySQL 表，监控记录仍留在 PostgreSQL。账号导入程序复制原 Laravel 管理员及只读用户的邮箱、密码散列和权限；再次运行不会覆盖在新后台修改过的密码。BuildAdmin 上游自带的空密码演示管理员会被禁用。
+打开 `https://你的域名/#/admin/login`，使用刚设置的邮箱和密码登录。BuildAdmin 的 MySQL 数据位于 `${MONITOR_DATA_DIR}/buildadmin/mysql`，监控记录位于 PostgreSQL；两个数据库都要备份。
 
-`agent-builder` 在主控服务器编译 Linux amd64 Agent，产物、版本号、安装脚本及 `SHA256SUMS` 放在 `${MONITOR_DATA_DIR}/agent-dist`（默认 `/home/vm-monitor-server/agent-dist`）。后台“采集节点”显示当前上报版本，点击“生成安装命令”可取得一次性配置链接；在目标宿主机以 root 粘贴命令，它会从本站 HTTPS 自动下载 `agent.json`、二进制和安装脚本并校验哈希。配置链接只能使用一次，10 分钟后过期。生成命令时旧节点令牌立即撤销，因此请在生成后及时执行，且不要把命令贴到公共日志、工单或聊天记录。仍可用“接入配置”下载文件并手动传输。
+## 3. 升级已运行的主控
 
-首次从 0.3.x 或更旧版本升级到 0.4.1，需要在节点手动执行新的安装命令；旧版本没有更新轮询能力。以后在后台单个节点点击“更新 Agent”，或勾选多个节点后批量下发。主控仅下发已编译的固定版本和 SHA-256，Agent 每分钟轮询一次，下载后验证哈希、自检、保存上一版并由 systemd 自动重启；失败时保留当前二进制，在后台显示错误，10 分钟后重试。发布新版要先更新 `agent/VERSION` 并重新运行 `agent-builder` 两条命令，然后在后台下发更新。建议先选一台节点验证，再批量下发。
-
-已有 BuildAdmin 部署升级此功能时，按以下顺序执行；数据库服务保持运行，先迁移 PostgreSQL 再切换新后台：
+先备份 `deploy/.env`、PostgreSQL、BuildAdmin MySQL 和 `${MONITOR_DATA_DIR}/storage`，并确认 `/home` 有足够空间。在低峰时段执行。现有邮箱和密码保留，不要再次运行 `prepare.sh` 或 `init-admin.php`。
 
 ```sh
 cd /home/vm-monitor-src
@@ -128,102 +54,44 @@ docker compose -f compose.yml -f compose.buildadmin.yml --profile agent-build ru
 docker compose -f compose.yml -f compose.buildadmin.yml run --rm --no-deps app php artisan migrate --force
 docker compose -f compose.yml -f compose.buildadmin.yml up -d --no-deps --force-recreate app web queue scheduler buildadmin-app buildadmin-web
 docker compose -f compose.yml -f compose.buildadmin.yml exec buildadmin-app php think migrate:run
-```
-
-若使用项目自带 HTTPS 入口，再执行 `docker compose -f compose.yml -f compose.buildadmin.yml --profile https up -d --no-deps --force-recreate https`。迁移之前先备份数据库和 `.env`。新版本上线后，先在一台旧 Agent 节点生成并执行安装命令，看到当前版本显示 `0.4.1`，再批量处理其他节点。
-
-在切换公网入口前，先通过本机端口打开 `http://127.0.0.1:8081/#/admin/login` 验证旧管理员邮箱及密码。若从远程电脑测试，可以通过现有可信的 SSH 隧道转发本机端口；不要把 8081 直接暴露到公网。确认采集节点、告警、网站、规则、详情和账号页面正常后，再切换 Caddy：
-
-```sh
 docker compose -f compose.yml -f compose.buildadmin.yml --profile https up -d --no-deps --force-recreate https
-curl -I https://你的域名/
+docker compose -f compose.yml -f compose.buildadmin.yml exec app php artisan view:clear
 ```
 
-访问 `https://你的域名/#/admin/login`。公网 `/api/v1/*` 仍送到原 Laravel 服务供 Agent 与截图 worker 使用；BuildAdmin 的 `/api/common/*` 接收验证码和令牌刷新请求。其他页面由 BuildAdmin 提供。旧 Laravel 管理 UI 不再由公网入口提供。告警中心显示筛选后的准确总数，单页可选 10、25、50、100、200、500 条；列表仅返回概要字段，详情与截图在点击时单独读取。
-
-如果输入账号后又回到登录页，先检查登录接口是否真正到达后台控制器：
+数据库迁移保留现有监控数据和 BuildAdmin 账号。重建 PHP 应用时 Web 容器也会重建，避免连接到已更换的容器地址。升级后检查：
 
 ```sh
-curl -fsS -H 'server: true' https://你的域名/admin/Index/login
+docker compose -f compose.yml -f compose.buildadmin.yml --profile https ps
+curl -sS -o /dev/null -w 'Agent API: %{http_code}\n' 'https://vm-monitor.lcayun.cn/api/v1/agent/update?version=0.3.0'
+curl -sS -o /dev/null -w 'BuildAdmin: %{http_code}\n' 'https://vm-monitor.lcayun.cn/admin/Index/login'
 ```
 
-正常 JSON 的 `data` 中应有布尔值 `captcha`。如果返回的是 `site`、`menus` 等首页字段，说明运行中的 `buildadmin-web` 使用了旧版 Nginx 配置；更新代码后执行 `docker compose -f compose.yml -f compose.buildadmin.yml up -d --no-deps --build --force-recreate buildadmin-web`，再运行上面的检查。此操作不重置数据库或账号。不要将密码放进诊断命令。
+第一项无 Agent 令牌时应返回 `401`，第二项应返回 `200`；把示例域名替换为实际域名。然后在 BuildAdmin“采集节点”确认“最近上报”持续更新。只看到容器为 `Up` 不等于上报链路已经恢复。
 
-若登录弹窗报错 `/api/common/clickCaptcha`，需要同时重建 `buildadmin-web` 并重启 `https` 服务，确保 Nginx 与 Caddy 都加载了新版路由。检查 `curl -fsS -H 'server: true' 'https://你的域名/api/common/clickCaptcha?id=smoke-check'`，正常 JSON 中的 `data.base64` 应以 `data:image/` 开头。验证码图像内容不必贴出。
+## 4. 截图 worker
 
-如果切换后发现问题，可立即恢复旧公网入口，原有 PostgreSQL 和 Agent 无需回滚：
-
-```sh
-docker compose -f compose.yml --profile https up -d --no-deps --force-recreate https
-```
-
-回退后仍用原 Laravel 后台的账号信息登录；在 BuildAdmin 中变更的邮箱或密码不会自动同步回 Laravel。验证完成后才考虑停用旧管理登录入口，采集 API 仍需要 Laravel 服务运行。
-
-## 5. 截图工作服务
+如果需要网站截图和内容分类，再启动 worker。它只通过有界任务验证已登记的公网 IP、协议、端口和 Host；不在 Agent 宿主机运行 Chromium。默认并发 2，容器内存上限 2 GiB；`WORKER_CONCURRENCY` 可设为 1–4，增大并发前先观察内存和失败率。
 
 ```sh
-docker compose --profile screenshots build worker
-worker_uid=$(docker compose --profile screenshots run --rm --no-deps --entrypoint id worker -u)
-worker_gid=$(docker compose --profile screenshots run --rm --no-deps --entrypoint id worker -g)
+cd /home/vm-monitor-src/deploy
+docker compose -f compose.yml -f compose.buildadmin.yml --profile screenshots build worker
+worker_uid=$(docker compose -f compose.yml -f compose.buildadmin.yml --profile screenshots run --rm --no-deps --entrypoint id worker -u)
+worker_gid=$(docker compose -f compose.yml -f compose.buildadmin.yml --profile screenshots run --rm --no-deps --entrypoint id worker -g)
 sudo chown -R "$worker_uid:$worker_gid" /home/vm-monitor-server/worker
-docker compose --profile screenshots up -d worker
+docker compose -f compose.yml -f compose.buildadmin.yml --profile screenshots up -d worker
 ```
 
-工作容器以镜像内的 `pwuser` 运行，UID/GID 随基础镜像而定，因此先查询实际编号再授权数据目录；自定义 `MONITOR_DATA_DIR` 时替换上述路径。若容器启动前就退出，可在 `deploy` 目录运行 `docker compose --profile screenshots run --rm --no-deps worker` 查看直接错误。
+若自定义 `MONITOR_DATA_DIR`，更换 `chown` 路径。worker 日志默认是 `/home/vm-monitor-server/worker/worker.log`；启动即退出时可在 `deploy` 目录运行 `docker compose -f compose.yml -f compose.buildadmin.yml --profile screenshots run --rm --no-deps worker` 查看错误。IPv6 站点验证要求 worker 容器本身拥有 IPv6 出口，宿主机能访问 IPv6 并不能替代容器验证。
 
-默认同时探测 2 个任务，可通过 `WORKER_CONCURRENCY=1..4` 调节。每个并发任务启动独立 Chromium；容器内存上限 2 GiB，增加并发前应观察内存和失败率，资源紧张时设为 1。升级已有部署时 `.env` 会保留原来的值，需要手动将 `WORKER_CONCURRENCY` 设为 2 后重建 worker 容器。Chromium 以非 root 用户、沙箱和上游 seccomp 配置运行。使用额外网络隔离限制工作机到管理内网和云元数据地址的访问。
+## 5. 接入宿主机 Agent
 
-浏览器请求经任务专用代理，只能访问登记的目标 IP、协议、端口及 Host。浏览器不继承管理端凭据。第三方资源、跨站跳转、WebSocket、下载和表单提交默认阻止。某些网站因此只能得到不完整截图；这是明确的限制。
+在 BuildAdmin 的“采集节点”创建节点，填写采集接口、可能出现的公网 IPv4／IPv6 CIDR 和资源预算。同一 CIDR 可以出现在多个节点；CIDR 只是授权匹配范围，不表示 VM 的唯一归属。默认 Agent 工作内存预算 2048 MiB、systemd 硬限额 4096 MiB、数据目录预算 2048 MiB，均可配置。Agent 默认把持续数据写到宿主机 `/home/vm-monitor`。
 
-工作进程日志：`/home/vm-monitor-server/worker/worker.log`，按大小滚动。后台“网站探测任务”显示任务状态和失败原因。
+点击“生成安装命令”，在 10 分钟内到目标宿主机以 root 执行。命令会从本站 HTTPS 下载一次性 `agent.json`、安装脚本和已在主控编译的 amd64 二进制，并校验 SHA-256。一次性配置只能下载一次；生成新命令会立即轮换该节点令牌，因此应及时执行，且不要把命令贴到工单、公开日志或聊天记录。需要通过自己的安全通道传输时，可选择“接入配置”下载文件。
 
-**IPv6 站点验证要求工作进程本身具有 IPv6 出口。** Docker 默认网络不一定具备该能力，宿主机能够访问 IPv6 不代表容器也能。按你的 Docker／路由环境配置 IPv6 网络后，从 worker 容器验证连通性；也可在专用且具备 IPv6 出口的工作机部署 worker。IPv6 不可达会显示探测失败，不能解释为站点不存在。被动 IPv6 流量采集不依赖管理端的 IPv6 出口。
+安装器不改防火墙、路由、网桥或 OVS。应先确认宿主机选定接口能看到公网 IP 的双向流量；KVM/libvirt 的 VM 身份无需由 Agent 推断。CentOS 7 的 systemd 使用 `MemoryLimit`，较新的系统使用 `MemoryMax`。`/home` 若挂载为 `noexec`，应改用允许执行的大分区数据目录。
 
-## 6. 创建节点并获取配置
-
-后台进入“采集节点”，新增节点：
-
-- CIDR 输入可能出现的公网范围，允许多个节点填相同范围。
-- 采集接口填写经过网络验证的接口，例如 OVS 专用镜像接口。
-- 数据目录默认 `/home/vm-monitor`。
-- 默认工作内存 2048 MiB，服务硬限额 4096 MiB，磁盘预算 2048 MiB。
-
-点击“生成安装命令”，在 10 分钟内到目标宿主机以 root 执行，配置会自动下载。命令里的短期票据只能使用一次；若过期，重新生成命令即可。每次生成都会撤销旧节点令牌。若要通过自有安全通道传输配置，点击“接入配置”下载 `agent.json`。
-
-**后台修改 CIDR 后，服务端授权范围立即更新；本版本不会自动远程改写 Agent 配置。** 更新接口、CIDR 或资源参数后，需要重新部署相应配置。生成新配置会轮换凭据，因此应及时部署。
-
-只轮换凭据也可使用：
-
-```sh
-docker compose exec app php artisan monitor:node-token 节点UUID
-```
-
-此命令仅打印一次密钥，不要将输出放入工单、公共日志或代码仓库。
-
-## 7. 编译与安装 Agent
-
-开发机使用 Go 1.24 或更新且支持目标内核的版本：
-
-```sh
-bash deploy/agent/build.sh
-```
-
-将 `agent/bin/vm-agent-linux-amd64`、`agent/bin/SHA256SUMS`、`deploy/agent/install.sh` 和配置复制到宿主机。先核对二进制校验值，再安装：
-
-```sh
-sha256sum -c SHA256SUMS
-chmod 700 vm-agent-linux-amd64
-chmod 600 agent.json
-sudo bash install.sh ./agent.json ./vm-agent-linux-amd64
-```
-
-安装器不会改防火墙、路由、网桥或 OVS。默认以 root 身份运行，但能力集限制为 `CAP_NET_RAW`，不保留 `CAP_NET_ADMIN`。所有应用文件写入指定目录，小型 systemd 单元放 `/etc/systemd/system`。
-
-CentOS 7 的旧 systemd 使用 `MemoryLimit`，新版本使用 `MemoryMax`。安装器根据版本选择。不要禁用 SELinux；如访问 `/home` 或包套接字受到限制，检查 AVC 记录并按本机策略给予精确权限。
-
-如果 `/home` 挂载为 `noexec`，目录中的二进制不能执行。可将整个数据目录配置到允许执行的大分区路径；不要为安装程序随意取消生产分区的安全选项。
-
-## 8. 验证接入
+节点验证：
 
 ```sh
 systemctl status vm-monitor-agent --no-pager
@@ -232,60 +100,47 @@ systemctl show vm-monitor-agent -p MemoryCurrent -p MemoryLimit -p MemoryMax
 du -sh /home/vm-monitor
 ```
 
-大约一个采集窗口后，后台应出现节点上报时间和健康指标；稍后调度器处理数据。旧缓存补传会更新“最近上报”，但不会把旧健康窗口覆盖到新健康窗口上。
+约一个采集窗口后，BuildAdmin 应显示新“最近上报”时间。旧积压批次会在网络恢复后重传；HTTP 429 批次保留并重试，日志会写明服务端原因；HTTP 422 代表服务端校验失败，当前 Agent 会丢弃该批次并记录原因。若出现 422，请先核对节点 CIDR、时间和上报字段。系统不会从已丢弃的批次重建证据。
 
-几十台节点接入时，根据“待分析批次”的积压情况增加分析工作进程，例如 `docker compose up -d --scale queue=3 queue`。同一节点的分析串行，不同节点可并行；不要未经压测就把进程数量等同于容量保证。
-
-以可控 VM 验证：向公网发起正常连接、通过非标准端口访问测试站点、分别检查 IPv4 与 IPv6。确认后台显示的是正确公网 IP。不能因为节点在线就认定它看到了全部 VM 流量。
-
-## 9. 主动发现无访问的网站
-
-使用已配置节点范围，对单个 IP 或小 IPv4 CIDR 排队：
-
-```sh
-docker compose exec app php artisan monitor:discover 节点UUID 实际公网IP --ports=80,443,8080,8443,18080 --scheme=both
-docker compose exec app php artisan monitor:discover 节点UUID 实际IPv4网段/24 --ports=80,443
-```
-
-一次最多 128 个端口、2048 个 IP/端口组合、IPv4 范围不超过 /24。IPv6 必须给具体地址。每个协议是独立验证任务，未知服务会显示候选或失败，不会冒充“已经部署的网站”。
-
-任意 TCP Web 端口可以分批指定；不提供对大网段高频全端口扫描。后台可对已发现 IP 手动添加域名及端口，再验证虚拟主机站点。
-
-## 10. 通知、升级与卸载
-
-SMTP 通知：在 `.env` 配置 `MONITOR_ALERT_EMAIL`、`MAIL_MAILER=smtp` 及真实 SMTP 参数，再重建相关容器。首次出现的合并告警会排队发送邮件；重试采用至少一次语义，极端故障时可能重复投递。未配置收件人时不会发送。
-
-升级前备份数据库、`.env` 和 storage。升级服务端后执行迁移，重启队列与调度器。不要在生产使用 `migrate:fresh`。
-
-新版疑似加密代理线索检测的升级示例：
-
-```sh
-cd /home/vm-monitor-src
-git pull
-cd deploy
-# 若需要默认双任务并发，请在现有 .env 中设置 WORKER_CONCURRENCY=2
-docker compose --profile screenshots build app web worker
-docker compose run --rm --no-deps app php artisan migrate --force
-docker compose run --rm --no-deps app php artisan db:seed --class=MonitorSeeder --force
-docker compose up -d --no-deps --force-recreate app web queue scheduler
-docker compose --profile screenshots up -d --no-deps --force-recreate worker
-```
-
-迁移命令使用新镜像中的一次性应用容器，此时原有数据库与 Redis 服务应保持运行。已有索引迁移在大表上可能占用 I/O 和临时磁盘空间，请在升级前检查 `/home` 剩余空间并安排低峰时段。Seeder 只补充缺少的默认检测规则，不覆盖已修改的规则。若 `.env` 中仍是 `WORKER_CONCURRENCY=1`，worker 仍会串行探测。疑似加密代理线索需要把 0.3.0 或更新的 Agent 部署到宿主机，并由新的采集窗口产生；旧版 Agent 仍可上报原有数据，但不会产生新线索。历史证据不会凭空补齐。
-
-0.4.1 起可在后台向单个或多个节点下发 Agent 更新，当前版本和更新状态显示在“采集节点”。节点侧也可手动立即检查后台已下发的更新：
+Agent 0.3.x 或更早版本没有后台更新轮询能力，首次升级到 0.4.1 必须在节点执行新的安装命令。之后可在 BuildAdmin 对单节点或多节点下发已编译版本；先选一台试点，再批量更新。Agent 每分钟轮询更新，校验 SHA-256 后自检并保留上一版。节点侧若需立即检查后台已下发的更新：
 
 ```sh
 sudo /home/vm-monitor/bin/vm-agent -config /home/vm-monitor/config/agent.json -update
 sudo systemctl restart vm-monitor-agent
 ```
 
-如果自定义了 `data_dir`，请替换上述路径。节点手动检查不会自行取得未下发的版本；请先在后台下发。`vm-agent.previous` 保留上一版，回滚时停止服务，将该文件恢复为 `vm-agent`，核对兼容配置后启动。内存硬限额或 CIDR、接口等配置变更仍需重新运行安装器。
+自定义 `data_dir` 时替换路径。更改采集接口、CIDR 或内存硬限额需要重新生成并部署配置。
 
-卸载：
+## 6. 功能验证与维护
+
+用可控 VM 分别产生 IPv4、IPv6 和非标准端口的正常访问，确认 BuildAdmin 的公网 IP、网站、流量窗口和节点时间都正确。在线只证明 Agent 可上报，不证明它看到了全部 VM 流量。网站截图与内容分类需要 worker 在线；内容分类是待人工复核线索，不能代替人工判断。
+
+网站若没有流量线索，可对已授权的具体 IP 或小 IPv4 网段主动排队，端口自行选择：
 
 ```sh
-sudo bash deploy/agent/uninstall.sh
+cd /home/vm-monitor-src/deploy
+docker compose -f compose.yml -f compose.buildadmin.yml exec app php artisan monitor:discover 节点UUID 实际公网IP --ports=80,443,8080,8443 --scheme=both
 ```
 
-卸载保留数据、凭据及人工配置的 OVS 镜像，供你检查后自行清理；到后台禁用节点或轮换其凭据。
+一次最多 128 个端口、2048 个 IP／端口组合，IPv4 范围不超过 `/24`；IPv6 必须给具体地址。未知服务只显示候选或验证失败，不会当成已确认网站。
+
+常用维护命令：
+
+```sh
+docker compose -f compose.yml -f compose.buildadmin.yml exec app php artisan monitor:dispatch --sync
+docker compose -f compose.yml -f compose.buildadmin.yml exec app php artisan monitor:maintain
+docker compose -f compose.yml -f compose.buildadmin.yml exec app php artisan queue:failed
+docker compose -f compose.yml -f compose.buildadmin.yml exec -T postgres pg_dump -U monitor monitor > /home/monitor-backup.sql
+```
+
+几十台节点接入后，依据“待分析批次”积压、CPU、RSS、丢包及数据库 I/O 调整队列进程数量；不应直接把容器个数当作 500 VM 的容量保证。SMTP 告警使用 `deploy/.env` 的 `MONITOR_ALERT_EMAIL` 和 `MAIL_*` 参数，配置后重建相关应用容器。
+
+## 7. 常见故障
+
+- **登录页刷新、不能登录**：确认 `/admin/Index/login` 返回 BuildAdmin JSON；检查 BuildAdmin MySQL 是否健康，`buildadmin-app` 与 `buildadmin-web` 是否运行。验证码错误时检查 `/api/common/clickCaptcha`，返回数据应包含图片 `data:image/`。
+- **Agent 持续 502**：检查 `app`、`web`、`https` 容器；可以先重启 `web` 恢复旧运行配置中的容器地址，然后按第 3 节升级并重建 Web 镜像。不要删除节点本地 `/home/vm-monitor/spool`。
+- **Agent 持续 429**：可能是每节点请求限流，也可能是主控待处理批次达到容量上限；新版 Agent 日志显示响应原因。检查队列 worker、数据库和节点积压情况后再调整容量。
+- **Agent 收到 422**：该批次不符合校验规则，优先核对授权 CIDR、采集窗口时间及新版日志中的字段错误；已丢弃批次不能通过重启恢复。
+- **截图 worker 重启或无截图**：检查目录属主、`worker.log`、worker 内存及 IPv6 出口；探测任务页面会显示失败原因。
+
+管理员可在 BuildAdmin 右上角“个人资料”修改邮箱或密码，在“管理员管理”创建只读账号并分配“监控只读”分组。生产环境不开放公开注册。卸载宿主机 Agent 可执行 `sudo bash deploy/agent/uninstall.sh`；该操作保留数据和人工配置的镜像接口，需单独检查后清理。

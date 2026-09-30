@@ -2,7 +2,7 @@
 
 面向 KVM 宿主机的公网 IP 监控系统。VM 内不安装软件；每台宿主机运行一个 Go Agent。Laravel 13 负责采集、分析和探测 API；管理后台已迁移至 BuildAdmin（ThinkPHP 8 + Vue 3）。
 
-`admin/` 基于 [BuildAdmin v2.3.8](https://github.com/build-admin/buildadmin) 定制，保留其 Apache-2.0 许可证；完整切换与回退步骤见 [部署教程](docs/DEPLOYMENT.md)。
+`admin/` 基于 [BuildAdmin v2.3.8](https://github.com/build-admin/buildadmin) 定制，保留其 Apache-2.0 许可证；新装和升级步骤见 [部署教程](docs/DEPLOYMENT.md)。Laravel 仅承担接收和分析 API，不提供管理登录页面。
 
 ## 当前实现
 
@@ -27,7 +27,7 @@
 3. [资源配置、数据协议与运维](docs/OPERATIONS.md)
 4. [验证报告与能力边界](docs/VALIDATION.md)
 
-目录：`server/` PHP 服务端；`agent/` Go Agent；`worker/` 网站工作服务；`deploy/` 部署；`docs/` 教程。
+目录：`server/` Laravel 采集与分析 API；`admin/` BuildAdmin 管理后台；`agent/` Go Agent；`worker/` 网站工作服务；`deploy/` 部署；`docs/` 教程。
 
 ## 本地验证
 

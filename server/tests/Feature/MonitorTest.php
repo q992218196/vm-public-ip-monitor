@@ -2,23 +2,18 @@
 
 namespace Tests\Feature;
 
-use App\Filament\Resources\NodeResource;
-use App\Filament\Resources\NodeResource\Pages\ManageNodes;
 use App\Jobs\ProcessBatch;
 use App\Models\Batch;
 use App\Models\Alert;
 use App\Models\Node;
 use App\Models\ProtocolObservation;
 use App\Models\Rule;
-use App\Models\User;
 use App\Models\Website;
 use App\Services\ProbeQueue;
 use Database\Seeders\MonitorSeeder;
-use Filament\Facades\Filament;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Queue;
 use Illuminate\Support\Str;
-use Livewire\Livewire;
 use Tests\TestCase;
 
 class MonitorTest extends TestCase
@@ -197,28 +192,11 @@ class MonitorTest extends TestCase
         $this->postJson('/api/v1/worker/tasks/'.$claim['id'].'/complete', ['lease_token' => $claim['lease_token'], 'status' => 'failed'])->assertConflict();
     }
 
-    public function test_panel_pages_render_and_viewer_cannot_mutate(): void
+    public function test_legacy_admin_and_screenshot_routes_are_not_exposed(): void
     {
-        $n = $this->node();
-        $this->upload($n, $this->payload())->assertOk();
-        ProcessBatch::dispatchSync(Batch::first()->id);
-        $u = User::factory()->create();
-        $u->role = 'admin';
-        $u->save();
-        $this->actingAs($u);
-        foreach (['/admin', '/admin/nodes', '/admin/ip-assets', '/admin/websites', '/admin/alerts', '/admin/rules', '/admin/exclusions', '/admin/traffic-metrics', '/admin/probe-tasks', '/admin/audit-logs'] as $url) {
-            $this->get($url)->assertOk();
-        }
-        $u->role = 'viewer';
-        $u->save();
-        $this->assertFalse(NodeResource::canCreate());
-        $this->assertFalse(NodeResource::canEdit($this->node()));
-        $this->get('/admin/nodes')->assertOk();
-    }
-
-    public function test_private_screenshots_require_login(): void
-    {
-        $this->get('/screenshots/1')->assertRedirect('/admin/login');
+        $this->get('/admin/login')->assertNotFound();
+        $this->get('/admin/alerts')->assertNotFound();
+        $this->get('/screenshots/1')->assertNotFound();
     }
 
     public function test_future_window_and_duplicate_normalized_ip_rejected(): void
@@ -278,67 +256,6 @@ class MonitorTest extends TestCase
         $this->assertDatabaseCount('probe_tasks', 1);
     }
 
-    public function test_alerts_can_be_filtered_and_handled_in_a_bounded_batch(): void
-    {
-        $node = $this->node();
-        $this->upload($node, $this->payload())->assertOk();
-        ProcessBatch::dispatchSync(Batch::first()->id);
-        $admin = User::factory()->create();
-        $admin->role = 'admin';
-        $admin->save();
-        $this->actingAs($admin);
-        $alert = Alert::where('kind', 'new_website')->firstOrFail();
-        $this->get('/admin/alerts?node='.$node->id.'&ip=203.0.113.10&severity=low')->assertOk()->assertSee($alert->title);
-        $this->getJson(route('alerts.count', ['node' => $node->id, 'ip' => '203.0.113.10', 'severity' => 'low']))
-            ->assertOk()->assertJsonPath('total', 1);
-        $this->getJson(route('alerts.count', ['severity' => 'high']))
-            ->assertOk()->assertJsonPath('total', 0);
-        $this->post(route('alerts.bulk'), ['ids' => [$alert->id], 'status' => 'acknowledged', 'resolution' => '已核对资产'])->assertRedirect();
-        $this->assertDatabaseHas('alerts', ['id' => $alert->id, 'status' => 'acknowledged', 'resolution' => '已核对资产']);
-        $this->assertDatabaseHas('audit_logs', ['action' => 'alerts_bulk_handled']);
-    }
-
-    public function test_node_create_form_validates_cidrs_and_saves_settings(): void
-    {
-        $u = User::factory()->create();
-        $u->role = 'admin';
-        $u->save();
-        $this->actingAs($u);
-        Filament::setCurrentPanel(Filament::getPanel('admin'));
-        $component = Livewire::test(ManageNodes::class);
-        $component->callAction('create', data: ['name' => 'Bridge Host', 'enabled' => true, 'cidrs' => ['203.0.113.0/24'], 'settings' => ['interfaces' => ['eth0'], 'memory_soft_mib' => 2048, 'memory_hard_mib' => 4096, 'disk_limit_mib' => 2048, 'data_dir' => '/home/vm-monitor']])->assertHasNoActionErrors();
-        $this->assertDatabaseHas('nodes', ['name' => 'Bridge Host']);
-        $this->assertSame(['203.0.113.0/24'], Node::first()->cidrs);
-        $component->callAction('create', data: ['name' => 'Invalid', 'enabled' => true, 'cidrs' => ['bad-cidr'], 'settings' => ['interfaces' => ['eth0'], 'data_dir' => '/home/vm-monitor']])->assertHasActionErrors();
-        $this->assertDatabaseCount('nodes', 1);
-    }
-
-    public function test_node_evidence_is_loaded_independently_of_the_table(): void
-    {
-        $node = $this->node();
-        $node->update(['health' => ['kernel_drops' => 2]]);
-        $this->getJson(route('nodes.evidence', $node))->assertUnauthorized();
-
-        $viewer = User::factory()->create();
-        $viewer->role = 'viewer';
-        $viewer->save();
-        $this->actingAs($viewer)
-            ->getJson(route('nodes.evidence', $node))
-            ->assertOk()
-            ->assertJsonPath('data.health.kernel_drops', 2)
-            ->assertJsonMissingPath('data.token_hash');
-    }
-
-    public function test_admin_can_open_profile_to_change_email_and_password(): void
-    {
-        $admin = User::factory()->create();
-        $admin->role = 'admin';
-        $admin->save();
-
-        $this->actingAs($admin);
-        $this->get(Filament::getPanel('admin')->getProfileUrl())->assertOk();
-    }
-
     public function test_resolving_new_website_alert_does_not_reopen_it_on_next_observation(): void
     {
         $node = $this->node();
@@ -360,30 +277,7 @@ class MonitorTest extends TestCase
         $this->assertSame('resolved', $alert->fresh()->status);
     }
 
-    public function test_alert_list_excludes_evidence_and_detail_loads_only_requested_alert(): void
-    {
-        $node = $this->node();
-        $payload = $this->payload();
-        $payload['metrics'][0]['ports'] = [22, 443];
-        $payload['metrics'][0]['target_endpoints'] = ['1.1.1.1:22', '1.1.1.1:443'];
-        $this->seed(MonitorSeeder::class);
-        $this->upload($node, $payload)->assertOk();
-        ProcessBatch::dispatchSync(Batch::first()->id);
-        $alert = Alert::where('kind', 'horizontal_scan')->firstOrFail();
-        $this->assertSame([22, 443], $alert->evidence['sample']['ports']);
-
-        $admin = User::factory()->create();
-        $admin->role = 'admin';
-        $admin->save();
-        $this->actingAs($admin);
-        $list = $this->get('/admin/alerts?per_page=500')->assertOk();
-        $this->assertStringNotContainsString('target_endpoints', $list->getContent());
-        $this->get(route('alerts.evidence', $alert))->assertOk()->assertSee('1.1.1.1:22')->assertSee('443');
-        $export = $this->get('/exports/alerts')->assertOk()->streamedContent();
-        $this->assertStringNotContainsString('target_endpoints', $export);
-    }
-
-    public function test_website_description_export_and_domain_link(): void
+    public function test_website_description_and_domain_link(): void
     {
         config(['monitor.worker_token' => $this->token]);
         $node = $this->node();
@@ -402,46 +296,6 @@ class MonitorTest extends TestCase
         ])->assertOk();
         $this->assertSame('这是一段网站描述', $site->fresh()->description);
 
-        $admin = User::factory()->create();
-        $admin->role = 'admin';
-        $admin->save();
-        $this->actingAs($admin);
-        $this->get('/admin/websites')->assertOk()->assertSee('test.example');
-        $this->post(route('websites.category', $site), ['manual_category' => '人工复核'])->assertRedirect();
-        $this->assertSame('人工复核', $site->fresh()->manual_category);
-        $this->post(route('websites.probe', $site))->assertRedirect();
-        $this->post(route('websites.manual'), ['ip' => '203.0.113.10', 'port' => 18080, 'scheme' => 'http', 'host' => 'manual.example'])->assertRedirect();
-        $this->assertDatabaseHas('websites', ['host' => 'manual.example', 'port' => 18080]);
-        $this->get(route('websites.details', $site))->assertOk()->assertSee('这是一段网站描述');
-        $export = $this->get('/exports/websites')->assertOk()->streamedContent();
-        $this->assertStringContainsString('这是一段网站描述', $export);
-    }
-
-    public function test_large_lists_and_bulk_post_stay_small(): void
-    {
-        $node = $this->node();
-        $now = now();
-        $alerts = [];
-        for ($i = 0; $i < 500; $i++) {
-            $alerts[] = [
-                'node_id' => $node->id, 'dedup_key' => hash('sha256', 'large-alert-'.$i),
-                'kind' => 'horizontal_scan', 'severity' => 'high', 'title' => '扫描 '.$i,
-                'status' => 'open', 'evidence' => json_encode(['large_private_evidence' => str_repeat('x', 10000)]),
-                'first_seen_at' => $now, 'last_seen_at' => $now, 'created_at' => $now, 'updated_at' => $now,
-            ];
-        }
-        Alert::insert($alerts);
-        $admin = User::factory()->create();
-        $admin->role = 'admin';
-        $admin->save();
-        $this->actingAs($admin);
-        $response = $this->get('/admin/alerts?per_page=500')->assertOk();
-        $this->assertLessThan(1000000, strlen($response->getContent()));
-        $this->assertStringNotContainsString('large_private_evidence', $response->getContent());
-        $ids = Alert::query()->pluck('id')->all();
-        $this->assertLessThan(10000, strlen(http_build_query(['ids' => $ids, 'status' => 'resolved', 'resolution' => '已复核'])));
-        $this->post(route('alerts.bulk'), ['ids' => $ids, 'status' => 'resolved', 'resolution' => '已复核'])->assertRedirect();
-        $this->assertSame(500, Alert::where('status', 'resolved')->count());
     }
 
     public function test_vpn_alert_requires_bounded_bidirectional_signature(): void
@@ -462,11 +316,6 @@ class MonitorTest extends TestCase
         $this->assertSame('wireguard', $alert->evidence['protocol']);
         $this->assertSame('1.1.1.1', $alert->evidence['peer_ip']);
         $this->assertDatabaseCount('protocol_observations', 1);
-        $viewer = User::factory()->create();
-        $viewer->role = 'viewer';
-        $viewer->save();
-        $this->actingAs($viewer)->get(route('protocol-observations.evidence', ProtocolObservation::firstOrFail()))
-            ->assertOk()->assertJsonPath('evidence.protocol', 'wireguard');
     }
 
     public function test_proxy_clue_is_scoped_and_kept_distinct_from_protocol_confirmation(): void
@@ -491,12 +340,6 @@ class MonitorTest extends TestCase
         $this->assertSame('behavioral_suspect', $alert->evidence['confidence']);
         $this->assertContains('AnyTLS', $alert->evidence['candidate_protocols']);
         $this->assertSame('tls', ProtocolObservation::firstOrFail()->protocol);
-        $viewer = User::factory()->create();
-        $viewer->role = 'viewer';
-        $viewer->save();
-        $this->actingAs($viewer)->get(route('alerts.evidence', $alert))->assertOk()->assertSee('不能确认 SS');
-        $this->get(route('protocol-observations.evidence', ProtocolObservation::firstOrFail()))
-            ->assertOk()->assertJsonPath('evidence.transport', 'tls');
     }
 
     public function test_proxy_rule_threshold_can_suppress_alert_without_losing_observation(): void
@@ -517,31 +360,4 @@ class MonitorTest extends TestCase
         $this->assertDatabaseMissing('alerts', ['kind' => 'proxy_suspect']);
     }
 
-    public function test_website_cursor_pages_exclude_large_classification(): void
-    {
-        $node = $this->node();
-        $this->upload($node, $this->payload())->assertOk();
-        ProcessBatch::dispatchSync(Batch::first()->id);
-        $assetId = Website::firstOrFail()->ip_asset_id;
-        $now = now();
-        $sites = [];
-        for ($i = 0; $i < 500; $i++) {
-            $sites[] = [
-                'ip_asset_id' => $assetId, 'fingerprint' => hash('sha256', 'large-site-'.$i),
-                'port' => 8000 + $i, 'scheme' => 'http', 'host' => 'site'.$i.'.example',
-                'source' => 'manual', 'status' => 'verified', 'classification' => json_encode(['large_classification' => str_repeat('x', 10000)]),
-                'first_seen_at' => $now, 'last_seen_at' => $now, 'created_at' => $now, 'updated_at' => $now,
-            ];
-        }
-        Website::insert($sites);
-        $admin = User::factory()->create();
-        $admin->role = 'admin';
-        $admin->save();
-        $this->actingAs($admin);
-        $response = $this->get('/admin/websites?per_page=500')->assertOk();
-        $this->assertLessThan(1000000, strlen($response->getContent()));
-        $this->assertStringNotContainsString('large_classification', $response->getContent());
-        $cursor = Website::query()->orderByDesc('last_seen_at')->orderByDesc('id')->cursorPaginate(500)->nextCursor();
-        $this->get('/admin/websites?per_page=500&cursor='.urlencode($cursor->encode()))->assertOk()->assertSee('本页 1 条');
-    }
 }

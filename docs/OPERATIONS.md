@@ -127,4 +127,4 @@ docker compose exec -T postgres pg_dump -U monitor monitor > /home/monitor-backu
 
 定期备份 `.env`、数据库和 storage。备份路径也需要容量和保留策略。恢复演练在独立环境执行，避免用生产库验证脚本。
 
-登录后台后，在右上角用户菜单打开“个人资料”，可修改自己的邮箱或密码；修改任一项需输入当前密码，新密码需再次确认。若忘记当前密码，由已有管理员在受控环境中恢复账号，不要把新密码放进命令行参数或工单。只读用户使用 `php artisan monitor:admin viewer@example.com --role=viewer --name=观察员` 创建。当前不提供公开注册和自助权限提升。
+登录 BuildAdmin 后，在右上角用户菜单打开“个人资料”，可修改自己的邮箱或密码；修改任一项需输入当前密码，新密码需再次确认。已有管理员可在“管理员管理”创建只读账号并分配“监控只读”分组。首次安装用部署教程中的 `php tools/init-admin.php` 初始化管理员，不要把密码放进命令行参数或工单。当前不提供公开注册和自助权限提升。

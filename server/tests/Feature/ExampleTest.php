@@ -10,10 +10,11 @@ class ExampleTest extends TestCase
     /**
      * A basic test example.
      */
-    public function test_the_application_returns_a_successful_response(): void
+    public function test_only_health_and_api_routes_are_exposed(): void
     {
-        $response = $this->get('/');
-
-        $response->assertRedirect('/admin');
+        $this->get('/')->assertNotFound();
+        $this->get('/admin/login')->assertNotFound();
+        $this->get('/up')->assertOk();
+        $this->getJson('/api/v1/agent/update?version=0.4.1')->assertUnauthorized();
     }
 }

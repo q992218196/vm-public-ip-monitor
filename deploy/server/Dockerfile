@@ -9,7 +9,6 @@ WORKDIR /var/www/html
 COPY server/ ./
 RUN mkdir -p storage/framework/cache/data storage/framework/sessions storage/framework/views storage/app/private storage/logs bootstrap/cache \
     && composer install --no-dev --prefer-dist --no-interaction --optimize-autoloader \
-    && php artisan filament:assets \
     && chown -R www-data:www-data storage bootstrap/cache
 COPY deploy/server/php.ini /usr/local/etc/php/conf.d/monitor.ini
 COPY deploy/server/fpm.conf /usr/local/etc/php-fpm.d/zz-monitor.conf

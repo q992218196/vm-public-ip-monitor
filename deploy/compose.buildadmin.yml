@@ -78,6 +78,18 @@ services:
     network_mode: none
     restart: "no"
   https:
+    image: caddy:2.11.4-alpine
+    profiles: [https]
+    restart: unless-stopped
+    mem_limit: 512m
+    ports: ["80:80", "443:443"]
+    environment:
+      MONITOR_DOMAIN: ${MONITOR_DOMAIN:-}
     volumes:
       - ./caddy/Caddyfile.buildadmin:/etc/caddy/Caddyfile:ro
+      - ${MONITOR_DATA_DIR:-/home/vm-monitor-server}/caddy/data:/data
+      - ${MONITOR_DATA_DIR:-/home/vm-monitor-server}/caddy/config:/config
     depends_on: [web, buildadmin-web]
+    logging:
+      driver: none
+    networks: [probes]
