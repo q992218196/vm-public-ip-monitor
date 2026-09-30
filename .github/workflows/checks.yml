@@ -122,7 +122,8 @@ jobs:
           curl -fsS -H 'server: true' -d 'username=admin@example.test&password=test-admin-password-2026' http://127.0.0.1:8099/admin/Index/login >/tmp/buildadmin-login.json
           token=$(python3 -c 'import json; print(json.load(open("/tmp/buildadmin-login.json"))["data"]["userInfo"]["token"])')
           php -r '$db=new PDO("mysql:host=127.0.0.1;dbname=buildadmin","buildadmin","test-only-password");$ticket=str_repeat("a",64);$nonce=random_bytes(12);$tag="";$key=hash("sha256",getenv("BUILDADMIN_TOKEN_KEY"),true);$cipher=openssl_encrypt("{\"node_id\":\"test-node\"}","aes-256-gcm",$key,OPENSSL_RAW_DATA,$nonce,$tag);$db->prepare("INSERT INTO ba_agent_enrollments(ticket_hash,node_id,payload,expires_at,created_at) VALUES(?,?,?,UTC_TIMESTAMP()+INTERVAL 10 MINUTE,UTC_TIMESTAMP())")->execute([hash("sha256",$ticket),"test-node",base64_encode($nonce.$tag.$cipher)]);'
-          curl -fsS -H 'server: true' 'http://127.0.0.1:8099/api/AgentBootstrap/config?ticket=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' >/tmp/buildadmin-bootstrap.json
+          bootstrap_status=$(curl -sS -H 'server: true' -o /tmp/buildadmin-bootstrap.json -w '%{http_code}' 'http://127.0.0.1:8099/api/AgentBootstrap/config?ticket=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')
+          if [ "$bootstrap_status" != 200 ]; then cat /tmp/buildadmin-bootstrap.json; find runtime -maxdepth 5 -type f -name '*.log' -exec sh -c 'echo "$1"; tail -n 30 "$1"' _ {} \;; exit 1; fi
           python3 -c 'import json; assert json.load(open("/tmp/buildadmin-bootstrap.json"))["node_id"]=="test-node"'
           test "$(curl -s -H 'server: true' -o /dev/null -w '%{http_code}' 'http://127.0.0.1:8099/api/AgentBootstrap/config?ticket=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')" = 404
           curl -fsS -H 'server: true' -H "batoken: $token" 'http://127.0.0.1:8099/admin/Monitor/index?resource=nodes' >/tmp/buildadmin-nodes.json
