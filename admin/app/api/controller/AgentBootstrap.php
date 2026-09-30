@@ -15,10 +15,13 @@ class AgentBootstrap extends Api
         if (!preg_match('/^[a-f0-9]{64}$/', $ticket)) return json(['error' => '配置链接无效'], 404);
 
         $payload = Db::transaction(function () use ($ticket) {
-            $query = Db::name('agent_enrollments')->where('ticket_hash', hash('sha256', $ticket));
-            $row = $query->lock(true)->find();
+            $hash = hash('sha256', $ticket);
+            $prefix = (string)config('database.connections.mysql.prefix', 'ba_');
+            if (!preg_match('/^[a-zA-Z0-9_]*$/', $prefix)) throw new \RuntimeException('数据库前缀无效');
+            $rows = Db::query('SELECT payload, expires_at FROM `' . $prefix . 'agent_enrollments` WHERE ticket_hash = ? FOR UPDATE', [$hash]);
+            $row = $rows[0] ?? null;
             if (!$row || $row['expires_at'] < gmdate('Y-m-d H:i:s')) return null;
-            $query->delete();
+            Db::name('agent_enrollments')->where('ticket_hash', $hash)->delete();
             return $row['payload'];
         });
         if (!$payload) return json(['error' => '配置链接已失效或已使用'], 404);

@@ -6,7 +6,8 @@ class AgentEnrollments extends Migrator
 {
     public function up(): void
     {
-        $this->execute('CREATE TABLE IF NOT EXISTS `ba_agent_enrollments` (
+        $name = $this->tableName();
+        $this->execute('CREATE TABLE IF NOT EXISTS `' . $name . '` (
             `ticket_hash` CHAR(64) NOT NULL PRIMARY KEY,
             `node_id` CHAR(36) NOT NULL,
             `payload` MEDIUMTEXT NOT NULL,
@@ -18,6 +19,13 @@ class AgentEnrollments extends Migrator
 
     public function down(): void
     {
-        $this->execute('DROP TABLE IF EXISTS `ba_agent_enrollments`');
+        $this->execute('DROP TABLE IF EXISTS `' . $this->tableName() . '`');
+    }
+
+    private function tableName(): string
+    {
+        $prefix = (string)config('database.connections.mysql.prefix', 'ba_');
+        if (!preg_match('/^[a-zA-Z0-9_]*$/', $prefix)) throw new \RuntimeException('数据库前缀无效');
+        return $prefix . 'agent_enrollments';
     }
 }
