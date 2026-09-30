@@ -200,6 +200,8 @@ jobs:
             sleep 2
           done
           test "$status" = 401
+          test "$(curl -sS -o /dev/null -w '%{http_code}' 'http://127.0.0.1:8080/admin/login')" = 404
+          test "$(curl -sS -o /dev/null -w '%{http_code}' 'http://127.0.0.1:8080/js/filament/filament/app.js')" = 404
           docker compose -f compose.yml -f compose.buildadmin.yml up -d --no-deps --force-recreate app buildadmin-app
           sleep 8
           test "$(curl -sS -o /dev/null -w '%{http_code}' 'http://127.0.0.1:8080/api/v1/agent/update?version=0.3.0')" = 401
