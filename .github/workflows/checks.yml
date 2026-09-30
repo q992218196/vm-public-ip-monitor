@@ -192,6 +192,17 @@ jobs:
           curl -fsS http://127.0.0.1:8081/downloads/SHA256SUMS | grep -q 'vm-agent-linux-amd64'
           curl -fsS -o /tmp/vm-agent-smoke http://127.0.0.1:8081/downloads/vm-agent-linux-amd64
           cmp /tmp/vm-agent-smoke /home/vm-monitor-server/agent-dist/vm-agent-linux-amd64
+          docker compose -f compose.yml -f compose.buildadmin.yml up -d --no-build app web
+          for attempt in 1 2 3 4 5 6 7 8 9 10; do
+            status=$(curl -sS -o /dev/null -w '%{http_code}' 'http://127.0.0.1:8080/api/v1/agent/update?version=0.3.0' || true)
+            [ "$status" = 401 ] && break
+            sleep 2
+          done
+          test "$status" = 401
+          docker compose -f compose.yml -f compose.buildadmin.yml up -d --no-deps --force-recreate app buildadmin-app
+          sleep 8
+          test "$(curl -sS -o /dev/null -w '%{http_code}' 'http://127.0.0.1:8080/api/v1/agent/update?version=0.3.0')" = 401
+          test "$(curl -sS -H 'server: true' -o /dev/null -w '%{http_code}' 'http://127.0.0.1:8081/admin/Index/login')" = 200
         working-directory: deploy
       - run: |
           trap 'docker compose --profile screenshots down --remove-orphans >/dev/null 2>&1 || true' EXIT

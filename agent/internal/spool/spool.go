@@ -167,12 +167,13 @@ func (s *Spool) SendOne(ctx context.Context) (bool, error) {
 	defer res.Body.Close()
 	body, _ := io.ReadAll(io.LimitReader(res.Body, 4096))
 	if res.StatusCode == 400 || res.StatusCode == 413 || res.StatusCode == 422 {
+		reason := rejectionReason(body)
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		if e := os.Remove(path); e == nil {
 			s.dropped++
 		}
-		return false, fmt.Errorf("permanently rejected batch HTTP %d discarded and counted", res.StatusCode)
+		return false, fmt.Errorf("permanently rejected batch HTTP %d discarded and counted%s", res.StatusCode, reason)
 	}
 	var ack struct {
 		Accepted bool `json:"accepted"`
@@ -186,4 +187,36 @@ func (s *Spool) SendOne(ctx context.Context) (bool, error) {
 		return false, e
 	}
 	return true, nil
+}
+
+func rejectionReason(body []byte) string {
+	var response struct {
+		Message string              `json:"message"`
+		Errors  map[string][]string `json:"errors"`
+	}
+	if json.Unmarshal(body, &response) != nil {
+		return ""
+	}
+	keys := make([]string, 0, len(response.Errors))
+	for key := range response.Errors {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	message := response.Message
+	if len(keys) > 0 && len(response.Errors[keys[0]]) > 0 {
+		message = keys[0] + ": " + response.Errors[keys[0]][0]
+	}
+	message = strings.Map(func(r rune) rune {
+		if r < 32 || r == 127 {
+			return ' '
+		}
+		return r
+	}, message)
+	if runes := []rune(message); len(runes) > 240 {
+		message = string(runes[:240])
+	}
+	if message == "" {
+		return ""
+	}
+	return "; reason=" + message
 }

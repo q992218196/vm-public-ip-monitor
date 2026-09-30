@@ -23,7 +23,7 @@ import (
 	"vm-monitor/agent/internal/wire"
 )
 
-var version = "0.4.0"
+var version = "0.4.1"
 
 func main() {
 	if e := run(); e != nil {
@@ -105,6 +105,12 @@ func run() error {
 				backoff = time.Second
 			}
 			if ok {
+				// Drain an outage backlog below the server's per-node request limit.
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(750 * time.Millisecond):
+				}
 				continue
 			}
 			select {

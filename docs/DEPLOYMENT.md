@@ -52,6 +52,8 @@ docker compose up -d queue scheduler
 
 `app` 应保持 `Up`。若它反复重启，查看默认数据目录中的 `/home/vm-monitor-server/storage/logs/php-fpm.log`；自定义 `MONITOR_DATA_DIR` 时使用对应路径。容器日志驱动已关闭，因此 `docker compose logs app` 不显示此日志。
 
+如果 Agent 连续收到 HTTP 502，而 `app` 与 `web` 容器都显示 `Up`，先执行 `docker compose -f compose.yml -f compose.buildadmin.yml restart web` 并检查公网 API 状态。旧版 Nginx 会缓存 `app` 容器启动时的 IP；只重建 `app` 后，仍运行的 `web` 可能继续连接旧 IP。新版 Web 配置使用 Docker 内置 DNS 动态解析；升级配置时需重建 `web` 镜像和容器。未部署 Agent 更新接口的旧服务端，对 `/api/v1/agent/update` 返回 404 是正常的；新版无令牌请求应返回 401。上传失败的 502 批次保留在节点本地并自动重试；422 批次已被 Agent 丢弃，需结合当时的服务端校验日志单独分析。
+
 ## 3. HTTPS
 
 Compose 只将 Web 绑定到管理机 `127.0.0.1:8080`，数据库、Redis 和 PHP-FPM 不对公网发布。确认域名 A／AAAA 记录指向管理机，并在云平台安全组和主机防火墙开放 TCP 80、443。可以使用项目自带的 Caddy 入口自动申请并续期证书：
@@ -112,7 +114,7 @@ curl -I http://127.0.0.1:8081/
 
 `agent-builder` 在主控服务器编译 Linux amd64 Agent，产物、版本号、安装脚本及 `SHA256SUMS` 放在 `${MONITOR_DATA_DIR}/agent-dist`（默认 `/home/vm-monitor-server/agent-dist`）。后台“采集节点”显示当前上报版本，点击“生成安装命令”可取得一次性配置链接；在目标宿主机以 root 粘贴命令，它会从本站 HTTPS 自动下载 `agent.json`、二进制和安装脚本并校验哈希。配置链接只能使用一次，10 分钟后过期。生成命令时旧节点令牌立即撤销，因此请在生成后及时执行，且不要把命令贴到公共日志、工单或聊天记录。仍可用“接入配置”下载文件并手动传输。
 
-首次从 0.3.x 或更旧版本升级到 0.4.0，需要在节点手动执行新的安装命令；旧版本没有更新轮询能力。以后在后台单个节点点击“更新 Agent”，或勾选多个节点后批量下发。主控仅下发已编译的固定版本和 SHA-256，Agent 每分钟轮询一次，下载后验证哈希、自检、保存上一版并由 systemd 自动重启；失败时保留当前二进制，在后台显示错误，10 分钟后重试。发布新版要先更新 `agent/VERSION` 并重新运行 `agent-builder` 两条命令，然后在后台下发更新。建议先选一台节点验证，再批量下发。
+首次从 0.3.x 或更旧版本升级到 0.4.1，需要在节点手动执行新的安装命令；旧版本没有更新轮询能力。以后在后台单个节点点击“更新 Agent”，或勾选多个节点后批量下发。主控仅下发已编译的固定版本和 SHA-256，Agent 每分钟轮询一次，下载后验证哈希、自检、保存上一版并由 systemd 自动重启；失败时保留当前二进制，在后台显示错误，10 分钟后重试。发布新版要先更新 `agent/VERSION` 并重新运行 `agent-builder` 两条命令，然后在后台下发更新。建议先选一台节点验证，再批量下发。
 
 已有 BuildAdmin 部署升级此功能时，按以下顺序执行；数据库服务保持运行，先迁移 PostgreSQL 再切换新后台：
 
@@ -128,7 +130,7 @@ docker compose -f compose.yml -f compose.buildadmin.yml up -d --no-deps --force-
 docker compose -f compose.yml -f compose.buildadmin.yml exec buildadmin-app php think migrate:run
 ```
 
-若使用项目自带 HTTPS 入口，再执行 `docker compose -f compose.yml -f compose.buildadmin.yml --profile https up -d --no-deps --force-recreate https`。迁移之前先备份数据库和 `.env`。新版本上线后，先在一台旧 Agent 节点生成并执行安装命令，看到当前版本显示 `0.4.0`，再批量处理其他节点。
+若使用项目自带 HTTPS 入口，再执行 `docker compose -f compose.yml -f compose.buildadmin.yml --profile https up -d --no-deps --force-recreate https`。迁移之前先备份数据库和 `.env`。新版本上线后，先在一台旧 Agent 节点生成并执行安装命令，看到当前版本显示 `0.4.1`，再批量处理其他节点。
 
 在切换公网入口前，先通过本机端口打开 `http://127.0.0.1:8081/#/admin/login` 验证旧管理员邮箱及密码。若从远程电脑测试，可以通过现有可信的 SSH 隧道转发本机端口；不要把 8081 直接暴露到公网。确认采集节点、告警、网站、规则、详情和账号页面正常后，再切换 Caddy：
 
@@ -271,7 +273,7 @@ docker compose --profile screenshots up -d --no-deps --force-recreate worker
 
 迁移命令使用新镜像中的一次性应用容器，此时原有数据库与 Redis 服务应保持运行。已有索引迁移在大表上可能占用 I/O 和临时磁盘空间，请在升级前检查 `/home` 剩余空间并安排低峰时段。Seeder 只补充缺少的默认检测规则，不覆盖已修改的规则。若 `.env` 中仍是 `WORKER_CONCURRENCY=1`，worker 仍会串行探测。疑似加密代理线索需要把 0.3.0 或更新的 Agent 部署到宿主机，并由新的采集窗口产生；旧版 Agent 仍可上报原有数据，但不会产生新线索。历史证据不会凭空补齐。
 
-0.4.0 起可在后台向单个或多个节点下发 Agent 更新，当前版本和更新状态显示在“采集节点”。节点侧也可手动立即检查后台已下发的更新：
+0.4.1 起可在后台向单个或多个节点下发 Agent 更新，当前版本和更新状态显示在“采集节点”。节点侧也可手动立即检查后台已下发的更新：
 
 ```sh
 sudo /home/vm-monitor/bin/vm-agent -config /home/vm-monitor/config/agent.json -update

@@ -60,12 +60,15 @@ func TestDiskBudgetAndEvictionReported(t *testing.T) {
 }
 
 func TestPermanentRejectionDoesNotBlockQueue(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(422) }))
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(422)
+		fmt.Fprint(w, `{"message":"The given data was invalid.","errors":{"metrics.0.ip":["Address is outside this node's CIDRs."]}}`)
+	}))
 	defer server.Close()
 	s, _ := New(config.Config{DataDir: t.TempDir(), SpoolLimitMiB: 1, DiskLimitMiB: 2, ServerURL: server.URL})
 	s.Put(wire.Batch{ID: "bad"})
-	if _, e := s.SendOne(context.Background()); e == nil {
-		t.Fatal("expected rejection")
+	if _, e := s.SendOne(context.Background()); e == nil || !strings.Contains(e.Error(), "metrics.0.ip: Address is outside this node's CIDRs.") {
+		t.Fatalf("expected bounded validation reason, got %v", e)
 	}
 	used, dropped := s.Status()
 	if used != 0 || dropped != 1 {

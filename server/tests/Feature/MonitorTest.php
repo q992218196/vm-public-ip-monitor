@@ -81,6 +81,17 @@ class MonitorTest extends TestCase
         $this->upload($node, $payload)->assertUnprocessable();
     }
 
+    public function test_agent_rate_limit_is_isolated_by_authenticated_node(): void
+    {
+        $first = $this->node();
+        $second = $this->node();
+        for ($attempt = 0; $attempt < 120; $attempt++) {
+            $this->upload($first, [])->assertUnprocessable();
+        }
+        $this->upload($first, [])->assertStatus(429);
+        $this->upload($second, [])->assertUnprocessable();
+    }
+
     public function test_durable_inbox_duplicate_replay_and_detection(): void
     {
         $this->seed(MonitorSeeder::class);
