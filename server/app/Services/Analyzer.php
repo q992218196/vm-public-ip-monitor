@@ -42,9 +42,6 @@ class Analyzer
             $asset = $this->observe($s['ip'], $node, $at);
             $key = hash('sha256', implode('|', [$s['ip'], $s['port'], $s['scheme'], $s['host']]));
             $website = Website::firstOrCreate(['fingerprint' => $key], ['ip_asset_id' => $asset->id, 'port' => $s['port'], 'scheme' => $s['scheme'], 'host' => $s['host'], 'source' => $s['source'], 'first_seen_at' => $at, 'last_seen_at' => $at]);
-            if ($website->wasRecentlyCreated) {
-                $this->alert($node, $asset, 'new_website', 'low', '发现新网站线索', ['website_id' => $website->id, 'port' => $s['port'], 'scheme' => $s['scheme'], 'host' => $s['host'], 'verification' => '尚未主动验证'], $at, 86400, $key);
-            }
             if ($website->last_seen_at->lt($at)) {
                 $website->update(['last_seen_at' => $at]);
             }
@@ -65,7 +62,7 @@ class Analyzer
                 'evidence' => $observation,
             ]);
             if ($vpnRule) {
-                if ($this->exclusions->contains(fn ($exclusion) => Ip::contains($exclusion->cidr, $asset->ip))) {
+                if ($this->isExcluded($asset->ip, 'vpn_protocol')) {
                     continue;
                 }
                 if (min($observation['request_count'], $observation['response_count']) < $vpnRule->threshold) {
@@ -114,7 +111,7 @@ class Analyzer
             if (! $proxyRule || $observation['peer_count'] < max(3, $proxyRule->threshold) || $observation['egress_target_count'] < 5) {
                 continue;
             }
-            if ($this->exclusions->contains(fn ($exclusion) => Ip::contains($exclusion->cidr, $asset->ip))) {
+            if ($this->isExcluded($asset->ip, 'proxy_suspect')) {
                 continue;
             }
             $evidence = $recordEvidence + ['observation_id' => $stored->id];
@@ -150,17 +147,14 @@ class Analyzer
 
     private function detect(Node $node, IpAsset $asset, Batch $batch): void
     {
-        $excluded = $this->exclusions;
-        foreach ($excluded as $x) {
-            if (Ip::contains($x->cidr, $asset->ip)) {
-                return;
-            }
-        }
         if ($this->rules->isEmpty()) {
             return;
         }
         $history = TrafficMetric::where('node_id', $node->id)->where('ip_asset_id', $asset->id)->where('window_end', '>', $batch->window_end->copy()->subSeconds($this->rules->max('window_seconds')))->where('window_end', '<=', $batch->window_end)->orderBy('window_end')->get();
         foreach ($this->rules as $rule) {
+            if ($this->isExcluded($asset->ip, $rule->kind)) {
+                continue;
+            }
             $cutoff = $batch->window_end->copy()->subSeconds($rule->window_seconds);
             $rows = $history->filter(fn ($row) => $row->window_end->gt($cutoff));
             $value = match ($rule->kind) {
@@ -212,11 +206,19 @@ class Analyzer
                         $title = '疑似多目标双向连接（待复核）';
                         $confidence = 'bidirectional_candidate';
                         $note .= '；多数 TCP 发起收到 SYN-ACK，且单目标连接少、双向流量明显，可能是正常组网或 P2P；仍需人工核对业务用途';
+                    } else {
+                        $note .= '；Agent 记录到 '.min($replies, $attempts).'/'.$attempts.' 次 TCP 发起获得 SYN-ACK，出入总字节可能混合了其他已建立连接，不能单独证明这些目标均正常响应；高级别表示优先复核，不代表已确认违规';
                     }
                 }
             }
             $this->alert($node, $asset, $rule->kind, $severity, $title, ['rule_id' => $rule->id, 'value' => $value, 'threshold' => $rule->threshold, 'window_seconds' => $rule->window_seconds, 'sample' => $sampleEvidence, 'confidence' => $confidence, 'note' => $note], $batch->window_end, $rule->cooldown_seconds, (string) $rule->id);
         }
+    }
+
+    private function isExcluded(string $ip, string $kind): bool
+    {
+        return $this->exclusions->contains(fn ($exclusion) => ($exclusion->kind === null || $exclusion->kind === $kind)
+            && Ip::contains($exclusion->cidr, $ip));
     }
 
     public function alert(Node $node, ?IpAsset $asset, string $kind, string $severity, string $title, array $evidence, $at, int $cooldown = 600, string $salt = ''): Alert

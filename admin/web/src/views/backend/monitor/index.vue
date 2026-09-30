@@ -147,6 +147,14 @@
                             @click="requestAgentUpdate([scope.row.id])"
                             >更新 Agent</el-button
                         >
+                        <el-button
+                            v-if="isAdmin && resource === 'alerts' && scope.row.kind === 'horizontal_scan'"
+                            link
+                            type="warning"
+                            :loading="actionId === scope.row.id"
+                            @click="whitelistScan(scope.row)"
+                            >加入扫描白名单</el-button
+                        >
                     </template>
                 </el-table-column>
             </el-table>
@@ -396,9 +404,29 @@ const definitions: Record<string, Definition> = {
         search: 'CIDR',
         node: true,
         create: true,
-        columns: [col('cidr', '源公网 IP/CIDR'), col('reason', '原因'), col('node_id', '适用节点'), col('expires_at', '失效时间')],
+        columns: [
+            col('cidr', '源公网 IP/CIDR'),
+            col('kind', '告警类型'),
+            col('reason', '原因'),
+            col('node_id', '适用节点'),
+            col('expires_at', '失效时间'),
+        ],
         edit: [
             col('cidr', '源公网 IP/CIDR'),
+            {
+                ...col('kind', '仅抑制此类型（留空为全部）'),
+                type: 'select',
+                options: options({
+                    horizontal_scan: '横向扫描',
+                    vertical_scan: '端口扫描',
+                    suspected_bruteforce: '认证端口重复连接',
+                    single_target_attempts: '单目标高频连接',
+                    tcp_connection_burst: 'TCP 连接突增',
+                    egress_mbps: '出站 Mbps',
+                    vpn_protocol: 'VPN 双向握手',
+                    proxy_suspect: '疑似加密代理',
+                }),
+            },
             col('reason', '原因'),
             { ...col('expires_at', '失效时间'), type: 'datetime' },
             { ...col('node_id', '适用节点'), type: 'node' },
@@ -761,6 +789,26 @@ async function bulkSave() {
         load()
     } finally {
         saving.value = false
+    }
+}
+async function whitelistScan(row: any) {
+    try {
+        await ElMessageBox.confirm(
+            `仅暂停节点“${row.node_name || row.node_id}”上公网 IP ${row.ip} 的横向扫描告警 30 天，并处理当前未关闭的同类告警。其他告警和采集不受影响。`,
+            '加入扫描白名单',
+            { type: 'warning', confirmButtonText: '确认加入' }
+        )
+    } catch {
+        return
+    }
+    actionId.value = row.id
+    try {
+        const result = await request('whitelistScan', 'post', { id: row.id })
+        ElMessage.success(result.msg || '白名单已生效')
+        countKey = ''
+        await load()
+    } finally {
+        actionId.value = null
     }
 }
 async function probe(row: any) {

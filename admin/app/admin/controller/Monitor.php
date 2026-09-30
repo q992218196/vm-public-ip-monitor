@@ -23,7 +23,7 @@ class Monitor extends Backend
         'websites' => ['id', 'ip_asset_id', 'host', 'port', 'scheme', 'status', 'title', 'description', 'category', 'manual_category', 'last_probed_at', 'last_seen_at'],
         'alerts' => ['id', 'node_id', 'ip_asset_id', 'title', 'kind', 'severity', 'status', 'occurrences', 'last_seen_at'],
         'rules' => ['id', 'name', 'kind', 'threshold', 'window_seconds', 'cooldown_seconds', 'severity', 'node_id', 'enabled'],
-        'exclusions' => ['id', 'cidr', 'reason', 'node_id', 'expires_at'],
+        'exclusions' => ['id', 'cidr', 'kind', 'reason', 'node_id', 'expires_at'],
         'metrics' => ['id', 'node_id', 'ip_asset_id', 'bytes_out', 'bytes_in', 'tcp_attempts', 'window_start', 'window_end'],
         'tasks' => ['id', 'website_id', 'status', 'attempts', 'last_error', 'updated_at'],
         'protocols' => ['id', 'node_id', 'ip_asset_id', 'protocol', 'peer_ip', 'local_port', 'peer_port', 'window_end'],
@@ -72,7 +72,7 @@ class Monitor extends Backend
             'nodes' => $db->table('nodes')->where('enabled', true)->where('last_seen_at', '>', gmdate('Y-m-d H:i:s', time() - 300))->count(),
             'ips' => $db->table('ip_assets')->count(),
             'websites' => $db->table('websites')->count(),
-            'alerts' => $db->table('alerts')->where('status', 'open')->count(),
+            'alerts' => $db->table('alerts')->where('status', 'open')->where('kind', '<>', 'new_website')->count(),
             'batches' => $db->table('batches')->whereNull('processed_at')->count(),
         ]);
     }
@@ -90,6 +90,7 @@ class Monitor extends Backend
         $page = max(1, (int)$this->request->get('page', 1));
         $limit = max(10, min(500, (int)$this->request->get('limit', 25)));
         $query = $this->db()->table($table)->alias('m');
+        if ($resource === 'alerts') $query->where('m.kind', '<>', 'new_website');
         $fields = array_map(fn ($field) => 'm.' . $field, self::TABLES[$resource]);
         if (in_array($resource, ['alerts', 'websites', 'metrics', 'protocols'], true)) {
             $query->leftJoin('ip_assets i', 'i.id=m.ip_asset_id');
@@ -132,6 +133,7 @@ class Monitor extends Backend
     {
         $resource = (string)$this->request->get('resource', '');
         $query = $this->db()->table($this->table($resource))->alias('m');
+        if ($resource === 'alerts') $query->where('m.kind', '<>', 'new_website');
         if (in_array($resource, ['alerts', 'websites', 'metrics', 'protocols'], true)) $query->leftJoin('ip_assets i', 'i.id=m.ip_asset_id');
         if ($resource === 'tasks') $query->leftJoin('websites w', 'w.id=m.website_id')->leftJoin('ip_assets i', 'i.id=w.ip_asset_id');
         $this->applyFilters($query, $resource);
@@ -212,6 +214,44 @@ class Monitor extends Backend
         $this->success(count($ids) . ' 条告警已更新');
     }
 
+    public function whitelistScan(): void
+    {
+        $this->writable();
+        $id = (int)$this->request->post('id', 0);
+        if ($id < 1) $this->error('告警 ID 无效');
+        $db = $this->db();
+        $db->startTrans();
+        try {
+            $alert = $db->table('alerts')->where('id', $id)->lock(true)->find();
+            if (!$alert || $alert['kind'] !== 'horizontal_scan' || !$alert['ip_asset_id']) $this->error('仅支持对横向扫描告警建立白名单', [], 404);
+            $asset = $db->table('ip_assets')->where('id', $alert['ip_asset_id'])->lock(true)->find();
+            if (!$asset || !filter_var($asset['ip'], FILTER_VALIDATE_IP)) $this->error('公网 IP 不存在', [], 404);
+            $cidr = $asset['ip'] . (str_contains($asset['ip'], ':') ? '/128' : '/32');
+            $now = gmdate('Y-m-d H:i:s');
+            $expires = gmdate('Y-m-d H:i:s', time() + 30 * 86400);
+            $scope = ['node_id' => $alert['node_id'], 'cidr' => $cidr, 'kind' => 'horizontal_scan'];
+            $existing = $db->table('exclusions')->where($scope)->find();
+            if ($existing) {
+                $db->table('exclusions')->where('id', $existing['id'])->update(['expires_at' => $expires, 'updated_at' => $now]);
+            } else {
+                $db->table('exclusions')->insert($scope + [
+                    'reason' => '管理员从告警 #' . $id . ' 加入白名单，待业务复核',
+                    'expires_at' => $expires, 'created_at' => $now, 'updated_at' => $now,
+                ]);
+            }
+            $db->table('alerts')->where('node_id', $alert['node_id'])->where('ip_asset_id', $alert['ip_asset_id'])
+                ->where('kind', 'horizontal_scan')->where('status', 'open')
+                ->update(['status' => 'resolved', 'resolution' => '已按节点、公网 IP 和横向扫描类型加入 30 天白名单；待业务复核',
+                    'updated_at' => $now]);
+            $this->audit('horizontal_scan_whitelisted', 'Alert:' . $id, ['node_id' => $alert['node_id'], 'ip' => $asset['ip'], 'expires_at' => $expires]);
+            $db->commit();
+        } catch (\Throwable $e) {
+            $db->rollback();
+            throw $e;
+        }
+        $this->success('该节点此公网 IP 的横向扫描告警已暂停 30 天');
+    }
+
     public function save(): void
     {
         $this->writable();
@@ -223,7 +263,7 @@ class Monitor extends Backend
         $allowed = match ($resource) {
             'ips' => ['label', 'notes'], 'websites' => ['manual_category'],
             'rules' => ['name', 'kind', 'enabled', 'severity', 'threshold', 'window_seconds', 'cooldown_seconds', 'node_id'],
-            'exclusions' => ['cidr', 'reason', 'expires_at', 'node_id'],
+            'exclusions' => ['cidr', 'kind', 'reason', 'expires_at', 'node_id'],
             'nodes' => ['name', 'enabled', 'cidrs', 'settings', 'notes'],
         };
         $data = array_intersect_key($data, array_flip($allowed));
@@ -289,6 +329,8 @@ class Monitor extends Backend
             if ($creating && (empty($data['cidr']) || empty($data['reason']) || empty($data['expires_at']))) $this->error('白名单信息不完整');
             if (isset($data['cidr']) && !$this->validCidr((string)$data['cidr'])) $this->error('CIDR 格式无效');
             if (isset($data['reason']) && (trim((string)$data['reason']) === '' || mb_strlen((string)$data['reason']) > 255)) $this->error('原因无效');
+            if (isset($data['kind']) && $data['kind'] !== '' && !in_array($data['kind'], ['horizontal_scan', 'vertical_scan', 'suspected_bruteforce', 'single_target_attempts', 'tcp_connection_burst', 'egress_mbps', 'vpn_protocol', 'proxy_suspect'], true)) $this->error('白名单类型无效');
+            if (isset($data['kind']) && $data['kind'] === '') $data['kind'] = null;
             if (isset($data['expires_at']) && strtotime((string)$data['expires_at'] . ' UTC') <= time()) $this->error('失效时间必须在未来');
         }
         if (isset($data['node_id']) && $data['node_id'] === '') $data['node_id'] = null;
@@ -492,6 +534,7 @@ class Monitor extends Backend
         $written = 0;
         while ($written < 50000) {
             $query = $this->db()->table($this->table($resource))->alias('m')->where('m.id', '>', $lastId);
+            if ($resource === 'alerts') $query->where('m.kind', '<>', 'new_website');
             $fields = array_map(fn ($name) => 'm.' . $name, array_filter(array_keys($columns), fn ($name) => !in_array($name, ['ip', 'node_name'], true)));
             $fields[] = 'm.id AS export_id';
             if ($resource !== 'ips') {

@@ -58,7 +58,7 @@ docker compose -f compose.yml -f compose.buildadmin.yml --profile https up -d --
 docker compose -f compose.yml -f compose.buildadmin.yml exec app php artisan view:clear
 ```
 
-数据库迁移保留现有监控数据和 BuildAdmin 账号。重建 PHP 应用时 Web 容器也会重建，避免连接到已更换的容器地址。升级后检查：
+数据库迁移保留网站资产、流量记录、其他告警和 BuildAdmin 账号；本次迁移会删除旧的“发现新网站线索”告警，并为白名单增加按告警类型的范围。重建 PHP 应用时 Web 容器也会重建，避免连接到已更换的容器地址。升级后检查：
 
 ```sh
 docker compose -f compose.yml -f compose.buildadmin.yml --profile https ps

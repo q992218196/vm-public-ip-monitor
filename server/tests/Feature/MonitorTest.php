@@ -5,6 +5,7 @@ namespace Tests\Feature;
 use App\Jobs\ProcessBatch;
 use App\Models\Alert;
 use App\Models\Batch;
+use App\Models\Exclusion;
 use App\Models\Node;
 use App\Models\ProtocolObservation;
 use App\Models\Rule;
@@ -147,6 +148,42 @@ class MonitorTest extends TestCase
         $this->assertSame('high', Alert::where('kind', 'horizontal_scan')->firstOrFail()->severity);
     }
 
+    public function test_sparse_single_port_fanout_with_few_replies_remains_high_priority(): void
+    {
+        $this->seed(MonitorSeeder::class);
+        $node = $this->node();
+        $payload = $this->payload();
+        $payload['metrics'][0] = array_replace($payload['metrics'][0], [
+            'bytes_out' => 2097780, 'bytes_in' => 2142215,
+            'tcp_attempts' => 103, 'unique_targets' => 102,
+            'max_ports_per_target' => 1, 'max_attempts_per_target' => 2,
+            'synack_replies' => 13,
+        ]);
+        $this->upload($node, $payload)->assertOk();
+        ProcessBatch::dispatchSync(Batch::firstOrFail()->id);
+        $alert = Alert::where('kind', 'horizontal_scan')->firstOrFail();
+        $this->assertSame('high', $alert->severity);
+        $this->assertSame('behavioral', $alert->evidence['confidence']);
+        $this->assertStringContainsString('13/103', $alert->evidence['note']);
+    }
+
+    public function test_scan_only_exclusion_preserves_other_alert_types_and_metrics(): void
+    {
+        $this->seed(MonitorSeeder::class);
+        $node = $this->node();
+        Exclusion::create([
+            'node_id' => $node->id, 'cidr' => '203.0.113.10/32',
+            'kind' => 'horizontal_scan', 'reason' => '业务复核', 'expires_at' => now()->addDays(30),
+        ]);
+        $payload = $this->payload();
+        $payload['metrics'][0]['max_ports_per_target'] = 50;
+        $this->upload($node, $payload)->assertOk();
+        ProcessBatch::dispatchSync(Batch::firstOrFail()->id);
+        $this->assertDatabaseMissing('alerts', ['kind' => 'horizontal_scan']);
+        $this->assertDatabaseHas('alerts', ['kind' => 'vertical_scan']);
+        $this->assertDatabaseCount('traffic_metrics', 1);
+    }
+
     public function test_shared_cidr_keeps_observers_and_single_ip_site(): void
     {
         foreach ([$this->node(), $this->node()] as $n) {
@@ -256,15 +293,14 @@ class MonitorTest extends TestCase
         $this->assertDatabaseCount('probe_tasks', 1);
     }
 
-    public function test_resolving_new_website_alert_does_not_reopen_it_on_next_observation(): void
+    public function test_website_observations_do_not_create_alerts(): void
     {
         $node = $this->node();
         $payload = $this->payload();
         $payload['sites'][0]['host'] = 'account.skrill.com';
         $this->upload($node, $payload)->assertOk();
         ProcessBatch::dispatchSync(Batch::firstOrFail()->id);
-        $alert = Alert::where('kind', 'new_website')->firstOrFail();
-        $alert->update(['status' => 'resolved']);
+        $this->assertDatabaseMissing('alerts', ['kind' => 'new_website']);
 
         $this->travel(1)->days();
         $payload['batch_id'] = Str::uuid()->toString();
@@ -273,8 +309,7 @@ class MonitorTest extends TestCase
         $this->upload($node, $payload)->assertOk();
         ProcessBatch::dispatchSync(Batch::where('batch_id', $payload['batch_id'])->firstOrFail()->id);
         $this->assertDatabaseCount('websites', 1);
-        $this->assertSame(1, Alert::where('kind', 'new_website')->count());
-        $this->assertSame('resolved', $alert->fresh()->status);
+        $this->assertDatabaseMissing('alerts', ['kind' => 'new_website']);
     }
 
     public function test_website_description_and_domain_link(): void
