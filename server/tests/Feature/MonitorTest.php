@@ -3,8 +3,8 @@
 namespace Tests\Feature;
 
 use App\Jobs\ProcessBatch;
-use App\Models\Batch;
 use App\Models\Alert;
+use App\Models\Batch;
 use App\Models\Node;
 use App\Models\ProtocolObservation;
 use App\Models\Rule;
@@ -359,5 +359,4 @@ class MonitorTest extends TestCase
         $this->assertDatabaseCount('protocol_observations', 1);
         $this->assertDatabaseMissing('alerts', ['kind' => 'proxy_suspect']);
     }
-
 }
