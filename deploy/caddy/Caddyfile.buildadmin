@@ -9,7 +9,7 @@
 }
 
 {$MONITOR_DOMAIN} {
-    @agent path /api/*
+    @agent path /api/v1/*
     handle @agent {
         reverse_proxy web:8080
     }

@@ -172,6 +172,8 @@ jobs:
           docker compose -f compose.yml -f compose.buildadmin.yml exec -T buildadmin-app php think migrate:run
           curl --retry 10 --retry-connrefused --retry-delay 2 -fsS -H 'server: true' http://127.0.0.1:8081/admin/Index/login >/tmp/buildadmin-nginx-login.json
           python3 -c 'import json; data=json.load(open("/tmp/buildadmin-nginx-login.json")); assert data["code"]==1 and isinstance(data["data"]["captcha"],bool), data'
+          curl -fsS -H 'server: true' 'http://127.0.0.1:8081/api/common/clickCaptcha?id=nginx-smoke' >/tmp/buildadmin-nginx-captcha.json
+          python3 -c 'import json; data=json.load(open("/tmp/buildadmin-nginx-captcha.json")); assert data["code"]==1 and data["data"]["base64"].startswith("data:image/"), str(data)[:500]'
         working-directory: deploy
       - run: |
           trap 'docker compose --profile screenshots down --remove-orphans >/dev/null 2>&1 || true' EXIT
