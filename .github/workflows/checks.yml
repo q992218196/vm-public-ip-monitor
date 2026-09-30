@@ -122,9 +122,9 @@ jobs:
           curl -fsS -H 'server: true' -d 'username=admin@example.test&password=test-admin-password-2026' http://127.0.0.1:8099/admin/Index/login >/tmp/buildadmin-login.json
           token=$(python3 -c 'import json; print(json.load(open("/tmp/buildadmin-login.json"))["data"]["userInfo"]["token"])')
           php -r '$db=new PDO("mysql:host=127.0.0.1;dbname=buildadmin","buildadmin","test-only-password");$ticket=str_repeat("a",64);$nonce=random_bytes(12);$tag="";$key=hash("sha256",getenv("BUILDADMIN_TOKEN_KEY"),true);$cipher=openssl_encrypt("{\"node_id\":\"test-node\"}","aes-256-gcm",$key,OPENSSL_RAW_DATA,$nonce,$tag);$db->prepare("INSERT INTO ba_agent_enrollments(ticket_hash,node_id,payload,expires_at,created_at) VALUES(?,?,?,UTC_TIMESTAMP()+INTERVAL 10 MINUTE,UTC_TIMESTAMP())")->execute([hash("sha256",$ticket),"test-node",base64_encode($nonce.$tag.$cipher)]);'
-          curl -fsS 'http://127.0.0.1:8099/api/AgentBootstrap/config?ticket=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' >/tmp/buildadmin-bootstrap.json
+          curl -fsS -H 'server: true' 'http://127.0.0.1:8099/api/AgentBootstrap/config?ticket=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' >/tmp/buildadmin-bootstrap.json
           python3 -c 'import json; assert json.load(open("/tmp/buildadmin-bootstrap.json"))["node_id"]=="test-node"'
-          test "$(curl -s -o /dev/null -w '%{http_code}' 'http://127.0.0.1:8099/api/AgentBootstrap/config?ticket=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')" = 404
+          test "$(curl -s -H 'server: true' -o /dev/null -w '%{http_code}' 'http://127.0.0.1:8099/api/AgentBootstrap/config?ticket=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')" = 404
           curl -fsS -H 'server: true' -H "batoken: $token" 'http://127.0.0.1:8099/admin/Monitor/index?resource=nodes' >/tmp/buildadmin-nodes.json
           curl -fsS -H 'server: true' -H "batoken: $token" 'http://127.0.0.1:8099/admin/Monitor/count?resource=nodes' >/tmp/buildadmin-count.json
           python3 -c 'import json; nodes=json.load(open("/tmp/buildadmin-nodes.json")); count=json.load(open("/tmp/buildadmin-count.json")); assert nodes["code"]==1 and nodes["data"]["list"]==[] and count["data"]["total"]==0'

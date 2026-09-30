@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -32,7 +33,7 @@ type instruction struct {
 func CheckAndApply(ctx context.Context, c config.Config, currentVersion string) (bool, error) {
 	client := &http.Client{Timeout: 60 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	base := strings.TrimRight(c.ServerURL, "/")
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/api/v1/agent/update?version="+currentVersion, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/api/v1/agent/update?version="+url.QueryEscape(currentVersion), nil)
 	if err != nil {
 		return false, err
 	}

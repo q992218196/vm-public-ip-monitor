@@ -323,6 +323,7 @@ class Monitor extends Backend
         if (!$node) $this->error('节点不存在', [], 404);
         $token = bin2hex(random_bytes(32));
         $config = $this->nodeConfigPayload($node, $token);
+        Db::name('agent_enrollments')->where('node_id', $id)->delete();
         $this->db()->table('nodes')->where('id', $id)->update(['token_hash' => hash('sha256', $token), 'updated_at' => gmdate('Y-m-d H:i:s')]);
         $this->audit('token_rotated', 'Node:' . $id);
         return $config;
@@ -359,6 +360,7 @@ class Monitor extends Backend
         if ($cipher === false) $this->error('无法生成安全配置');
         $now = gmdate('Y-m-d H:i:s');
         Db::name('agent_enrollments')->where('expires_at', '<', $now)->delete();
+        Db::name('agent_enrollments')->where('node_id', $id)->delete();
         Db::name('agent_enrollments')->insert([
             'ticket_hash' => hash('sha256', $ticket), 'node_id' => $id,
             'payload' => base64_encode($nonce . $tag . $cipher),

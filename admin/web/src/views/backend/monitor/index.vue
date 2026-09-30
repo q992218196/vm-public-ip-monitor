@@ -11,7 +11,11 @@
                 <el-button v-if="resource === 'alerts' && selected.length && isAdmin" type="primary" @click="bulkOpen = true"
                     >处理所选 {{ selected.length }} 条</el-button
                 >
-                <el-button v-if="resource === 'nodes' && selectedNodes.length && isAdmin" type="primary" :loading="updatingAgent" @click="requestAgentUpdate(selectedNodes)"
+                <el-button
+                    v-if="resource === 'nodes' && selectedNodes.length && isAdmin"
+                    type="primary"
+                    :loading="updatingAgent"
+                    @click="requestAgentUpdate(selectedNodes)"
                     >下发更新到所选 {{ selectedNodes.length }} 个节点</el-button
                 >
                 <el-button v-if="['ips', 'websites', 'alerts'].includes(resource)" :loading="exporting" @click="exportCsv">导出 CSV</el-button>
@@ -87,8 +91,12 @@
                             @click="filterAlert(column.key, scope.row)"
                             >{{ display(scope.row[column.key]) }}</el-tag
                         >
-                        <el-tag v-else-if="column.key === 'agent_update_status'" :type="agentUpdateTag(scope.row)"
-                            :title="scope.row.agent_update_error || ''">{{ agentUpdateStatus(scope.row) }}</el-tag>
+                        <el-tag
+                            v-else-if="column.key === 'agent_update_status'"
+                            :type="agentUpdateTag(scope.row)"
+                            :title="scope.row.agent_update_error || ''"
+                            >{{ agentUpdateStatus(scope.row) }}</el-tag
+                        >
                         <a
                             v-else-if="column.key === 'host' && resource === 'websites' && scope.row.host"
                             :href="websiteUrl(scope.row)"
@@ -131,7 +139,12 @@
                         <el-button v-if="isAdmin && resource === 'nodes'" link type="primary" @click="openAgentCommand(scope.row)"
                             >生成安装命令</el-button
                         >
-                        <el-button v-if="isAdmin && resource === 'nodes'" link type="primary" :loading="updatingAgent && actionId === scope.row.id" @click="requestAgentUpdate([scope.row.id])"
+                        <el-button
+                            v-if="isAdmin && resource === 'nodes'"
+                            link
+                            type="primary"
+                            :loading="updatingAgent && actionId === scope.row.id"
+                            @click="requestAgentUpdate([scope.row.id])"
                             >更新 Agent</el-button
                         >
                     </template>
@@ -792,7 +805,7 @@ async function openAgentCommand(row: any) {
         const result = await request('nodeBootstrap', 'post', { id: row.id })
         const origin = window.location.origin
         const ticket = String(result.data.ticket)
-        agentCommand.value = `set -e\numask 077\nmkdir -p /home/vm-monitor-install\ncd /home/vm-monitor-install\ncurl --proto '=https' --tlsv1.2 -fsSLo agent.json '${origin}/api/AgentBootstrap/config?ticket=${ticket}'\nchmod 600 agent.json\ncurl --proto '=https' --tlsv1.2 -fsSLo vm-agent-linux-amd64 '${origin}/downloads/vm-agent-linux-amd64'\ncurl --proto '=https' --tlsv1.2 -fsSLo install.sh '${origin}/downloads/install.sh'\ncurl --proto '=https' --tlsv1.2 -fsSLo SHA256SUMS '${origin}/downloads/SHA256SUMS'\nsha256sum -c SHA256SUMS\nbash install.sh ./agent.json ./vm-agent-linux-amd64`
+        agentCommand.value = `set -e\numask 077\nmkdir -p /home/vm-monitor-install\ncd /home/vm-monitor-install\ncurl --proto '=https' --tlsv1.2 -H 'server: true' -fsSLo agent.json '${origin}/api/AgentBootstrap/config?ticket=${ticket}'\nchmod 600 agent.json\ncurl --proto '=https' --tlsv1.2 -fsSLo vm-agent-linux-amd64 '${origin}/downloads/vm-agent-linux-amd64'\ncurl --proto '=https' --tlsv1.2 -fsSLo install.sh '${origin}/downloads/install.sh'\ncurl --proto '=https' --tlsv1.2 -fsSLo SHA256SUMS '${origin}/downloads/SHA256SUMS'\nsha256sum -c SHA256SUMS\nbash install.sh ./agent.json ./vm-agent-linux-amd64`
         agentCommandNode.value = String(row.name || row.id)
         agentCommandOpen.value = true
     } finally {
@@ -802,7 +815,9 @@ async function openAgentCommand(row: any) {
 async function requestAgentUpdate(ids: string[]) {
     const version = agentReleaseVersion.value || '主控已发布版本'
     try {
-        await ElMessageBox.confirm(`向 ${ids.length} 个节点下发 ${version} 更新？节点会在下一次轮询后自行校验并重启。`, '下发 Agent 更新', { type: 'warning' })
+        await ElMessageBox.confirm(`向 ${ids.length} 个节点下发 ${version} 更新？节点会在下一次轮询后自行校验并重启。`, '下发 Agent 更新', {
+            type: 'warning',
+        })
     } catch {
         return
     }
