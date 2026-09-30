@@ -36,6 +36,10 @@ jobs:
           coverage: none
       - run: composer install --no-interaction --prefer-dist
         working-directory: server
+      - run: |
+          vendor/bin/pint app/Models/User.php app/Providers/AppServiceProvider.php bootstrap/app.php bootstrap/providers.php routes/web.php tests/Feature/ExampleTest.php tests/Feature/MonitorTest.php --format agent
+          git diff --exit-code
+        working-directory: server
       - run: php vendor/phpunit/phpunit/phpunit
         working-directory: server
         env:
