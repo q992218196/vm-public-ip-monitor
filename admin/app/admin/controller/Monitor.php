@@ -61,7 +61,7 @@ class Monitor extends Backend
             'action' => $action,
             'subject' => $subject,
             'details' => json_encode(['buildadmin_id' => $this->auth->id] + $details, JSON_UNESCAPED_UNICODE),
-            'created_at' => date('Y-m-d H:i:s'),
+            'created_at' => gmdate('Y-m-d H:i:s'),
         ]);
     }
 
@@ -69,7 +69,7 @@ class Monitor extends Backend
     {
         $db = $this->db();
         $this->success('', [
-            'nodes' => $db->table('nodes')->where('enabled', true)->where('last_seen_at', '>', date('Y-m-d H:i:s', time() - 300))->count(),
+            'nodes' => $db->table('nodes')->where('enabled', true)->where('last_seen_at', '>', gmdate('Y-m-d H:i:s', time() - 300))->count(),
             'ips' => $db->table('ip_assets')->count(),
             'websites' => $db->table('websites')->count(),
             'alerts' => $db->table('alerts')->where('status', 'open')->count(),
@@ -105,7 +105,15 @@ class Monitor extends Backend
         }
         $this->applyFilters($query, $resource);
         $sort = in_array($resource, ['alerts', 'websites', 'ips', 'nodes'], true) ? 'm.last_seen_at' : 'm.id';
-        $rows = $query->field($fields)->order($sort, 'desc')->order('m.id', 'desc')->page($page, $limit)->select()->toArray();
+        $direction = 'desc';
+        if ($resource === 'alerts') {
+            $sort = match ((string)$this->request->get('sort', 'last_seen_at')) {
+                'title' => 'm.title', 'ip' => 'i.ip', 'severity' => 'm.severity',
+                'status' => 'm.status', 'occurrences' => 'm.occurrences', default => 'm.last_seen_at',
+            };
+            $direction = $this->request->get('direction', 'desc') === 'asc' ? 'asc' : 'desc';
+        }
+        $rows = $query->field($fields)->order($sort, $direction)->order('m.id', 'desc')->page($page, $limit)->select()->toArray();
         foreach ($rows as &$row) {
             if ($resource === 'nodes') {
                 $row['cidrs'] = $this->decode($row['cidrs'] ?? null);
@@ -192,7 +200,7 @@ class Monitor extends Backend
         $db->startTrans();
         try {
             if (count($db->table('alerts')->whereIn('id', $ids)->lock(true)->column('id')) !== count($ids)) $this->error('有告警已不存在');
-            $db->table('alerts')->whereIn('id', $ids)->update(['status' => $status, 'resolution' => $resolution, 'updated_at' => date('Y-m-d H:i:s')]);
+            $db->table('alerts')->whereIn('id', $ids)->update(['status' => $status, 'resolution' => $resolution, 'updated_at' => gmdate('Y-m-d H:i:s')]);
             $this->audit('alerts_bulk_handled', 'Alert:batch', ['ids' => $ids, 'status' => $status, 'resolution' => $resolution]);
             $db->commit();
         } catch (\Throwable $e) {
@@ -221,7 +229,7 @@ class Monitor extends Backend
         $this->validateRecord($resource, $data, $id === '');
         if (isset($data['cidrs'])) $data['cidrs'] = json_encode($data['cidrs']);
         if (isset($data['settings'])) $data['settings'] = json_encode($data['settings']);
-        $data['updated_at'] = date('Y-m-d H:i:s');
+        $data['updated_at'] = gmdate('Y-m-d H:i:s');
         if ($id === '') {
             if (!in_array($resource, ['nodes', 'rules', 'exclusions'], true)) $this->error('该资源不可新增');
             if ($resource === 'nodes') $data['id'] = $id = $this->uuid();
@@ -279,7 +287,7 @@ class Monitor extends Backend
             if ($creating && (empty($data['cidr']) || empty($data['reason']) || empty($data['expires_at']))) $this->error('白名单信息不完整');
             if (isset($data['cidr']) && !$this->validCidr((string)$data['cidr'])) $this->error('CIDR 格式无效');
             if (isset($data['reason']) && (trim((string)$data['reason']) === '' || mb_strlen((string)$data['reason']) > 255)) $this->error('原因无效');
-            if (isset($data['expires_at']) && strtotime((string)$data['expires_at']) <= time()) $this->error('失效时间必须在未来');
+            if (isset($data['expires_at']) && strtotime((string)$data['expires_at'] . ' UTC') <= time()) $this->error('失效时间必须在未来');
         }
         if (isset($data['node_id']) && $data['node_id'] === '') $data['node_id'] = null;
         if (isset($data['node_id']) && $data['node_id'] !== null && !$this->db()->table('nodes')->where('id', $data['node_id'])->find()) $this->error('指定节点不存在');
@@ -307,7 +315,7 @@ class Monitor extends Backend
         $node = $this->db()->table('nodes')->where('id', $id)->find();
         if (!$node) $this->error('节点不存在', [], 404);
         $token = bin2hex(random_bytes(32));
-        $this->db()->table('nodes')->where('id', $id)->update(['token_hash' => hash('sha256', $token), 'updated_at' => date('Y-m-d H:i:s')]);
+        $this->db()->table('nodes')->where('id', $id)->update(['token_hash' => hash('sha256', $token), 'updated_at' => gmdate('Y-m-d H:i:s')]);
         $this->audit('token_rotated', 'Node:' . $id);
         $settings = $this->decode($node['settings'] ?? null) ?: [];
         $this->success('新配置已生成，旧凭据已撤销', ['config' => [
@@ -331,7 +339,7 @@ class Monitor extends Backend
     private function queueProbe(int $id): void
     {
         if (!$this->db()->table('websites')->where('id', $id)->find()) $this->error('网站不存在', [], 404);
-        $now = date('Y-m-d H:i:s');
+        $now = gmdate('Y-m-d H:i:s');
         $task = $this->db()->table('probe_tasks')->where('website_id', $id)->find();
         if (!$task) {
             $this->db()->table('probe_tasks')->insert(['website_id' => $id, 'status' => 'pending', 'attempts' => 0, 'available_at' => $now, 'created_at' => $now, 'updated_at' => $now]);
@@ -356,7 +364,7 @@ class Monitor extends Backend
         $fingerprint = hash('sha256', implode('|', [$ip, $port, $scheme, $host]));
         $site = $db->table('websites')->where('fingerprint', $fingerprint)->find();
         if (!$site) {
-            $now = date('Y-m-d H:i:s');
+            $now = gmdate('Y-m-d H:i:s');
             $id = $db->table('websites')->insertGetId([
                 'ip_asset_id' => $asset['id'], 'fingerprint' => $fingerprint, 'port' => $port,
                 'scheme' => $scheme, 'host' => $host, 'source' => 'manual', 'status' => 'observed',

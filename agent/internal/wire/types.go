@@ -7,6 +7,7 @@ type Metric struct {
 	PacketsOut               uint64   `json:"packets_out"`
 	PacketsIn                uint64   `json:"packets_in"`
 	TCPAttempts              uint64   `json:"tcp_attempts"`
+	SYNACKReplies            uint64   `json:"synack_replies"`
 	UniqueTargets            int      `json:"unique_targets"`
 	MaxPortsPerTarget        int      `json:"max_ports_per_target"`
 	MaxAttemptsPerTarget     int      `json:"max_attempts_per_target"`

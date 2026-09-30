@@ -41,6 +41,7 @@ class IngestController extends Controller
             'metrics.*.target_endpoints' => 'sometimes|array|max:32', 'metrics.*.target_endpoints.*' => 'string|max:64',
             'metrics.*.port_samples_truncated' => 'sometimes|boolean', 'metrics.*.endpoint_samples_truncated' => 'sometimes|boolean',
             'metrics.*.cardinality_capped' => 'required|boolean',
+            'metrics.*.synack_replies' => 'sometimes|integer|min:0|max:1000000000000000',
             'sites.*.ip' => 'required|ip', 'sites.*.port' => 'required|integer|min:1|max:65535',
             'sites.*.scheme' => 'required|in:http,https', 'sites.*.host' => ['present', 'nullable', 'string', 'max:253', 'regex:/^[a-zA-Z0-9.\-:\[\]]*$/'],
             'sites.*.source' => 'required|in:http_host,tls_sni',

@@ -61,10 +61,21 @@ services:
     ports: ["127.0.0.1:8081:8081"]
     volumes:
       - ${MONITOR_DATA_DIR:-/home/vm-monitor-server}/buildadmin/uploads:/var/www/html/public/uploads:ro
+      - ${MONITOR_DATA_DIR:-/home/vm-monitor-server}/agent-dist:/agent-dist:ro
     depends_on: [buildadmin-app]
     logging:
       driver: none
     networks: [backend, probes]
+  agent-builder:
+    image: vm-monitor-agent-builder:local
+    profiles: [agent-build]
+    build:
+      context: ..
+      dockerfile: deploy/agent/Dockerfile
+    volumes:
+      - ${MONITOR_DATA_DIR:-/home/vm-monitor-server}/agent-dist:/dist
+    network_mode: none
+    restart: "no"
   https:
     volumes:
       - ./caddy/Caddyfile.buildadmin:/etc/caddy/Caddyfile:ro

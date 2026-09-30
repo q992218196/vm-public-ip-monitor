@@ -97,6 +97,8 @@ cd /home/vm-monitor-src/deploy
 bash prepare.sh
 sudo mkdir -p /home/vm-monitor-server/buildadmin/{mysql,runtime,uploads}
 docker compose -f compose.yml -f compose.buildadmin.yml build buildadmin-app buildadmin-web
+docker compose -f compose.yml -f compose.buildadmin.yml --profile agent-build build agent-builder
+docker compose -f compose.yml -f compose.buildadmin.yml --profile agent-build run --rm agent-builder
 docker compose -f compose.yml -f compose.buildadmin.yml up -d buildadmin-db buildadmin-app buildadmin-web
 docker compose -f compose.yml -f compose.buildadmin.yml exec buildadmin-app php think migrate:run
 docker compose -f compose.yml -f compose.buildadmin.yml exec buildadmin-app php tools/import-monitor-users.php
@@ -104,6 +106,8 @@ curl -I http://127.0.0.1:8081/
 ```
 
 若使用自定义 `MONITOR_DATA_DIR`，目录创建命令也改为该路径。`prepare.sh` 会为旧 `.env` 补充 BuildAdmin 数据库密码和令牌密钥，不会重置现有密钥。迁移命令只初始化 BuildAdmin 的 MySQL 表，监控记录仍留在 PostgreSQL。账号导入程序复制原 Laravel 管理员及只读用户的邮箱、密码散列和权限；再次运行不会覆盖在新后台修改过的密码。BuildAdmin 上游自带的空密码演示管理员会被禁用。
+
+`agent-builder` 在主控服务器编译 Linux amd64 Agent，产物、安装脚本及 `SHA256SUMS` 放在 `${MONITOR_DATA_DIR}/agent-dist`（默认 `/home/vm-monitor-server/agent-dist`）。后台“采集节点”可下载节点专属 `agent.json` 并复制安装命令；先通过可信通道将配置文件传到目标宿主机 `/home/vm-monitor-install/agent.json`，再在宿主机以 root 粘贴命令。命令从本站 HTTPS 下载编译产物并校验哈希，不含长期节点令牌。生成新配置会轮换旧凭据，务必及时安装。更新 Agent 源码后重新运行上面的 `agent-builder` 两条命令即可刷新下载文件。
 
 在切换公网入口前，先通过本机端口打开 `http://127.0.0.1:8081/#/admin/login` 验证旧管理员邮箱及密码。若从远程电脑测试，可以通过现有可信的 SSH 隧道转发本机端口；不要把 8081 直接暴露到公网。确认采集节点、告警、网站、规则、详情和账号页面正常后，再切换 Caddy：
 

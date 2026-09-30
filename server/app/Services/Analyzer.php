@@ -193,7 +193,29 @@ class Analyzer
                 'single_target_attempts' => $rows->sortByDesc(fn ($row) => $row->evidence['max_attempts_per_target'] ?? 0)->first(),
                 default => $rows->last(),
             };
-            $this->alert($node, $asset, $rule->kind, $rule->severity, $title, ['rule_id' => $rule->id, 'value' => $value, 'threshold' => $rule->threshold, 'window_seconds' => $rule->window_seconds, 'sample' => $sample?->evidence, 'confidence' => 'behavioral', 'note' => $note], $batch->window_end, $rule->cooldown_seconds, (string) $rule->id);
+            $sampleEvidence = $sample?->evidence ?? [];
+            $severity = $rule->severity;
+            $confidence = 'behavioral';
+            if ($rule->kind === 'horizontal_scan') {
+                if (!array_key_exists('synack_replies', $sampleEvidence)) {
+                    $note .= '；当前 Agent 未上报 SYN-ACK 响应数，无法判断连接是否得到回复';
+                } else {
+                    $attempts = (int) ($sampleEvidence['tcp_attempts'] ?? 0);
+                    $replies = (int) $sampleEvidence['synack_replies'];
+                    $out = (int) ($sampleEvidence['bytes_out'] ?? 0);
+                    $in = (int) ($sampleEvidence['bytes_in'] ?? 0);
+                    if ($attempts >= $rule->threshold && $replies * 10 >= $attempts * 7
+                        && (int) ($sampleEvidence['max_ports_per_target'] ?? 0) <= 1
+                        && (int) ($sampleEvidence['max_attempts_per_target'] ?? 0) <= 2
+                        && min($out, $in) >= 262144 && max($out, $in) <= min($out, $in) * 4) {
+                        $severity = $severity === 'high' ? 'medium' : $severity;
+                        $title = '疑似多目标双向连接（待复核）';
+                        $confidence = 'bidirectional_candidate';
+                        $note .= '；多数 TCP 发起收到 SYN-ACK，且单目标连接少、双向流量明显，可能是正常组网或 P2P；仍需人工核对业务用途';
+                    }
+                }
+            }
+            $this->alert($node, $asset, $rule->kind, $severity, $title, ['rule_id' => $rule->id, 'value' => $value, 'threshold' => $rule->threshold, 'window_seconds' => $rule->window_seconds, 'sample' => $sampleEvidence, 'confidence' => $confidence, 'note' => $note], $batch->window_end, $rule->cooldown_seconds, (string) $rule->id);
         }
     }
 

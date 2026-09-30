@@ -3,7 +3,7 @@
         <div class="monitor-heading">
             <div>
                 <h2>{{ definition.title }}</h2>
-                <p>监控数据按需读取，证据在打开单条详情时加载。</p>
+                <p>监控数据按需读取，证据在打开单条详情时加载；时间按浏览器本地时区显示。</p>
             </div>
             <div class="monitor-heading-actions">
                 <el-button v-if="canCreate" type="primary" @click="openEditor()">新增</el-button>
@@ -63,6 +63,7 @@
                 border
                 stripe
                 table-layout="auto"
+                @sort-change="onSortChange"
                 @selection-change="(items: any[]) => (selected = items.map((item) => item.id))"
             >
                 <el-table-column v-if="resource === 'alerts' && isAdmin" type="selection" width="48" />
@@ -71,21 +72,35 @@
                     :key="column.key"
                     :prop="column.key"
                     :label="column.label"
+                    :sortable="resource === 'alerts' && alertSortKeys.includes(column.key) ? 'custom' : false"
                     min-width="130"
                     show-overflow-tooltip
                 >
                     <template #default="scope">
-                        <el-tag v-if="column.key === 'status' || column.key === 'severity'" :type="tagType(scope.row[column.key])">{{
-                            display(scope.row[column.key])
-                        }}</el-tag>
+                        <el-tag
+                            v-if="column.key === 'status' || column.key === 'severity'"
+                            :type="tagType(scope.row[column.key])"
+                            :class="resource === 'alerts' ? 'monitor-clickable' : ''"
+                            @click="filterAlert(column.key, scope.row)"
+                            >{{ display(scope.row[column.key]) }}</el-tag
+                        >
                         <a
                             v-else-if="column.key === 'host' && resource === 'websites' && scope.row.host"
                             :href="websiteUrl(scope.row)"
                             target="_blank"
                             rel="noopener noreferrer"
+                            class="monitor-host-link"
                             >{{ scope.row.host }}</a
                         >
-                        <span v-else>{{ display(scope.row[column.key]) }}</span>
+                        <button
+                            v-else-if="resource === 'alerts' && (column.key === 'ip' || column.key === 'title')"
+                            type="button"
+                            class="monitor-filter-link"
+                            @click="filterAlert(column.key, scope.row)"
+                        >
+                            {{ display(scope.row[column.key]) }}
+                        </button>
+                        <span v-else>{{ isTimeColumn(column.key) ? displayUtcTime(scope.row[column.key]) : display(scope.row[column.key]) }}</span>
                     </template>
                 </el-table-column>
                 <el-table-column label="操作" fixed="right" min-width="190">
@@ -108,6 +123,9 @@
                             @click="nodeConfig(scope.row)"
                             >接入配置</el-button
                         >
+                        <el-button v-if="isAdmin && resource === 'nodes'" link type="primary" @click="openAgentCommand(scope.row)"
+                            >复制安装命令</el-button
+                        >
                     </template>
                 </el-table-column>
             </el-table>
@@ -127,6 +145,9 @@
 
         <el-drawer v-model="detailOpen" title="记录与证据" size="min(720px, 94vw)" destroy-on-close>
             <el-skeleton v-if="detailLoading" :rows="8" animated />
+            <el-result v-else-if="detailError" icon="warning" title="证据暂时无法加载" :sub-title="detailError">
+                <template #extra><el-button type="primary" @click="retryDetail">重试</el-button></template>
+            </el-result>
             <template v-else>
                 <el-alert
                     v-if="resource === 'alerts' && detail?.kind === 'capture_degraded'"
@@ -138,6 +159,13 @@
                     <el-button :loading="screenshotLoading" @click="loadScreenshot">查看截图</el-button>
                     <img v-if="screenshotData" :src="screenshotData" alt="网站验证截图" />
                 </div>
+                <el-alert
+                    v-if="resource === 'alerts' && detail?.kind === 'horizontal_scan'"
+                    type="info"
+                    :closable="false"
+                    title="这是多目标连接行为线索，不等于违规或已确认扫描。请结合目标端口、握手响应、业务用途和历史基线复核。"
+                />
+                <p class="monitor-time-note">时间按浏览器本地时区显示；下方原始证据中的数据库时间为 UTC。</p>
                 <pre class="monitor-evidence">{{ JSON.stringify(detail, null, 2) }}</pre>
             </template>
         </el-drawer>
@@ -206,6 +234,18 @@
             <template #footer
                 ><el-button @click="bulkOpen = false">取消</el-button
                 ><el-button type="primary" :loading="saving" @click="bulkSave">确认处理</el-button></template
+            >
+        </el-dialog>
+        <el-dialog v-model="agentCommandOpen" :title="'安装 Agent · ' + agentCommandNode" width="min(760px, 94vw)">
+            <el-alert
+                title="先下载该节点的接入配置，将 agent.json 传到宿主机的 /home/vm-monitor-install/。安装命令不包含节点令牌。"
+                type="warning"
+                :closable="false"
+            />
+            <pre class="monitor-command">{{ agentCommand }}</pre>
+            <template #footer
+                ><el-button @click="agentCommandOpen = false">关闭</el-button
+                ><el-button type="primary" @click="copyAgentCommand">复制命令</el-button></template
             >
         </el-dialog>
     </div>
@@ -392,6 +432,9 @@ const nodes = ref<{ id: string; name: string }[]>([])
 const total = ref(0)
 const page = ref(1)
 const limit = ref(25)
+const alertSortKeys = ['title', 'ip', 'severity', 'status', 'occurrences', 'last_seen_at']
+const sortField = ref('last_seen_at')
+const sortDirection = ref('desc')
 const loading = ref(false)
 const countLoading = ref(false)
 const countError = ref(false)
@@ -407,6 +450,9 @@ const filters = reactive({ search: '', ip: '', node: '', status: '', severity: '
 const detail = ref<any>(null)
 const detailOpen = ref(false)
 const detailLoading = ref(false)
+const detailError = ref('')
+const detailId = ref<number | string | null>(null)
+let detailSequence = 0
 const screenshotLoading = ref(false)
 const screenshotData = ref('')
 const editorOpen = ref(false)
@@ -418,12 +464,33 @@ const bulkStatus = ref('acknowledged')
 const resolution = ref('')
 const manualOpen = ref(false)
 const manual = reactive({ ip: '', port: 443, scheme: 'https', host: '' })
+const agentCommandOpen = ref(false)
+const agentCommandNode = ref('')
+const agentCommand = computed(() => {
+    const origin = window.location.origin
+    return `set -e\numask 077\nmkdir -p /home/vm-monitor-install\ncd /home/vm-monitor-install\ntest -s agent.json\ncurl --proto '=https' --tlsv1.2 -fsSLo vm-agent-linux-amd64 '${origin}/downloads/vm-agent-linux-amd64'\ncurl --proto '=https' --tlsv1.2 -fsSLo install.sh '${origin}/downloads/install.sh'\ncurl --proto '=https' --tlsv1.2 -fsSLo SHA256SUMS '${origin}/downloads/SHA256SUMS'\nsha256sum -c SHA256SUMS\nbash install.sh ./agent.json ./vm-agent-linux-amd64`
+})
 const visibleKeys = ref<string[]>([])
 const visibleColumns = computed(() => definition.value.columns.filter((column) => visibleKeys.value.includes(column.key)))
 const canCreate = computed(() => isAdmin.value && definition.value.create)
 
-function request(action: string, method: 'get' | 'post', data: Record<string, any> = {}) {
-    return createAxios({ url: '/admin/Monitor/' + action, method, ...(method === 'get' ? { params: data } : { data }) })
+function request(action: string, method: 'get' | 'post', data: Record<string, any> = {}, timeout?: number) {
+    return createAxios({ url: '/admin/Monitor/' + action, method, timeout, ...(method === 'get' ? { params: data } : { data }) })
+}
+function onSortChange({ prop, order }: { prop: string; order: string | null }) {
+    if (resource.value !== 'alerts') return
+    sortField.value = alertSortKeys.includes(prop) && order ? prop : 'last_seen_at'
+    sortDirection.value = order === 'ascending' ? 'asc' : 'desc'
+    page.value = 1
+    load()
+}
+function filterAlert(key: string, row: any) {
+    if (resource.value !== 'alerts') return
+    if (key === 'title') filters.search = String(row.title || '')
+    if (key === 'ip') filters.ip = String(row.ip || '')
+    if (key === 'severity') filters.severity = String(row.severity || '')
+    if (key === 'status') filters.status = String(row.status || '')
+    resetAndLoad()
 }
 function resetAndLoad() {
     page.value = 1
@@ -452,7 +519,13 @@ async function load() {
     }
     loading.value = true
     try {
-        const result = await request('index', 'get', { ...query, page: page.value, limit: limit.value })
+        const result = await request('index', 'get', {
+            ...query,
+            page: page.value,
+            limit: limit.value,
+            sort: sortField.value,
+            direction: sortDirection.value,
+        })
         if (sequence !== loadSequence) return
         rows.value = result.data.list
         isAdmin.value = !!result.data.super
@@ -468,6 +541,8 @@ watch(
     resource,
     () => {
         page.value = 1
+        sortField.value = 'last_seen_at'
+        sortDirection.value = 'desc'
         countKey = ''
         selected.value = []
         visibleKeys.value = definition.value.columns.filter((column) => column.key !== 'description').map((column) => column.key)
@@ -501,6 +576,18 @@ function display(value: any): string {
     if (labels[String(value)]) return labels[String(value)]
     return String(value)
 }
+const timeColumns = ['last_seen_at', 'first_seen_at', 'last_probed_at', 'window_start', 'window_end', 'created_at', 'updated_at', 'expires_at']
+function isTimeColumn(key: string): boolean {
+    return timeColumns.includes(key)
+}
+function displayUtcTime(value: any): string {
+    if (!value) return '—'
+    const raw = String(value).replace(' ', 'T')
+    const date = new Date(/(Z|[+-]\d{2}:\d{2})$/.test(raw) ? raw : raw + 'Z')
+    if (Number.isNaN(date.getTime())) return String(value)
+    const pad = (n: number) => String(n).padStart(2, '0')
+    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`
+}
 function websiteUrl(row: any): string {
     const host = String(row.host || row.ip || '')
     const authority = host.includes(':') ? '[' + host + ']' : host
@@ -513,15 +600,30 @@ function tagType(value: string) {
     return 'info'
 }
 async function openDetail(row: any) {
+    detailId.value = row.id
     detailOpen.value = true
+    await fetchDetail()
+}
+function retryDetail() {
+    void fetchDetail()
+}
+async function fetchDetail() {
+    if (detailId.value === null) return
+    const sequence = ++detailSequence
     detailLoading.value = true
+    detailError.value = ''
     detail.value = null
     screenshotData.value = ''
     try {
-        const result = await request('detail', 'get', { resource: resource.value, id: row.id })
-        detail.value = result.data.record
+        const result = await request('detail', 'get', { resource: resource.value, id: detailId.value }, 30000)
+        if (sequence === detailSequence) detail.value = result.data.record
+    } catch (error: any) {
+        if (sequence === detailSequence)
+            detailError.value = error?.message?.includes('timeout')
+                ? '请求超时，请重试；若持续出现，请检查管理服务与数据库负载。'
+                : String(error?.msg || error?.message || '请求失败')
     } finally {
-        detailLoading.value = false
+        if (sequence === detailSequence) detailLoading.value = false
     }
 }
 async function openEditor(row?: any) {
@@ -536,6 +638,7 @@ async function openEditor(row?: any) {
             for (const field of definition.value.edit || []) {
                 let value = record[field.key]
                 if (field.key === 'cidrs' && Array.isArray(value)) value = value.join('\n')
+                if (field.key === 'expires_at' && value) value = displayUtcTime(value)
                 if (['interfaces', 'memory_soft_mib', 'memory_hard_mib', 'disk_limit_mib', 'data_dir'].includes(field.key)) {
                     value = record.settings?.[field.key]
                     if (field.key === 'interfaces' && Array.isArray(value)) value = value.join('\n')
@@ -562,6 +665,10 @@ async function openEditor(row?: any) {
 }
 async function save() {
     const data = { ...form }
+    if (resource.value === 'exclusions' && data.expires_at) {
+        const local = new Date(String(data.expires_at).replace(' ', 'T'))
+        if (!Number.isNaN(local.getTime())) data.expires_at = local.toISOString().slice(0, 19).replace('T', ' ')
+    }
     if (resource.value === 'nodes') {
         data.cidrs = String(data.cidrs || '')
             .split(/[\n,]+/)
@@ -636,6 +743,18 @@ async function nodeConfig(row: any) {
         ElMessage.success('已下载新配置')
     } finally {
         actionId.value = null
+    }
+}
+function openAgentCommand(row: any) {
+    agentCommandNode.value = String(row.name || row.id)
+    agentCommandOpen.value = true
+}
+async function copyAgentCommand() {
+    try {
+        await navigator.clipboard.writeText(agentCommand.value)
+        ElMessage.success('命令已复制')
+    } catch {
+        ElMessage.error('复制失败，请手动复制文本')
     }
 }
 async function loadScreenshot() {
@@ -744,6 +863,40 @@ async function exportCsv() {
     overflow-wrap: anywhere;
     font-size: 13px;
     line-height: 1.5;
+}
+.monitor-host-link {
+    text-decoration: none;
+}
+.monitor-host-link:hover {
+    text-decoration: none;
+}
+.monitor-filter-link {
+    padding: 0;
+    border: 0;
+    color: var(--el-color-primary);
+    background: transparent;
+    cursor: pointer;
+    font: inherit;
+    text-align: left;
+}
+.monitor-filter-link:hover {
+    color: var(--el-color-primary-light-3);
+}
+.monitor-clickable {
+    cursor: pointer;
+}
+.monitor-time-note {
+    color: var(--el-text-color-secondary);
+    font-size: 12px;
+}
+.monitor-command {
+    margin-top: 14px;
+    padding: 14px;
+    border-radius: 8px;
+    background: var(--el-fill-color-light);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    font-size: 12px;
 }
 .monitor-screenshot img {
     display: block;

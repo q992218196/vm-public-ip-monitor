@@ -126,6 +126,9 @@ jobs:
           curl -fsS -H 'server: true' -H "batoken: $token" 'http://127.0.0.1:8099/admin/Monitor/index?resource=alerts&limit=500' >/tmp/buildadmin-alerts.json
           curl -fsS -H 'server: true' -H "batoken: $token" 'http://127.0.0.1:8099/admin/Monitor/count?resource=alerts' >/tmp/buildadmin-alert-count.json
           python3 -c 'import json; rows=json.load(open("/tmp/buildadmin-alerts.json")); count=json.load(open("/tmp/buildadmin-alert-count.json")); assert rows["code"]==1 and len(rows["data"]["list"])==1 and count["data"]["total"]==1'
+          curl -fsS -H 'server: true' -H "batoken: $token" 'http://127.0.0.1:8099/admin/Monitor/index?resource=alerts&sort=ip&direction=asc' >/tmp/buildadmin-alert-sort.json
+          curl -fsS -H 'server: true' -H "batoken: $token" 'http://127.0.0.1:8099/admin/Monitor/detail?resource=alerts&id=1' >/tmp/buildadmin-alert-detail.json
+          python3 -c 'import json; rows=json.load(open("/tmp/buildadmin-alert-sort.json")); detail=json.load(open("/tmp/buildadmin-alert-detail.json")); assert rows["code"]==1 and rows["data"]["list"][0]["ip"]=="203.0.113.10" and int(detail["data"]["record"]["id"])==1'
           curl -fsS -H 'server: true' -H "batoken: $token" -H 'Content-Type: application/json' -d '{"ids":[1],"status":"resolved","resolution":"reviewed"}' http://127.0.0.1:8099/admin/Monitor/bulkAlerts >/tmp/buildadmin-bulk.json
           python3 -c 'import json; assert json.load(open("/tmp/buildadmin-bulk.json"))["code"]==1'
           php -r '$db=new PDO("pgsql:host=127.0.0.1;dbname=monitor_test","monitor","test-only-password");if($db->query("SELECT status FROM alerts WHERE id=1")->fetchColumn()!=="resolved" || $db->query("SELECT count(*) FROM audit_logs")->fetchColumn()!=1)exit(1);'
@@ -148,6 +151,12 @@ jobs:
       - run: docker compose --profile screenshots build app web worker
         working-directory: deploy
       - run: docker compose -f compose.yml -f compose.buildadmin.yml build buildadmin-app buildadmin-web
+        working-directory: deploy
+      - run: |
+          docker compose -f compose.yml -f compose.buildadmin.yml --profile agent-build build agent-builder
+          docker compose -f compose.yml -f compose.buildadmin.yml --profile agent-build run --rm agent-builder
+          cd /home/vm-monitor-server/agent-dist
+          sha256sum -c SHA256SUMS
         working-directory: deploy
       - run: docker compose --profile https config --quiet
         working-directory: deploy
@@ -174,6 +183,9 @@ jobs:
           python3 -c 'import json; data=json.load(open("/tmp/buildadmin-nginx-login.json")); assert data["code"]==1 and isinstance(data["data"]["captcha"],bool), data'
           curl -fsS -H 'server: true' 'http://127.0.0.1:8081/api/common/clickCaptcha?id=nginx-smoke' >/tmp/buildadmin-nginx-captcha.json
           python3 -c 'import json; data=json.load(open("/tmp/buildadmin-nginx-captcha.json")); assert data["code"]==1 and data["data"]["base64"].startswith("data:image/"), str(data)[:500]'
+          curl -fsS http://127.0.0.1:8081/downloads/SHA256SUMS | grep -q 'vm-agent-linux-amd64'
+          curl -fsS -o /tmp/vm-agent-smoke http://127.0.0.1:8081/downloads/vm-agent-linux-amd64
+          cmp /tmp/vm-agent-smoke /home/vm-monitor-server/agent-dist/vm-agent-linux-amd64
         working-directory: deploy
       - run: |
           trap 'docker compose --profile screenshots down --remove-orphans >/dev/null 2>&1 || true' EXIT

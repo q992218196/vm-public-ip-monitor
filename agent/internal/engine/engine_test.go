@@ -188,6 +188,20 @@ func TestScanCountsDistinctPortsWithoutSYNACK(t *testing.T) {
 		t.Fatalf("missing bounded port evidence: %+v", m)
 	}
 }
+func TestSYNACKReplyCountsOnlyMatchingOutboundAttemptOnce(t *testing.T) {
+	now := time.Now()
+	e := New(cfg(), now)
+	syn := frame("203.0.113.1", "198.51.100.2", 40001, 31402, 1, 2, "")
+	reply := frame("198.51.100.2", "203.0.113.1", 31402, 40001, 1, 18, "")
+	unmatched := frame("198.51.100.3", "203.0.113.1", 31402, 40002, 1, 18, "")
+	for _, p := range [][]byte{syn, reply, reply, unmatched} {
+		e.Process(p, len(p), "a", now)
+	}
+	m := e.Snapshot(now.Add(time.Second)).Metrics[0]
+	if m.TCPAttempts != 1 || m.SYNACKReplies != 1 {
+		t.Fatalf("unexpected SYN-ACK evidence: %+v", m)
+	}
+}
 func TestPortEvidenceIsBounded(t *testing.T) {
 	now := time.Now()
 	e := New(cfg(), now)

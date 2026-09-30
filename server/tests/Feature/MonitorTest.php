@@ -82,6 +82,36 @@ class MonitorTest extends TestCase
         $this->assertDatabaseHas('alerts', ['kind' => 'tcp_connection_burst']);
     }
 
+    public function test_horizontal_scan_with_many_replied_bidirectional_connections_is_review_level(): void
+    {
+        $this->seed(MonitorSeeder::class);
+        $node = $this->node();
+        $payload = $this->payload();
+        $payload['metrics'][0] = array_replace($payload['metrics'][0], [
+            'bytes_out' => 3492528, 'bytes_in' => 3657616,
+            'tcp_attempts' => 113, 'unique_targets' => 112,
+            'max_ports_per_target' => 1, 'max_attempts_per_target' => 2,
+            'synack_replies' => 100,
+        ]);
+        $this->upload($node, $payload)->assertOk();
+        ProcessBatch::dispatchSync(Batch::first()->id);
+        $alert = Alert::where('kind', 'horizontal_scan')->firstOrFail();
+        $this->assertSame('medium', $alert->severity);
+        $this->assertSame('bidirectional_candidate', $alert->evidence['confidence']);
+        $this->assertSame(100, $alert->evidence['sample']['synack_replies']);
+    }
+
+    public function test_horizontal_scan_without_replies_keeps_high_severity(): void
+    {
+        $this->seed(MonitorSeeder::class);
+        $node = $this->node();
+        $payload = $this->payload();
+        $payload['metrics'][0]['synack_replies'] = 0;
+        $this->upload($node, $payload)->assertOk();
+        ProcessBatch::dispatchSync(Batch::first()->id);
+        $this->assertSame('high', Alert::where('kind', 'horizontal_scan')->firstOrFail()->severity);
+    }
+
     public function test_shared_cidr_keeps_observers_and_single_ip_site(): void
     {
         foreach ([$this->node(), $this->node()] as $n) {

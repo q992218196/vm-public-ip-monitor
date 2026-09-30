@@ -35,6 +35,10 @@ type seen struct {
 	iface string
 	at    time.Time
 }
+type synState struct {
+	at        time.Time
+	responded bool
+}
 type vpnKey struct {
 	VM, Peer            netip.Addr
 	LocalPort, PeerPort uint16
@@ -71,7 +75,7 @@ type Engine struct {
 	c          config.Config
 	prefixes   []netip.Prefix
 	ips        map[netip.Addr]*ipState
-	syns       map[flowKey]time.Time
+	syns       map[flowKey]synState
 	streams    map[flowKey]*stream
 	sites      map[string]wire.Site
 	vpn        map[vpnKey]*vpnState
@@ -82,7 +86,7 @@ type Engine struct {
 }
 
 func New(c config.Config, now time.Time) *Engine {
-	e := &Engine{c: c, ips: map[netip.Addr]*ipState{}, syns: map[flowKey]time.Time{}, streams: map[flowKey]*stream{}, sites: map[string]wire.Site{}, vpn: map[vpnKey]*vpnState{}, proxyFlows: map[flowKey]*proxyFlow{}, duplicates: map[uint64]seen{}, start: now}
+	e := &Engine{c: c, ips: map[netip.Addr]*ipState{}, syns: map[flowKey]synState{}, streams: map[flowKey]*stream{}, sites: map[string]wire.Site{}, vpn: map[vpnKey]*vpnState{}, proxyFlows: map[flowKey]*proxyFlow{}, duplicates: map[uint64]seen{}, start: now}
 	for _, s := range c.CIDRs {
 		p, err := netip.ParsePrefix(s)
 		if err == nil {
@@ -162,15 +166,25 @@ func (e *Engine) Process(b []byte, wireLen int, iface string, now time.Time) {
 		return
 	}
 	k := flowKey{p.Src, p.Dst, p.SrcPort, p.DstPort}
+	if dst && p.SYN && p.ACK {
+		reverse := flowKey{p.Dst, p.Src, p.DstPort, p.SrcPort}
+		if attempt, ok := e.syns[reverse]; ok && !attempt.responded && now.Sub(attempt.at) < 60*time.Second {
+			attempt.responded = true
+			e.syns[reverse] = attempt
+			if s := e.state(p.Dst); s != nil {
+				s.m.SYNACKReplies++
+			}
+		}
+	}
 	if src && p.SYN && !p.ACK {
-		if t, ok := e.syns[k]; ok && now.Sub(t) < 60*time.Second {
+		if attempt, ok := e.syns[k]; ok && now.Sub(attempt.at) < 60*time.Second {
 			return
 		}
 		if len(e.syns) >= e.c.MaxFlows {
 			e.health.StateDropped++
 			return
 		}
-		e.syns[k] = now
+		e.syns[k] = synState{at: now}
 		s := e.state(p.Src)
 		if s == nil {
 			return
@@ -336,8 +350,8 @@ func authPort(p uint16) bool {
 func (e *Engine) Sweep(now time.Time) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	for k, t := range e.syns {
-		if now.Sub(t) > 60*time.Second {
+	for k, attempt := range e.syns {
+		if now.Sub(attempt.at) > 60*time.Second {
 			delete(e.syns, k)
 		}
 	}
