@@ -13,15 +13,17 @@ import (
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
+	"sync"
 	"time"
 	"vm-monitor/agent/internal/capture"
 	"vm-monitor/agent/internal/config"
 	"vm-monitor/agent/internal/engine"
 	"vm-monitor/agent/internal/spool"
+	"vm-monitor/agent/internal/update"
 	"vm-monitor/agent/internal/wire"
 )
 
-var version = "0.3.0"
+var version = "0.4.0"
 
 func main() {
 	if e := run(); e != nil {
@@ -32,8 +34,14 @@ func main() {
 func run() error {
 	conf := flag.String("config", "/home/vm-monitor/config/agent.json", "configuration path")
 	check := flag.Bool("check", false, "validate configuration and paths without capture")
+	showVersion := flag.Bool("version", false, "print Agent version")
+	updateNow := flag.Bool("update", false, "check for an assigned update and install it")
 	replay := flag.String("replay", "", "replay an Ethernet classic PCAP and print batch JSON, without uploading")
 	flag.Parse()
+	if *showVersion {
+		fmt.Println(version)
+		return nil
+	}
 	c, e := config.Load(*conf)
 	if e != nil {
 		return e
@@ -42,6 +50,17 @@ func run() error {
 	if *check {
 		fmt.Printf("configuration valid; %d CIDRs; data=%s; work budget=%d MiB; interfaces=%v\n", len(c.CIDRs), c.DataDir, c.MemorySoftMiB, c.Interfaces)
 		return nil
+	}
+	if *updateNow {
+		ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+		defer cancel()
+		applied, err := update.CheckAndApply(ctx, c, version)
+		if applied {
+			fmt.Println("Agent updated; restart vm-monitor-agent with systemctl")
+		} else if err == nil {
+			fmt.Println("No update assigned")
+		}
+		return err
 	}
 	if *replay != "" {
 		return replayPCAP(*replay, c)
@@ -95,6 +114,43 @@ func run() error {
 			}
 		}
 	}()
+	updated := make(chan struct{}, 1)
+	var updateMu sync.Mutex
+	var updateError string
+	go func() {
+		// Polling happens outside packet capture and uses a bounded download.
+		ticker := time.NewTicker(time.Minute)
+		defer ticker.Stop()
+		nextAttempt := time.Time{}
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if time.Now().Before(nextAttempt) {
+					continue
+				}
+				applied, err := update.CheckAndApply(ctx, c, version)
+				if err != nil {
+					log.Printf("update: %v", err)
+					updateMu.Lock()
+					updateError = err.Error()
+					if len(updateError) > 255 {
+						updateError = updateError[:255]
+					}
+					updateMu.Unlock()
+					nextAttempt = time.Now().Add(10 * time.Minute)
+				} else if applied {
+					updated <- struct{}{}
+					return
+				} else {
+					updateMu.Lock()
+					updateError = ""
+					updateMu.Unlock()
+				}
+			}
+		}
+	}()
 	flush := time.NewTicker(time.Duration(c.FlushSeconds) * time.Second)
 	defer flush.Stop()
 	sweep := time.NewTicker(time.Second)
@@ -105,6 +161,9 @@ func run() error {
 		var m runtime.MemStats
 		runtime.ReadMemStats(&m)
 		b.Health.Version = version
+		updateMu.Lock()
+		b.Health.UpdateError = updateError
+		updateMu.Unlock()
 		b.Health.HeapBytes = m.HeapAlloc
 		b.Health.RSSBytes = capture.RSS()
 		b.Health.Interfaces = c.Interfaces
@@ -125,6 +184,9 @@ func run() error {
 			return nil
 		case e := <-errs:
 			return e
+		case <-updated:
+			snapshot()
+			return fmt.Errorf("Agent updated; systemd will restart with the new binary")
 		case <-flush.C:
 			snapshot()
 		case now := <-sweep.C:

@@ -1,0 +1,133 @@
+package update
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"regexp"
+	"strings"
+	"time"
+	"vm-monitor/agent/internal/config"
+)
+
+const maxBinaryBytes = 50 << 20
+
+var versionPattern = regexp.MustCompile(`^[0-9A-Za-z][0-9A-Za-z.+_-]{0,31}$`)
+
+type instruction struct {
+	Update  bool   `json:"update"`
+	Version string `json:"version"`
+	SHA256  string `json:"sha256"`
+	Path    string `json:"path"`
+}
+
+func CheckAndApply(ctx context.Context, c config.Config, currentVersion string) (bool, error) {
+	client := &http.Client{Timeout: 60 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	base := strings.TrimRight(c.ServerURL, "/")
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/api/v1/agent/update?version="+currentVersion, nil)
+	if err != nil {
+		return false, err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.Token)
+	req.Header.Set("X-Node-ID", c.NodeID)
+	res, err := client.Do(req)
+	if err != nil {
+		return false, err
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		return false, fmt.Errorf("update control HTTP %d", res.StatusCode)
+	}
+	var inst instruction
+	if err := json.NewDecoder(io.LimitReader(res.Body, 2048)).Decode(&inst); err != nil {
+		return false, fmt.Errorf("update control response: %w", err)
+	}
+	if !inst.Update {
+		return false, nil
+	}
+	if !versionPattern.MatchString(inst.Version) || len(inst.SHA256) != 64 || inst.Path != "/downloads/vm-agent-linux-amd64" {
+		return false, errors.New("invalid update instruction")
+	}
+	want, err := hex.DecodeString(inst.SHA256)
+	if err != nil || len(want) != sha256.Size {
+		return false, errors.New("invalid update digest")
+	}
+
+	dir := filepath.Join(c.DataDir, "bin")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return false, err
+	}
+	f, err := os.CreateTemp(dir, ".vm-agent-update-*")
+	if err != nil {
+		return false, err
+	}
+	tmp := f.Name()
+	defer os.Remove(tmp)
+	download, err := http.NewRequestWithContext(ctx, http.MethodGet, base+inst.Path, nil)
+	if err != nil {
+		f.Close()
+		return false, err
+	}
+	response, err := client.Do(download)
+	if err != nil {
+		f.Close()
+		return false, err
+	}
+	if response.StatusCode != http.StatusOK {
+		response.Body.Close()
+		f.Close()
+		return false, fmt.Errorf("update download HTTP %d", response.StatusCode)
+	}
+	h := sha256.New()
+	n, copyErr := io.Copy(io.MultiWriter(f, h), io.LimitReader(response.Body, maxBinaryBytes+1))
+	response.Body.Close()
+	if syncErr := f.Sync(); copyErr == nil {
+		copyErr = syncErr
+	}
+	if closeErr := f.Close(); copyErr == nil {
+		copyErr = closeErr
+	}
+	if copyErr != nil {
+		return false, copyErr
+	}
+	if n == 0 || n > maxBinaryBytes || !strings.EqualFold(hex.EncodeToString(h.Sum(nil)), hex.EncodeToString(want)) {
+		return false, errors.New("update size or SHA-256 mismatch")
+	}
+	if err := os.Chmod(tmp, 0700); err != nil {
+		return false, err
+	}
+	checkCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	check := exec.CommandContext(checkCtx, tmp, "-config", filepath.Join(c.DataDir, "config", "agent.json"), "-check")
+	if output, err := check.CombinedOutput(); err != nil {
+		return false, fmt.Errorf("update self-check failed: %v: %s", err, strings.TrimSpace(string(output)))
+	}
+	versionCmd := exec.CommandContext(checkCtx, tmp, "-version")
+	output, err := versionCmd.Output()
+	if err != nil || strings.TrimSpace(string(output)) != inst.Version {
+		return false, errors.New("downloaded Agent version does not match instruction")
+	}
+	current := filepath.Join(dir, "vm-agent")
+	previous := filepath.Join(dir, "vm-agent.previous")
+	if err := os.Remove(previous); err != nil && !os.IsNotExist(err) {
+		return false, err
+	}
+	if err := os.Rename(current, previous); err != nil {
+		return false, err
+	}
+	if err := os.Rename(tmp, current); err != nil {
+		if rollbackErr := os.Rename(previous, current); rollbackErr != nil {
+			return false, fmt.Errorf("install failed: %v; rollback failed: %w", err, rollbackErr)
+		}
+		return false, err
+	}
+	return true, nil
+}

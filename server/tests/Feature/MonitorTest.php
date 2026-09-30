@@ -52,6 +52,35 @@ class MonitorTest extends TestCase
         $this->upload($n, $this->payload())->assertUnauthorized();
     }
 
+    public function test_agent_update_requires_node_token_and_returns_only_assigned_release(): void
+    {
+        $node = $this->node();
+        $url = '/api/v1/agent/update?version=0.3.0';
+        $this->getJson($url)->assertUnauthorized();
+        $this->withHeaders(['Authorization' => 'Bearer '.$this->token, 'X-Node-ID' => $node->id])
+            ->getJson($url)->assertOk()->assertJson(['update' => false]);
+        $sha = str_repeat('a', 64);
+        $node->update(['agent_desired_version' => '0.4.0', 'agent_desired_sha256' => $sha]);
+        $this->getJson($url)->assertOk()->assertJson([
+            'update' => true, 'version' => '0.4.0', 'sha256' => $sha,
+            'path' => '/downloads/vm-agent-linux-amd64',
+        ]);
+        $this->getJson('/api/v1/agent/update?version=0.4.0')->assertOk()->assertJson(['update' => false]);
+        $this->getJson('/api/v1/agent/update?version=%2F')->assertUnprocessable();
+    }
+
+    public function test_agent_update_error_is_bounded_and_visible_in_health(): void
+    {
+        $node = $this->node();
+        $payload = $this->payload();
+        $payload['health']['update_error'] = 'SHA-256 mismatch';
+        $this->upload($node, $payload)->assertOk();
+        $this->assertSame('SHA-256 mismatch', $node->fresh()->health['update_error']);
+        $payload = $this->payload();
+        $payload['health']['update_error'] = str_repeat('x', 256);
+        $this->upload($node, $payload)->assertUnprocessable();
+    }
+
     public function test_durable_inbox_duplicate_replay_and_detection(): void
     {
         $this->seed(MonitorSeeder::class);

@@ -43,6 +43,7 @@ services:
       - ${MONITOR_DATA_DIR:-/home/vm-monitor-server}/buildadmin/runtime:/var/www/html/runtime
       - ${MONITOR_DATA_DIR:-/home/vm-monitor-server}/buildadmin/uploads:/var/www/html/public/uploads
       - ${MONITOR_DATA_DIR:-/home/vm-monitor-server}/storage:/monitor-storage:ro
+      - ${MONITOR_DATA_DIR:-/home/vm-monitor-server}/agent-dist:/agent-dist:ro
     depends_on:
       buildadmin-db:
         condition: service_healthy

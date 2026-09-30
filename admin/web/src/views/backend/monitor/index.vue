@@ -11,6 +11,9 @@
                 <el-button v-if="resource === 'alerts' && selected.length && isAdmin" type="primary" @click="bulkOpen = true"
                     >处理所选 {{ selected.length }} 条</el-button
                 >
+                <el-button v-if="resource === 'nodes' && selectedNodes.length && isAdmin" type="primary" :loading="updatingAgent" @click="requestAgentUpdate(selectedNodes)"
+                    >下发更新到所选 {{ selectedNodes.length }} 个节点</el-button
+                >
                 <el-button v-if="['ips', 'websites', 'alerts'].includes(resource)" :loading="exporting" @click="exportCsv">导出 CSV</el-button>
                 <el-button @click="load">刷新</el-button>
             </div>
@@ -64,9 +67,9 @@
                 stripe
                 table-layout="auto"
                 @sort-change="onSortChange"
-                @selection-change="(items: any[]) => (selected = items.map((item) => item.id))"
+                @selection-change="onSelectionChange"
             >
-                <el-table-column v-if="resource === 'alerts' && isAdmin" type="selection" width="48" />
+                <el-table-column v-if="(resource === 'alerts' || resource === 'nodes') && isAdmin" type="selection" width="48" />
                 <el-table-column
                     v-for="column in visibleColumns"
                     :key="column.key"
@@ -84,6 +87,8 @@
                             @click="filterAlert(column.key, scope.row)"
                             >{{ display(scope.row[column.key]) }}</el-tag
                         >
+                        <el-tag v-else-if="column.key === 'agent_update_status'" :type="agentUpdateTag(scope.row)"
+                            :title="scope.row.agent_update_error || ''">{{ agentUpdateStatus(scope.row) }}</el-tag>
                         <a
                             v-else-if="column.key === 'host' && resource === 'websites' && scope.row.host"
                             :href="websiteUrl(scope.row)"
@@ -124,7 +129,10 @@
                             >接入配置</el-button
                         >
                         <el-button v-if="isAdmin && resource === 'nodes'" link type="primary" @click="openAgentCommand(scope.row)"
-                            >复制安装命令</el-button
+                            >生成安装命令</el-button
+                        >
+                        <el-button v-if="isAdmin && resource === 'nodes'" link type="primary" :loading="updatingAgent && actionId === scope.row.id" @click="requestAgentUpdate([scope.row.id])"
+                            >更新 Agent</el-button
                         >
                     </template>
                 </el-table-column>
@@ -238,7 +246,7 @@
         </el-dialog>
         <el-dialog v-model="agentCommandOpen" :title="'安装 Agent · ' + agentCommandNode" width="min(760px, 94vw)">
             <el-alert
-                title="先下载该节点的接入配置，将 agent.json 传到宿主机的 /home/vm-monitor-install/。安装命令不包含节点令牌。"
+                title="命令会自动下载 agent.json、Agent 和安装脚本。配置链接只能使用一次，10 分钟后过期；生成时旧节点令牌已撤销。请勿把命令贴到工单或公共日志。"
                 type="warning"
                 :closable="false"
             />
@@ -283,6 +291,8 @@ const definitions: Record<string, Definition> = {
             col('enabled', '启用'),
             col('cidrs', 'CIDR'),
             col('last_seen_at', '最近上报'),
+            col('agent_version', '当前版本'),
+            col('agent_update_status', '更新状态'),
             col('rss_mib', '进程内存 MiB'),
             col('kernel_drops', '窗口丢包'),
         ],
@@ -446,6 +456,9 @@ const exporting = ref(false)
 const isAdmin = ref(false)
 const actionId = ref<number | string | null>(null)
 const selected = ref<number[]>([])
+const selectedNodes = ref<string[]>([])
+const updatingAgent = ref(false)
+const agentReleaseVersion = ref('')
 const filters = reactive({ search: '', ip: '', node: '', status: '', severity: '', review: '' })
 const detail = ref<any>(null)
 const detailOpen = ref(false)
@@ -466,16 +479,37 @@ const manualOpen = ref(false)
 const manual = reactive({ ip: '', port: 443, scheme: 'https', host: '' })
 const agentCommandOpen = ref(false)
 const agentCommandNode = ref('')
-const agentCommand = computed(() => {
-    const origin = window.location.origin
-    return `set -e\numask 077\nmkdir -p /home/vm-monitor-install\ncd /home/vm-monitor-install\ntest -s agent.json\ncurl --proto '=https' --tlsv1.2 -fsSLo vm-agent-linux-amd64 '${origin}/downloads/vm-agent-linux-amd64'\ncurl --proto '=https' --tlsv1.2 -fsSLo install.sh '${origin}/downloads/install.sh'\ncurl --proto '=https' --tlsv1.2 -fsSLo SHA256SUMS '${origin}/downloads/SHA256SUMS'\nsha256sum -c SHA256SUMS\nbash install.sh ./agent.json ./vm-agent-linux-amd64`
-})
+const agentCommand = ref('')
 const visibleKeys = ref<string[]>([])
 const visibleColumns = computed(() => definition.value.columns.filter((column) => visibleKeys.value.includes(column.key)))
 const canCreate = computed(() => isAdmin.value && definition.value.create)
 
 function request(action: string, method: 'get' | 'post', data: Record<string, any> = {}, timeout?: number) {
     return createAxios({ url: '/admin/Monitor/' + action, method, timeout, ...(method === 'get' ? { params: data } : { data }) })
+}
+function onSelectionChange(items: any[]) {
+    if (resource.value === 'alerts') selected.value = items.map((item) => Number(item.id))
+    if (resource.value === 'nodes') selectedNodes.value = items.map((item) => String(item.id))
+}
+function agentUpdateStatus(row: any): string {
+    if (!row.agent_desired_version) return '未下发'
+    if (row.agent_version === row.agent_desired_version) return '已更新'
+    if (row.agent_update_error) return '失败：' + String(row.agent_update_error).slice(0, 80)
+    if (!row.agent_version || /^0\.[0-3]\./.test(String(row.agent_version))) return '需先手动安装新版'
+    return '等待节点领取 ' + row.agent_desired_version
+}
+function agentUpdateTag(row: any): 'success' | 'warning' | 'danger' | 'info' {
+    if (!row.agent_desired_version) return 'info'
+    if (row.agent_version === row.agent_desired_version) return 'success'
+    return row.agent_update_error ? 'danger' : 'warning'
+}
+async function loadAgentRelease() {
+    try {
+        const result = await request('agentRelease', 'get')
+        agentReleaseVersion.value = String(result.data.release.version)
+    } catch {
+        agentReleaseVersion.value = ''
+    }
 }
 function onSortChange({ prop, order }: { prop: string; order: string | null }) {
     if (resource.value !== 'alerts') return
@@ -545,9 +579,11 @@ watch(
         sortDirection.value = 'desc'
         countKey = ''
         selected.value = []
+        selectedNodes.value = []
         visibleKeys.value = definition.value.columns.filter((column) => column.key !== 'description').map((column) => column.key)
         Object.assign(filters, { search: '', ip: '', node: '', status: '', severity: '', review: '' })
         load()
+        if (resource.value === 'nodes') void loadAgentRelease()
     },
     { immediate: true }
 )
@@ -745,9 +781,42 @@ async function nodeConfig(row: any) {
         actionId.value = null
     }
 }
-function openAgentCommand(row: any) {
-    agentCommandNode.value = String(row.name || row.id)
-    agentCommandOpen.value = true
+async function openAgentCommand(row: any) {
+    try {
+        await ElMessageBox.confirm('生成命令会立即撤销该节点旧凭据。请在 10 分钟内到目标宿主机执行。', '生成一次性安装命令', { type: 'warning' })
+    } catch {
+        return
+    }
+    actionId.value = row.id
+    try {
+        const result = await request('nodeBootstrap', 'post', { id: row.id })
+        const origin = window.location.origin
+        const ticket = String(result.data.ticket)
+        agentCommand.value = `set -e\numask 077\nmkdir -p /home/vm-monitor-install\ncd /home/vm-monitor-install\ncurl --proto '=https' --tlsv1.2 -fsSLo agent.json '${origin}/api/AgentBootstrap/config?ticket=${ticket}'\nchmod 600 agent.json\ncurl --proto '=https' --tlsv1.2 -fsSLo vm-agent-linux-amd64 '${origin}/downloads/vm-agent-linux-amd64'\ncurl --proto '=https' --tlsv1.2 -fsSLo install.sh '${origin}/downloads/install.sh'\ncurl --proto '=https' --tlsv1.2 -fsSLo SHA256SUMS '${origin}/downloads/SHA256SUMS'\nsha256sum -c SHA256SUMS\nbash install.sh ./agent.json ./vm-agent-linux-amd64`
+        agentCommandNode.value = String(row.name || row.id)
+        agentCommandOpen.value = true
+    } finally {
+        actionId.value = null
+    }
+}
+async function requestAgentUpdate(ids: string[]) {
+    const version = agentReleaseVersion.value || '主控已发布版本'
+    try {
+        await ElMessageBox.confirm(`向 ${ids.length} 个节点下发 ${version} 更新？节点会在下一次轮询后自行校验并重启。`, '下发 Agent 更新', { type: 'warning' })
+    } catch {
+        return
+    }
+    updatingAgent.value = true
+    actionId.value = ids.length === 1 ? ids[0] : null
+    try {
+        const result = await request('agentUpdate', 'post', { ids })
+        ElMessage.success(result.msg || '已下发更新')
+        selectedNodes.value = []
+        await load()
+    } finally {
+        updatingAgent.value = false
+        actionId.value = null
+    }
 }
 async function copyAgentCommand() {
     try {

@@ -18,7 +18,7 @@ class Monitor extends Backend
     }
 
     private const TABLES = [
-        'nodes' => ['name', 'id', 'enabled', 'cidrs', 'last_seen_at', 'health'],
+        'nodes' => ['name', 'id', 'enabled', 'cidrs', 'last_seen_at', 'health', 'agent_desired_version', 'agent_update_requested_at'],
         'ips' => ['ip', 'id', 'version', 'label', 'first_seen_at', 'last_seen_at'],
         'websites' => ['id', 'ip_asset_id', 'host', 'port', 'scheme', 'status', 'title', 'description', 'category', 'manual_category', 'last_probed_at', 'last_seen_at'],
         'alerts' => ['id', 'node_id', 'ip_asset_id', 'title', 'kind', 'severity', 'status', 'occurrences', 'last_seen_at'],
@@ -120,6 +120,8 @@ class Monitor extends Backend
                 $row['health'] = $this->decode($row['health'] ?? null);
                 $row['rss_mib'] = isset($row['health']['rss_bytes']) ? round($row['health']['rss_bytes'] / 1048576) : null;
                 $row['kernel_drops'] = $row['health']['kernel_drops'] ?? null;
+                $row['agent_version'] = $row['health']['version'] ?? null;
+                $row['agent_update_error'] = $row['health']['update_error'] ?? null;
             }
         }
         unset($row);
@@ -310,22 +312,104 @@ class Monitor extends Backend
     public function nodeConfig(): void
     {
         $this->writable();
-        if (!filter_var(getenv('MONITOR_PUBLIC_URL'), FILTER_VALIDATE_URL)) $this->error('请先配置管理端公开地址');
         $id = (string)$this->request->post('id', '');
+        $this->success('新配置已生成，旧凭据已撤销', ['config' => $this->rotateNodeConfig($id)]);
+    }
+
+    private function rotateNodeConfig(string $id): array
+    {
+        if (!filter_var(getenv('MONITOR_PUBLIC_URL'), FILTER_VALIDATE_URL)) $this->error('请先配置管理端公开地址');
         $node = $this->db()->table('nodes')->where('id', $id)->find();
         if (!$node) $this->error('节点不存在', [], 404);
         $token = bin2hex(random_bytes(32));
+        $config = $this->nodeConfigPayload($node, $token);
         $this->db()->table('nodes')->where('id', $id)->update(['token_hash' => hash('sha256', $token), 'updated_at' => gmdate('Y-m-d H:i:s')]);
         $this->audit('token_rotated', 'Node:' . $id);
+        return $config;
+    }
+
+    private function nodeConfigPayload(array $node, string $token): array
+    {
+        $id = $node['id'];
         $settings = $this->decode($node['settings'] ?? null) ?: [];
-        $this->success('新配置已生成，旧凭据已撤销', ['config' => [
+        return [
             'node_id' => $id, 'server_url' => rtrim((string)getenv('MONITOR_PUBLIC_URL'), '/'), 'token' => $token,
             'interfaces' => $settings['interfaces'] ?? ['monitor0'], 'cidrs' => $this->decode($node['cidrs']),
             'data_dir' => $settings['data_dir'] ?? '/home/vm-monitor', 'memory_soft_mib' => (int)($settings['memory_soft_mib'] ?? 2048),
             'memory_hard_mib' => (int)($settings['memory_hard_mib'] ?? 4096), 'disk_limit_mib' => (int)($settings['disk_limit_mib'] ?? 2048),
             'spool_limit_mib' => 512, 'capture_buffer_mib' => 16, 'flush_seconds' => 30,
             'max_ips' => 4096, 'max_flows' => 50000, 'max_reassembly' => 2048, 'max_sites' => 4096, 'allow_http_localhost' => false,
-        ]]);
+        ];
+    }
+
+    public function nodeBootstrap(): void
+    {
+        $this->writable();
+        $this->publishedAgent();
+        $id = (string)$this->request->post('id', '');
+        if (!filter_var(getenv('MONITOR_PUBLIC_URL'), FILTER_VALIDATE_URL)) $this->error('请先配置管理端公开地址');
+        $node = $this->db()->table('nodes')->where('id', $id)->find();
+        if (!$node) $this->error('节点不存在', [], 404);
+        $ticket = bin2hex(random_bytes(32));
+        $token = bin2hex(random_bytes(32));
+        $key = hash('sha256', (string)getenv('BUILDADMIN_TOKEN_KEY'), true);
+        $nonce = random_bytes(12);
+        $tag = '';
+        $cipher = openssl_encrypt(json_encode($this->nodeConfigPayload($node, $token), JSON_UNESCAPED_UNICODE), 'aes-256-gcm', $key, OPENSSL_RAW_DATA, $nonce, $tag);
+        if ($cipher === false) $this->error('无法生成安全配置');
+        $now = gmdate('Y-m-d H:i:s');
+        Db::name('agent_enrollments')->where('expires_at', '<', $now)->delete();
+        Db::name('agent_enrollments')->insert([
+            'ticket_hash' => hash('sha256', $ticket), 'node_id' => $id,
+            'payload' => base64_encode($nonce . $tag . $cipher),
+            'expires_at' => gmdate('Y-m-d H:i:s', time() + 600), 'created_at' => $now,
+        ]);
+        try {
+            $this->db()->table('nodes')->where('id', $id)->update(['token_hash' => hash('sha256', $token), 'updated_at' => $now]);
+            $this->audit('token_rotated', 'Node:' . $id);
+        } catch (\Throwable $e) {
+            Db::name('agent_enrollments')->where('ticket_hash', hash('sha256', $ticket))->delete();
+            throw $e;
+        }
+        $this->audit('agent_bootstrap_issued', 'Node:' . $id);
+        $this->success('一次性配置链接已生成，有效期 10 分钟', ['ticket' => $ticket, 'expires_in' => 600]);
+    }
+
+    private function publishedAgent(): array
+    {
+        $version = trim((string)@file_get_contents('/agent-dist/VERSION'));
+        $manifest = (string)@file_get_contents('/agent-dist/SHA256SUMS');
+        if (!preg_match('/^[0-9A-Za-z][0-9A-Za-z.+_-]{0,31}$/', $version)
+            || !preg_match('/^([a-f0-9]{64})  vm-agent-linux-amd64$/m', $manifest, $match)
+            || !is_file('/agent-dist/vm-agent-linux-amd64')
+            || !hash_equals($match[1], hash_file('sha256', '/agent-dist/vm-agent-linux-amd64'))) {
+            $this->error('尚未发布有效的 Agent 版本，请先运行 agent-builder');
+        }
+        return ['version' => $version, 'sha256' => $match[1]];
+    }
+
+    public function agentRelease(): void
+    {
+        $this->success('', ['release' => $this->publishedAgent()]);
+    }
+
+    public function agentUpdate(): void
+    {
+        $this->writable();
+        $ids = $this->request->post('ids/a', []);
+        if (count($ids) < 1 || count($ids) > 500 || count(array_unique($ids)) !== count($ids)) $this->error('请选择 1–500 个节点');
+        foreach ($ids as $id) if (!is_string($id) || !preg_match('/^[a-f0-9-]{36}$/i', $id)) $this->error('节点 ID 无效');
+        $release = $this->publishedAgent();
+        $db = $this->db();
+        $existing = $db->table('nodes')->whereIn('id', $ids)->column('id');
+        if (count($existing) !== count($ids)) $this->error('有节点不存在');
+        $now = gmdate('Y-m-d H:i:s');
+        $db->table('nodes')->whereIn('id', $ids)->update([
+            'agent_desired_version' => $release['version'], 'agent_desired_sha256' => $release['sha256'],
+            'agent_update_requested_at' => $now, 'updated_at' => $now,
+        ]);
+        $this->audit('agent_update_requested', 'Node:batch', ['ids' => $ids, 'version' => $release['version'], 'sha256' => $release['sha256']]);
+        $this->success('更新指令已下发；节点将在下一次轮询时领取', ['version' => $release['version'], 'count' => count($ids)]);
     }
 
     public function probe(): void

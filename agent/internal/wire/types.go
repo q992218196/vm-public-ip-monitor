@@ -54,6 +54,7 @@ type ProxyObservation struct {
 }
 type Health struct {
 	Version           string   `json:"version"`
+	UpdateError       string   `json:"update_error,omitempty"`
 	Captured          uint64   `json:"captured"`
 	KernelDrops       uint64   `json:"kernel_drops"`
 	DecodeSkipped     uint64   `json:"decode_skipped"`

@@ -19,6 +19,7 @@ class IngestController extends Controller
             'batch_id' => 'required|string|regex:/^[a-zA-Z0-9-]{16,64}$/',
             'window_start' => 'required|date', 'window_end' => 'required|date|after:window_start',
             'health' => 'required|array', 'health.version' => 'required|string|max:32',
+            'health.update_error' => 'sometimes|string|max:255',
             'health.interfaces' => 'sometimes|array|max:8', 'health.interfaces.*' => 'string|max:64',
             'health.*' => ['nullable'],
             'metrics' => 'present|array|max:8192', 'sites' => 'present|array|max:4096', 'vpn' => 'sometimes|array|max:2048', 'proxies' => 'sometimes|array|max:256',
@@ -87,7 +88,7 @@ class IngestController extends Controller
                 throw ValidationException::withMessages(["health.$f" => '必须为非负整数']);
             }$health[$f] = $n;
         }
-        $v['health'] = $health + ['version' => $v['health']['version'], 'interfaces' => $v['health']['interfaces'] ?? []];
+        $v['health'] = $health + ['version' => $v['health']['version'], 'interfaces' => $v['health']['interfaces'] ?? [], 'update_error' => $v['health']['update_error'] ?? null];
         // A durable DB inbox is the acknowledgement boundary. The scheduler retries
         // undispatched rows after crashes / Redis outages; no event is acked in RAM.
         $duplicate = DB::transaction(function () use ($node, $v, $start, $end) {

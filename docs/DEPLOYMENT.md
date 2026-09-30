@@ -99,6 +99,9 @@ sudo mkdir -p /home/vm-monitor-server/buildadmin/{mysql,runtime,uploads}
 docker compose -f compose.yml -f compose.buildadmin.yml build buildadmin-app buildadmin-web
 docker compose -f compose.yml -f compose.buildadmin.yml --profile agent-build build agent-builder
 docker compose -f compose.yml -f compose.buildadmin.yml --profile agent-build run --rm agent-builder
+docker compose -f compose.yml -f compose.buildadmin.yml build app web
+docker compose -f compose.yml -f compose.buildadmin.yml run --rm --no-deps app php artisan migrate --force
+docker compose -f compose.yml -f compose.buildadmin.yml up -d --no-deps --force-recreate app web queue scheduler
 docker compose -f compose.yml -f compose.buildadmin.yml up -d buildadmin-db buildadmin-app buildadmin-web
 docker compose -f compose.yml -f compose.buildadmin.yml exec buildadmin-app php think migrate:run
 docker compose -f compose.yml -f compose.buildadmin.yml exec buildadmin-app php tools/import-monitor-users.php
@@ -107,7 +110,25 @@ curl -I http://127.0.0.1:8081/
 
 若使用自定义 `MONITOR_DATA_DIR`，目录创建命令也改为该路径。`prepare.sh` 会为旧 `.env` 补充 BuildAdmin 数据库密码和令牌密钥，不会重置现有密钥。迁移命令只初始化 BuildAdmin 的 MySQL 表，监控记录仍留在 PostgreSQL。账号导入程序复制原 Laravel 管理员及只读用户的邮箱、密码散列和权限；再次运行不会覆盖在新后台修改过的密码。BuildAdmin 上游自带的空密码演示管理员会被禁用。
 
-`agent-builder` 在主控服务器编译 Linux amd64 Agent，产物、安装脚本及 `SHA256SUMS` 放在 `${MONITOR_DATA_DIR}/agent-dist`（默认 `/home/vm-monitor-server/agent-dist`）。后台“采集节点”可下载节点专属 `agent.json` 并复制安装命令；先通过可信通道将配置文件传到目标宿主机 `/home/vm-monitor-install/agent.json`，再在宿主机以 root 粘贴命令。命令从本站 HTTPS 下载编译产物并校验哈希，不含长期节点令牌。生成新配置会轮换旧凭据，务必及时安装。更新 Agent 源码后重新运行上面的 `agent-builder` 两条命令即可刷新下载文件。
+`agent-builder` 在主控服务器编译 Linux amd64 Agent，产物、版本号、安装脚本及 `SHA256SUMS` 放在 `${MONITOR_DATA_DIR}/agent-dist`（默认 `/home/vm-monitor-server/agent-dist`）。后台“采集节点”显示当前上报版本，点击“生成安装命令”可取得一次性配置链接；在目标宿主机以 root 粘贴命令，它会从本站 HTTPS 自动下载 `agent.json`、二进制和安装脚本并校验哈希。配置链接只能使用一次，10 分钟后过期。生成命令时旧节点令牌立即撤销，因此请在生成后及时执行，且不要把命令贴到公共日志、工单或聊天记录。仍可用“接入配置”下载文件并手动传输。
+
+首次从 0.3.x 或更旧版本升级到 0.4.0，需要在节点手动执行新的安装命令；旧版本没有更新轮询能力。以后在后台单个节点点击“更新 Agent”，或勾选多个节点后批量下发。主控仅下发已编译的固定版本和 SHA-256，Agent 每分钟轮询一次，下载后验证哈希、自检、保存上一版并由 systemd 自动重启；失败时保留当前二进制，在后台显示错误，10 分钟后重试。发布新版要先更新 `agent/VERSION` 并重新运行 `agent-builder` 两条命令，然后在后台下发更新。建议先选一台节点验证，再批量下发。
+
+已有 BuildAdmin 部署升级此功能时，按以下顺序执行；数据库服务保持运行，先迁移 PostgreSQL 再切换新后台：
+
+```sh
+cd /home/vm-monitor-src
+git pull
+cd deploy
+docker compose -f compose.yml -f compose.buildadmin.yml build app web buildadmin-app buildadmin-web
+docker compose -f compose.yml -f compose.buildadmin.yml --profile agent-build build agent-builder
+docker compose -f compose.yml -f compose.buildadmin.yml --profile agent-build run --rm agent-builder
+docker compose -f compose.yml -f compose.buildadmin.yml run --rm --no-deps app php artisan migrate --force
+docker compose -f compose.yml -f compose.buildadmin.yml up -d --no-deps --force-recreate app web queue scheduler buildadmin-app buildadmin-web
+docker compose -f compose.yml -f compose.buildadmin.yml exec buildadmin-app php think migrate:run
+```
+
+若使用项目自带 HTTPS 入口，再执行 `docker compose -f compose.yml -f compose.buildadmin.yml --profile https up -d --no-deps --force-recreate https`。迁移之前先备份数据库和 `.env`。新版本上线后，先在一台旧 Agent 节点生成并执行安装命令，看到当前版本显示 `0.4.0`，再批量处理其他节点。
 
 在切换公网入口前，先通过本机端口打开 `http://127.0.0.1:8081/#/admin/login` 验证旧管理员邮箱及密码。若从远程电脑测试，可以通过现有可信的 SSH 隧道转发本机端口；不要把 8081 直接暴露到公网。确认采集节点、告警、网站、规则、详情和账号页面正常后，再切换 Caddy：
 
@@ -165,7 +186,7 @@ docker compose --profile screenshots up -d worker
 - 数据目录默认 `/home/vm-monitor`。
 - 默认工作内存 2048 MiB，服务硬限额 4096 MiB，磁盘预算 2048 MiB。
 
-点击“下载接入配置”。每次下载会生成新凭据并撤销旧凭据。将 `agent.json` 以安全方式复制到宿主机。
+点击“生成安装命令”，在 10 分钟内到目标宿主机以 root 执行，配置会自动下载。命令里的短期票据只能使用一次；若过期，重新生成命令即可。每次生成都会撤销旧节点令牌。若要通过自有安全通道传输配置，点击“接入配置”下载 `agent.json`。
 
 **后台修改 CIDR 后，服务端授权范围立即更新；本版本不会自动远程改写 Agent 配置。** 更新接口、CIDR 或资源参数后，需要重新部署相应配置。生成新配置会轮换凭据，因此应及时部署。
 
@@ -250,7 +271,14 @@ docker compose --profile screenshots up -d --no-deps --force-recreate worker
 
 迁移命令使用新镜像中的一次性应用容器，此时原有数据库与 Redis 服务应保持运行。已有索引迁移在大表上可能占用 I/O 和临时磁盘空间，请在升级前检查 `/home` 剩余空间并安排低峰时段。Seeder 只补充缺少的默认检测规则，不覆盖已修改的规则。若 `.env` 中仍是 `WORKER_CONCURRENCY=1`，worker 仍会串行探测。疑似加密代理线索需要把 0.3.0 或更新的 Agent 部署到宿主机，并由新的采集窗口产生；旧版 Agent 仍可上报原有数据，但不会产生新线索。历史证据不会凭空补齐。
 
-Agent 升级重新运行安装器，保留一个 `vm-agent.previous`。回滚时停止服务，将该文件恢复为 `vm-agent`，核对兼容配置后启动。内存硬限额变更也需要重新运行安装器。
+0.4.0 起可在后台向单个或多个节点下发 Agent 更新，当前版本和更新状态显示在“采集节点”。节点侧也可手动立即检查后台已下发的更新：
+
+```sh
+sudo /home/vm-monitor/bin/vm-agent -config /home/vm-monitor/config/agent.json -update
+sudo systemctl restart vm-monitor-agent
+```
+
+如果自定义了 `data_dir`，请替换上述路径。节点手动检查不会自行取得未下发的版本；请先在后台下发。`vm-agent.previous` 保留上一版，回滚时停止服务，将该文件恢复为 `vm-agent`，核对兼容配置后启动。内存硬限额或 CIDR、接口等配置变更仍需重新运行安装器。
 
 卸载：
 
