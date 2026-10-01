@@ -15,7 +15,8 @@ class MonitorPgsql extends Pgsql
     public function getLastInsID(BaseQuery $query, ?string $sequence = null)
     {
         // LASTVAL() fails on UUID/fixed keys and aborts the PostgreSQL transaction.
-        if (! $query->getAutoInc()) {
+        $autoIncrement = $query->getAutoInc();
+        if (! is_string($autoIncrement) || $autoIncrement === '') {
             return '';
         }
 
