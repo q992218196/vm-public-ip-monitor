@@ -40,7 +40,8 @@ export async function probe(task,limits={}) {
     const text = (await page.locator('body').innerText({timeout: 3000}).catch(() => '')).slice(0, 64000);
     const screenshot = await page.screenshot({type: 'png', fullPage: false, timeout: 10000});
     if(diskExceeded)throw new Error('Worker disk budget exceeded during probe');
-    const classified = classify(title, `${description}\n${text}`);
+    const classified = classify(title, text, {description});
+    classified.classification.observed_at = new Date().toISOString();
     classified.classification.reasons.push('仅首页；第三方资源及跨站跳转默认阻止');
     return {status: 'verified', title, description, http_status: response.status(), final_url: page.url().slice(0,2048), ...classified,
       content_hash: createHash('sha256').update(title + '\n' + description + '\n' + text).digest('hex'), screenshot: screenshot.length <= 2*1024*1024 ? screenshot.toString('base64') : null};

@@ -20,11 +20,13 @@ type flowKey struct {
 	SP, DP   uint16
 }
 type ipState struct {
-	m       wire.Metric
-	targets map[netip.Addr]int
-	auth    map[netip.Addr]int
-	edges   map[netip.AddrPort]bool
-	ports   map[netip.Addr]int
+	m             wire.Metric
+	targets       map[netip.Addr]int
+	auth          map[netip.Addr]int
+	edges         map[netip.AddrPort]bool
+	ports         map[netip.Addr]int
+	endpoints     map[netip.AddrPort]*wire.EndpointEvidence
+	metadataCount int
 }
 type stream struct {
 	buf  []byte
@@ -111,7 +113,7 @@ func (e *Engine) state(a netip.Addr) *ipState {
 		e.health.StateDropped++
 		return nil
 	}
-	s := &ipState{m: wire.Metric{IP: a.String()}, targets: map[netip.Addr]int{}, auth: map[netip.Addr]int{}, edges: map[netip.AddrPort]bool{}, ports: map[netip.Addr]int{}}
+	s := &ipState{m: wire.Metric{IP: a.String()}, targets: map[netip.Addr]int{}, auth: map[netip.Addr]int{}, edges: map[netip.AddrPort]bool{}, ports: map[netip.Addr]int{}, endpoints: map[netip.AddrPort]*wire.EndpointEvidence{}}
 	e.ips[a] = s
 	return s
 }
@@ -171,8 +173,11 @@ func (e *Engine) Process(b []byte, wireLen int, iface string, now time.Time) {
 		if attempt, ok := e.syns[reverse]; ok && !attempt.responded && now.Sub(attempt.at) < 60*time.Second {
 			attempt.responded = true
 			e.syns[reverse] = attempt
-			if s := e.state(p.Dst); s != nil {
+			if s := e.state(p.Dst); s != nil && !attempt.at.Before(e.start) {
 				s.m.SYNACKReplies++
+				if endpoint := s.endpoints[netip.AddrPortFrom(p.Src, p.SrcPort)]; endpoint != nil {
+					endpoint.SYNACKReplies++
+				}
 			}
 		}
 	}
@@ -190,6 +195,9 @@ func (e *Engine) Process(b []byte, wireLen int, iface string, now time.Time) {
 			return
 		}
 		s.m.TCPAttempts++
+		if endpoint := e.endpoint(s, p.Dst, p.DstPort); endpoint != nil {
+			endpoint.Attempts++
+		}
 		if _, ok := s.targets[p.Dst]; ok || len(s.targets) < 256 {
 			s.targets[p.Dst]++
 			if s.targets[p.Dst] > s.m.MaxAttemptsPerTarget {
@@ -217,8 +225,39 @@ func (e *Engine) Process(b []byte, wireLen int, iface string, now time.Time) {
 			}
 		}
 	}
-	if !dst || len(p.Payload) == 0 {
+	outbound := false
+	var endpoint *wire.EndpointEvidence
+	if src {
+		if attempt, ok := e.syns[k]; ok && now.Sub(attempt.at) < 60*time.Second {
+			if s := e.state(p.Src); s != nil {
+				endpoint = e.endpoint(s, p.Dst, p.DstPort)
+				outbound = true
+			}
+		}
+	}
+	if endpoint != nil {
+		endpoint.PayloadOut += uint64(len(p.Payload))
+	}
+	inboundReply := false
+	if dst {
+		reverse := flowKey{p.Dst, p.Src, p.DstPort, p.SrcPort}
+		if attempt, ok := e.syns[reverse]; ok && now.Sub(attempt.at) < 60*time.Second {
+			inboundReply = true
+			if s := e.state(p.Dst); s != nil {
+				if reply := e.endpoint(s, p.Src, p.SrcPort); reply != nil {
+					reply.PayloadIn += uint64(len(p.Payload))
+				}
+			}
+		}
+	}
+	if (!dst && !outbound) || (inboundReply && !outbound) || len(p.Payload) == 0 {
 		return
+	}
+	if outbound && endpoint != nil {
+		s := e.ips[p.Src]
+		if endpoint.Scheme != "" || s.metadataCount >= 8 {
+			return
+		}
 	}
 	st := e.streams[k]
 	if st == nil {
@@ -254,6 +293,16 @@ func (e *Engine) Process(b []byte, wireLen int, iface string, now time.Time) {
 	if scheme == "" {
 		return
 	}
+	if outbound {
+		if endpoint != nil {
+			endpoint.Scheme, endpoint.Host = scheme, host
+			if scheme == "http" {
+				endpoint.HTTPMethod, endpoint.HTTPPath, endpoint.QueryKeys = packet.RequestMetadata(st.buf)
+			}
+			e.ips[p.Src].metadataCount++
+		}
+		return
+	}
 	site := wire.Site{IP: p.Dst.String(), Port: p.DstPort, Scheme: scheme, Host: host, Source: "http_host"}
 	if scheme == "https" {
 		site.Source = "tls_sni"
@@ -264,6 +313,19 @@ func (e *Engine) Process(b []byte, wireLen int, iface string, now time.Time) {
 		return
 	}
 	e.sites[key] = site
+}
+func (e *Engine) endpoint(s *ipState, peer netip.Addr, port uint16) *wire.EndpointEvidence {
+	key := netip.AddrPortFrom(peer, port)
+	if found := s.endpoints[key]; found != nil {
+		return found
+	}
+	if len(s.endpoints) >= 256 {
+		s.m.OutboundSamplesTruncated = true
+		return nil
+	}
+	found := &wire.EndpointEvidence{PeerIP: peer.String(), PeerPort: port}
+	s.endpoints[key] = found
+	return found
 }
 func (e *Engine) observeProxy(p packet.Packet, src, dst bool, now time.Time) {
 	if src == dst || (p.Protocol != 6 && p.Protocol != 17) {
@@ -450,6 +512,21 @@ func (e *Engine) Snapshot(now time.Time) wire.Batch {
 		}
 		sort.Strings(endpoints)
 		s.m.TargetEndpoints = endpoints[:min(len(endpoints), 32)]
+		outbound := make([]wire.EndpointEvidence, 0, len(s.endpoints))
+		for _, endpoint := range s.endpoints {
+			outbound = append(outbound, *endpoint)
+		}
+		sort.Slice(outbound, func(i, j int) bool {
+			if outbound[i].Attempts != outbound[j].Attempts {
+				return outbound[i].Attempts > outbound[j].Attempts
+			}
+			if outbound[i].PeerIP != outbound[j].PeerIP {
+				return outbound[i].PeerIP < outbound[j].PeerIP
+			}
+			return outbound[i].PeerPort < outbound[j].PeerPort
+		})
+		s.m.OutboundSamplesTruncated = s.m.OutboundSamplesTruncated || len(outbound) > 8
+		s.m.OutboundEndpoints = outbound[:min(len(outbound), 8)]
 		b.Metrics = append(b.Metrics, s.m)
 	}
 	for _, s := range e.sites {

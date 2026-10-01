@@ -2,6 +2,17 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {publicIP,target,permittedURL} from '../src/security.mjs';
 import {classify} from '../src/classify.mjs';
+test('structured report uses sourced excerpts and retains authorization uncertainty',()=>{
+  const report=classify('免费影视在线观看', '电影电视剧 TC资源 在线播放', {description:'提供影视资源和动漫综艺'}).classification;
+  assert.equal(report.business_type,'影视聚合／在线播放');
+  assert.equal(report.risk_level,'medium');
+  assert.ok(report.summary.includes('版权归属'));
+  assert.ok(report.findings.some(item=>item.category==='影视授权待核实'));
+  assert.ok(report.evidence.every(item=>item.excerpt.length<=255));
+  const payment=classify('业务','普通页面',{description:'在线支付服务'}).classification;
+  assert.equal(payment.evidence[0].source,'description');
+  assert.equal(classify('unknown','nothing').classification.risk_level,'unknown');
+});
 test('reject loopback, metadata, local, mapped and transition targets',()=>{
   for(const ip of ['127.0.0.1','10.0.0.1','169.254.169.254','::1','fc00::1','fe80::1','::ffff:127.0.0.1','2001:db8::1','224.0.0.1','100.64.0.1'])assert.equal(publicIP(ip),false,ip);
   assert.equal(publicIP('1.1.1.1'),true);assert.equal(publicIP('2606:4700:4700::1111'),true);

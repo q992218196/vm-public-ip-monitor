@@ -158,7 +158,7 @@ class Monitor extends Backend
         if ($status !== '' && in_array($resource, ['alerts', 'websites', 'tasks'], true)) $query->where('m.status', $status);
         if ($severity !== '' && $resource === 'alerts') $query->where('m.severity', $severity);
         if ($resource === 'websites' && $review === '1') {
-            $query->whereIn('m.category', ['疑似博彩', '疑似成人内容', '疑似诈骗引流', '支付平台线索', '贷款平台线索'])->whereNull('m.manual_category');
+            $query->whereIn('m.category', ['疑似博彩', '疑似成人内容', '疑似诈骗引流', '支付平台线索', '贷款平台线索', '影视授权待核实'])->whereNull('m.manual_category');
         }
         if ($search !== '') {
             $field = match ($resource) {
@@ -181,6 +181,9 @@ class Monitor extends Backend
         $row = $this->db()->table($this->table($resource))->where('id', $id)->find();
         if (!$row) $this->error('记录不存在', [], 404);
         unset($row['token_hash']);
+        if (isset($row['ip_asset_id'])) {
+            $row['ip'] = $this->db()->table('ip_assets')->where('id', $row['ip_asset_id'])->value('ip');
+        }
         foreach ($row as &$value) {
             if (is_string($value) && (str_starts_with($value, '{') || str_starts_with($value, '['))) {
                 $decoded = json_decode($value, true);

@@ -178,6 +178,20 @@
                 <template #extra><el-button type="primary" @click="retryDetail">重试</el-button></template>
             </el-result>
             <template v-else>
+                <SiteReport v-if="resource === 'websites' && detail" :record="detail" />
+                <TrafficEvidence
+                    v-if="detail && ((resource === 'alerts' && detail.evidence?.sample) || (resource === 'metrics' && detail.evidence))"
+                    :record="detail"
+                />
+                <el-descriptions v-if="['alerts', 'protocols'].includes(resource) && detail?.evidence?.candidate_protocols" :column="1" border>
+                    <el-descriptions-item label="疑似代理协议候选">{{ detail.evidence.candidate_protocols.join('、') }}</el-descriptions-item>
+                    <el-descriptions-item label="本机端口">{{ detail.evidence.local_port }}</el-descriptions-item>
+                    <el-descriptions-item label="传输外观">{{ detail.evidence.transport }}</el-descriptions-item>
+                    <el-descriptions-item label="双向对端数">{{ detail.evidence.peer_count }}</el-descriptions-item>
+                    <el-descriptions-item label="同窗口出站目标数">{{ detail.evidence.egress_target_count }}</el-descriptions-item>
+                    <el-descriptions-item label="观察方法">{{ detail.evidence.method }}</el-descriptions-item>
+                    <el-descriptions-item label="结论限制">{{ detail.evidence.note }}</el-descriptions-item>
+                </el-descriptions>
                 <el-alert
                     v-if="resource === 'alerts' && detail?.kind === 'capture_degraded'"
                     type="warning"
@@ -195,7 +209,12 @@
                     title="这是多目标连接行为线索，不等于违规或已确认扫描。请结合目标端口、握手响应、业务用途和历史基线复核。"
                 />
                 <p class="monitor-time-note">时间按浏览器本地时区显示；下方原始证据中的数据库时间为 UTC。</p>
-                <pre class="monitor-evidence">{{ JSON.stringify(detail, null, 2) }}</pre>
+                <el-collapse v-if="['websites', 'alerts', 'metrics', 'protocols'].includes(resource)">
+                    <el-collapse-item title="查看原始记录与证据" name="raw">
+                        <pre class="monitor-evidence">{{ JSON.stringify(detail, null, 2) }}</pre>
+                    </el-collapse-item>
+                </el-collapse>
+                <pre v-else class="monitor-evidence">{{ JSON.stringify(detail, null, 2) }}</pre>
             </template>
         </el-drawer>
 
@@ -286,6 +305,8 @@ import { computed, reactive, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import createAxios from '/@/utils/axios'
 import { useAdminInfo } from '/@/stores/adminInfo'
+import SiteReport from './SiteReport.vue'
+import TrafficEvidence from './TrafficEvidence.vue'
 
 type Option = { label: string; value: string }
 type Field = { key: string; label: string; type?: string; options?: Option[] }
@@ -463,7 +484,7 @@ const definitions: Record<string, Definition> = {
         title: '网站探测任务',
         search: '域名',
         ip: true,
-        status: options({ pending: '等待', leased: '执行中', done: '完成', failed: '失败' }),
+        status: options({ pending: '等待', leased: '执行中', complete: '完成', failed: '失败' }),
         columns: [
             col('ip', '公网 IP'),
             col('host', '域名'),
@@ -645,7 +666,7 @@ function display(value: any): string {
         failed: '失败',
         pending: '等待',
         leased: '执行中',
-        done: '完成',
+        complete: '完成',
         high: '高',
         medium: '中',
         low: '低',
@@ -673,7 +694,7 @@ function websiteUrl(row: any): string {
 function tagType(value: string) {
     if (['open', 'failed', 'high'].includes(value)) return 'danger'
     if (['acknowledged', 'candidate', 'medium', 'pending'].includes(value)) return 'warning'
-    if (['resolved', 'verified', 'done', 'low'].includes(value)) return 'success'
+    if (['resolved', 'verified', 'complete', 'low'].includes(value)) return 'success'
     return 'info'
 }
 async function openDetail(row: any) {

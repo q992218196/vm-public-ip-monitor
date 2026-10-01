@@ -8,7 +8,6 @@ return new class extends Migration
 {
     public function up(): void
     {
-        Schema::table('users', fn (Blueprint $t) => $t->string('role')->default('viewer'));
         Schema::create('nodes', function (Blueprint $t) {
             $t->uuid('id')->primary();
             $t->string('name');
@@ -136,7 +135,7 @@ return new class extends Migration
         });
         Schema::create('audit_logs', function (Blueprint $t) {
             $t->id();
-            $t->foreignId('user_id')->nullable()->constrained()->nullOnDelete();
+            $t->unsignedBigInteger('user_id')->nullable();
             $t->string('action');
             $t->string('subject');
             $t->json('details')->nullable();
@@ -149,6 +148,5 @@ return new class extends Migration
         foreach (['audit_logs', 'probe_tasks', 'alerts', 'exclusions', 'rules', 'websites', 'traffic_metrics', 'batches', 'ip_observations', 'ip_assets', 'nodes'] as $name) {
             Schema::dropIfExists($name);
         }
-        Schema::table('users', fn (Blueprint $t) => $t->dropColumn('role'));
     }
 };

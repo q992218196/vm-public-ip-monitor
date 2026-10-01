@@ -23,6 +23,8 @@ sudo mkdir -p /home/vm-monitor-server/{storage,postgres,redis,nginx-logs,agent-d
 docker compose -f compose.yml -f compose.buildadmin.yml build app web buildadmin-app buildadmin-web
 docker compose -f compose.yml -f compose.buildadmin.yml up -d postgres redis buildadmin-db
 docker compose -f compose.yml -f compose.buildadmin.yml run --rm --no-deps app php artisan migrate --force
+
+docker compose -f compose.yml -f compose.buildadmin.yml run --rm --no-deps app php artisan db:seed --class=MonitorSeeder --force
 docker compose -f compose.yml -f compose.buildadmin.yml up -d app web queue scheduler buildadmin-app buildadmin-web
 docker compose -f compose.yml -f compose.buildadmin.yml exec buildadmin-app php think migrate:run
 docker compose -f compose.yml -f compose.buildadmin.yml exec buildadmin-app php tools/init-admin.php admin@your-domain.example
@@ -52,13 +54,17 @@ docker compose -f compose.yml -f compose.buildadmin.yml build app web buildadmin
 docker compose -f compose.yml -f compose.buildadmin.yml --profile agent-build build agent-builder
 docker compose -f compose.yml -f compose.buildadmin.yml --profile agent-build run --rm agent-builder
 docker compose -f compose.yml -f compose.buildadmin.yml run --rm --no-deps app php artisan migrate --force
+docker compose -f compose.yml -f compose.buildadmin.yml run --rm --no-deps app php artisan db:seed --class=MonitorSeeder --force
+
 docker compose -f compose.yml -f compose.buildadmin.yml up -d --no-deps --force-recreate app web queue scheduler buildadmin-app buildadmin-web
 docker compose -f compose.yml -f compose.buildadmin.yml exec buildadmin-app php think migrate:run
 docker compose -f compose.yml -f compose.buildadmin.yml --profile https up -d --no-deps --force-recreate https
-docker compose -f compose.yml -f compose.buildadmin.yml exec app php artisan view:clear
+docker compose -f compose.yml -f compose.buildadmin.yml exec app php artisan monitor:reassess-scans
 ```
 
 数据库迁移保留网站资产、流量记录、其他告警和 BuildAdmin 账号；本次迁移会删除旧的“发现新网站线索”告警，并为白名单增加按告警类型的范围。重建 PHP 应用时 Web 容器也会重建，避免连接到已更换的容器地址。升级后检查：
+
+本版采集服务没有管理界面、管理账号模型或账号导入工具。历史安装中不再使用的账号／会话表保留原样，新安装不会创建这些表；BuildAdmin 账号独立存于 MySQL。采集服务继续负责上报、异步分析和任务调度。`monitor:reassess-scans` 分批重新评估未处理横向扫描告警，保留已确认和已解决记录。升级截图 worker 后，对需要新报告的站点点击“验证／截图”；历史报告不会凭空补出新证据。
 
 ```sh
 docker compose -f compose.yml -f compose.buildadmin.yml --profile https ps
@@ -102,7 +108,7 @@ du -sh /home/vm-monitor
 
 约一个采集窗口后，BuildAdmin 应显示新“最近上报”时间。旧积压批次会在网络恢复后重传；HTTP 429 批次保留并重试，日志会写明服务端原因；HTTP 422 代表服务端校验失败，当前 Agent 会丢弃该批次并记录原因。若出现 422，请先核对节点 CIDR、时间和上报字段。系统不会从已丢弃的批次重建证据。
 
-Agent 0.3.x 或更早版本没有后台更新轮询能力，首次升级到 0.4.1 必须在节点执行新的安装命令。之后可在 BuildAdmin 对单节点或多节点下发已编译版本；先选一台试点，再批量更新。Agent 每分钟轮询更新，校验 SHA-256 后自检并保留上一版。节点侧若需立即检查后台已下发的更新：
+Agent 0.3.x 或更早版本没有后台更新轮询能力，首次升级到 0.5.0 必须在节点执行新的安装命令。之后可在 BuildAdmin 对单节点或多节点下发已编译版本；先选一台试点，再批量更新。Agent 每分钟轮询更新，校验 SHA-256 后自检并保留上一版。节点侧若需立即检查后台已下发的更新：
 
 ```sh
 sudo /home/vm-monitor/bin/vm-agent -config /home/vm-monitor/config/agent.json -update

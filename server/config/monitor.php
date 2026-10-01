@@ -1,7 +1,6 @@
 <?php
 
 return [
-    'display_timezone' => env('MONITOR_DISPLAY_TIMEZONE', 'Asia/Shanghai'),
     'worker_token' => env('MONITOR_WORKER_TOKEN', ''),
     'auto_probe' => env('MONITOR_AUTO_PROBE', true),
     'alert_email' => env('MONITOR_ALERT_EMAIL'),

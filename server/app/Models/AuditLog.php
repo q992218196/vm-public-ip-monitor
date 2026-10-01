@@ -15,13 +15,8 @@ class AuditLog extends Model
         return ['details' => 'array', 'created_at' => 'datetime'];
     }
 
-    public function user()
-    {
-        return $this->belongsTo(User::class);
-    }
-
     public static function record(string $action, Model $subject, array $details = []): void
     {
-        self::create(['user_id' => auth()->id(), 'action' => $action, 'subject' => class_basename($subject).':'.$subject->getKey(), 'details' => $details]);
+        self::create(['user_id' => null, 'action' => $action, 'subject' => class_basename($subject).':'.$subject->getKey(), 'details' => ['actor' => 'collector_cli'] + $details]);
     }
 }

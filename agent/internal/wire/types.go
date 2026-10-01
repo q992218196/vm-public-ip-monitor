@@ -1,23 +1,38 @@
 package wire
 
 type Metric struct {
-	IP                       string   `json:"ip"`
-	BytesOut                 uint64   `json:"bytes_out"`
-	BytesIn                  uint64   `json:"bytes_in"`
-	PacketsOut               uint64   `json:"packets_out"`
-	PacketsIn                uint64   `json:"packets_in"`
-	TCPAttempts              uint64   `json:"tcp_attempts"`
-	SYNACKReplies            uint64   `json:"synack_replies"`
-	UniqueTargets            int      `json:"unique_targets"`
-	MaxPortsPerTarget        int      `json:"max_ports_per_target"`
-	MaxAttemptsPerTarget     int      `json:"max_attempts_per_target"`
-	AuthAttempts             int      `json:"auth_attempts"`
-	Targets                  []string `json:"targets"`
-	Ports                    []uint16 `json:"ports"`
-	TargetEndpoints          []string `json:"target_endpoints"`
-	PortSamplesTruncated     bool     `json:"port_samples_truncated"`
-	EndpointSamplesTruncated bool     `json:"endpoint_samples_truncated"`
-	CardinalityCapped        bool     `json:"cardinality_capped"`
+	IP                       string             `json:"ip"`
+	BytesOut                 uint64             `json:"bytes_out"`
+	BytesIn                  uint64             `json:"bytes_in"`
+	PacketsOut               uint64             `json:"packets_out"`
+	PacketsIn                uint64             `json:"packets_in"`
+	TCPAttempts              uint64             `json:"tcp_attempts"`
+	SYNACKReplies            uint64             `json:"synack_replies"`
+	UniqueTargets            int                `json:"unique_targets"`
+	MaxPortsPerTarget        int                `json:"max_ports_per_target"`
+	MaxAttemptsPerTarget     int                `json:"max_attempts_per_target"`
+	AuthAttempts             int                `json:"auth_attempts"`
+	Targets                  []string           `json:"targets"`
+	Ports                    []uint16           `json:"ports"`
+	TargetEndpoints          []string           `json:"target_endpoints"`
+	PortSamplesTruncated     bool               `json:"port_samples_truncated"`
+	EndpointSamplesTruncated bool               `json:"endpoint_samples_truncated"`
+	CardinalityCapped        bool               `json:"cardinality_capped"`
+	OutboundEndpoints        []EndpointEvidence `json:"outbound_endpoints,omitempty"`
+	OutboundSamplesTruncated bool               `json:"outbound_samples_truncated"`
+}
+type EndpointEvidence struct {
+	PeerIP        string   `json:"peer_ip"`
+	PeerPort      uint16   `json:"peer_port"`
+	Attempts      uint64   `json:"attempts"`
+	SYNACKReplies uint64   `json:"synack_replies"`
+	PayloadOut    uint64   `json:"payload_out"`
+	PayloadIn     uint64   `json:"payload_in"`
+	Scheme        string   `json:"scheme,omitempty"`
+	Host          string   `json:"host,omitempty"`
+	HTTPMethod    string   `json:"http_method,omitempty"`
+	HTTPPath      string   `json:"http_path,omitempty"`
+	QueryKeys     []string `json:"query_keys,omitempty"`
 }
 type Site struct {
 	IP     string `json:"ip"`

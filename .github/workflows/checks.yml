@@ -37,7 +37,7 @@ jobs:
       - run: composer install --no-interaction --prefer-dist
         working-directory: server
       - run: |
-          vendor/bin/pint app/Models/User.php app/Providers/AppServiceProvider.php bootstrap/app.php bootstrap/providers.php routes/web.php tests/Feature/ExampleTest.php tests/Feature/MonitorTest.php --format agent
+          vendor/bin/pint app/Models/AuditLog.php app/Services/ScanAssessment.php app/Console/Commands/ReassessScans.php app/Providers/AppServiceProvider.php bootstrap/app.php bootstrap/providers.php tests/Feature/ExampleTest.php tests/Feature/MonitorTest.php --format agent
           git diff --exit-code
         working-directory: server
       - run: php vendor/phpunit/phpunit/phpunit
@@ -106,7 +106,7 @@ jobs:
         with:
           name: admin-composer-lock
           path: admin/composer.lock
-      - run: php -l app/admin/controller/Monitor.php && php -l app/api/controller/AgentBootstrap.php && php -l app/common/connector/MonitorPgsql.php && php -l database/migrations/20260928000000_monitor_menus.php && php -l database/migrations/20260930000000_agent_enrollments.php && php -l tools/import-monitor-users.php && php -l tools/init-admin.php
+      - run: php -l app/admin/controller/Monitor.php && php -l app/api/controller/AgentBootstrap.php && php -l app/common/connector/MonitorPgsql.php && php -l database/migrations/20260928000000_monitor_menus.php && php -l database/migrations/20260930000000_agent_enrollments.php && php -l tools/init-admin.php
         working-directory: admin
       - run: php think migrate:run
         working-directory: admin
@@ -115,8 +115,7 @@ jobs:
           php -r '$db=new PDO("mysql:host=127.0.0.1;dbname=buildadmin","buildadmin","test-only-password");$row=$db->query("SELECT email,password,status FROM ba_admin WHERE id=1")->fetch(PDO::FETCH_ASSOC);if($row["email"]!=="fresh@example.test" || $row["status"]!=="enable" || !password_verify("test-only-new-admin-password",$row["password"]))exit(1);$db->exec("UPDATE ba_admin SET password=\"\",status=\"disable\" WHERE id=1");'
         working-directory: admin
       - run: |
-          php -r '$db=new PDO("pgsql:host=127.0.0.1;dbname=monitor_test","monitor","test-only-password");$db->exec("CREATE TABLE users (id bigint primary key,name varchar(255),email varchar(255),password varchar(255),role varchar(32))");$p=password_hash("test-admin-password-2026",PASSWORD_BCRYPT);$s=$db->prepare("INSERT INTO users VALUES (?,?,?,?,?)");$s->execute([1,"Admin","admin@example.test",$p,"admin"]);$s->execute([2,"Viewer","viewer@example.test",$p,"viewer"]);'
-          php tools/import-monitor-users.php
+          php -r '$db=new PDO("mysql:host=127.0.0.1;dbname=buildadmin","buildadmin","test-only-password");$p=password_hash("test-admin-password-2026",PASSWORD_BCRYPT);$db->prepare("UPDATE ba_admin SET email=?,nickname=?,password=?,status=? WHERE id=1")->execute(["admin@example.test","Admin",$p,"enable"]);$db->prepare("INSERT INTO ba_admin(id,username,nickname,email,password,salt,status,create_time,update_time) VALUES(?,?,?,?,?,?,?,?,?)")->execute([2,"viewer","Viewer","viewer@example.test",$p,"","enable",time(),time()]);$group=$db->query("SELECT id FROM ba_admin_group WHERE name=\"监控只读\"")->fetchColumn();$db->prepare("INSERT INTO ba_admin_group_access(uid,group_id) VALUES(?,?)")->execute([2,$group]);'
           php -r '$db=new PDO("mysql:host=127.0.0.1;dbname=buildadmin","buildadmin","test-only-password");$users=$db->query("SELECT email,password FROM ba_admin WHERE status=\"enable\" ORDER BY email")->fetchAll(PDO::FETCH_ASSOC);if(count($users)!==2 || !password_verify("test-admin-password-2026",$users[0]["password"]))exit(1);'
         working-directory: admin
       - run: |
@@ -210,7 +209,6 @@ jobs:
           done
           test "$status" = 401
           test "$(curl -sS -o /dev/null -w '%{http_code}' 'http://127.0.0.1:8080/admin/login')" = 404
-          test "$(curl -sS -o /dev/null -w '%{http_code}' 'http://127.0.0.1:8080/js/filament/filament/app.js')" = 404
           docker compose -f compose.yml -f compose.buildadmin.yml up -d --no-deps --force-recreate app buildadmin-app
           sleep 8
           test "$(curl -sS -o /dev/null -w '%{http_code}' 'http://127.0.0.1:8080/api/v1/agent/update?version=0.3.0')" = 401

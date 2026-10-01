@@ -8,10 +8,6 @@ server/storage/logs/*
 server/storage/framework/*
 server/bootstrap/cache/*.php
 server/public/build
-server/public/css/filament
-server/public/js/filament
-server/public/fonts/filament
-server/public/fonts-manifest.dev.json
 server/public/hot
 worker/node_modules
 admin/web/node_modules

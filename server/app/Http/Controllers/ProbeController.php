@@ -31,6 +31,21 @@ class ProbeController extends Controller
             'category' => 'nullable|string|max:64', 'classification' => 'nullable|array', 'classification.confidence' => 'nullable|numeric|min:0|max:1',
             'classification.reasons' => 'nullable|array|max:20', 'classification.reasons.*' => 'string|max:255',
             'classification.method' => 'nullable|string|max:64', 'classification.review_required' => 'nullable|boolean', 'content_hash' => 'nullable|string|size:64',
+            'classification.risk_level' => 'sometimes|in:medium,unknown',
+            'classification.business_type' => 'sometimes|string|max:64', 'classification.nature' => 'sometimes|string|max:64',
+            'classification.summary' => 'sometimes|string|max:1800',
+            'classification.observed_at' => 'sometimes|date',
+            'classification.limitations' => 'sometimes|array|max:5', 'classification.limitations.*' => 'string|max:255',
+            'classification.findings' => 'sometimes|array|max:5',
+            'classification.findings.*.category' => 'required|string|max:64', 'classification.findings.*.explanation' => 'required|string|max:255',
+            'classification.findings.*.evidence' => 'required|array|max:4',
+            'classification.findings.*.evidence.*.source' => 'required|in:title,description,body',
+            'classification.findings.*.evidence.*.keyword' => 'required|string|max:64',
+            'classification.findings.*.evidence.*.excerpt' => 'required|string|max:255',
+            'classification.evidence' => 'sometimes|array|max:12',
+            'classification.evidence.*.source' => 'required|in:title,description,body',
+            'classification.evidence.*.keyword' => 'required|string|max:64',
+            'classification.evidence.*.excerpt' => 'required|string|max:255',
             'screenshot' => 'nullable|string|max:2800000', 'error' => 'nullable|string|max:1000']);
 
         return DB::transaction(function () use ($v, $task, $screenshots) {

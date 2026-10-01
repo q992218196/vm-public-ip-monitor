@@ -190,28 +190,16 @@ class Analyzer
             $sampleEvidence = $sample?->evidence ?? [];
             $severity = $rule->severity;
             $confidence = 'behavioral';
+            $analysis = [];
             if ($rule->kind === 'horizontal_scan') {
-                if (!array_key_exists('synack_replies', $sampleEvidence)) {
-                    $note .= '；当前 Agent 未上报 SYN-ACK 响应数，无法判断连接是否得到回复';
-                } else {
-                    $attempts = (int) ($sampleEvidence['tcp_attempts'] ?? 0);
-                    $replies = (int) $sampleEvidence['synack_replies'];
-                    $out = (int) ($sampleEvidence['bytes_out'] ?? 0);
-                    $in = (int) ($sampleEvidence['bytes_in'] ?? 0);
-                    if ($attempts >= $rule->threshold && $replies * 10 >= $attempts * 7
-                        && (int) ($sampleEvidence['max_ports_per_target'] ?? 0) <= 1
-                        && (int) ($sampleEvidence['max_attempts_per_target'] ?? 0) <= 2
-                        && min($out, $in) >= 262144 && max($out, $in) <= min($out, $in) * 4) {
-                        $severity = $severity === 'high' ? 'medium' : $severity;
-                        $title = '疑似多目标双向连接（待复核）';
-                        $confidence = 'bidirectional_candidate';
-                        $note .= '；多数 TCP 发起收到 SYN-ACK，且单目标连接少、双向流量明显，可能是正常组网或 P2P；仍需人工核对业务用途';
-                    } else {
-                        $note .= '；Agent 记录到 '.min($replies, $attempts).'/'.$attempts.' 次 TCP 发起获得 SYN-ACK，出入总字节可能混合了其他已建立连接，不能单独证明这些目标均正常响应；高级别表示优先复核，不代表已确认违规';
-                    }
-                }
+                $assessment = app(ScanAssessment::class)->assess($sampleEvidence, $severity);
+                $severity = $assessment['severity'];
+                $title = $assessment['title'];
+                $confidence = $assessment['confidence'];
+                $note = $assessment['note'];
+                $analysis = ['connection_analysis' => $assessment['connection_analysis']];
             }
-            $this->alert($node, $asset, $rule->kind, $severity, $title, ['rule_id' => $rule->id, 'value' => $value, 'threshold' => $rule->threshold, 'window_seconds' => $rule->window_seconds, 'sample' => $sampleEvidence, 'confidence' => $confidence, 'note' => $note], $batch->window_end, $rule->cooldown_seconds, (string) $rule->id);
+            $this->alert($node, $asset, $rule->kind, $severity, $title, ['rule_id' => $rule->id, 'value' => $value, 'threshold' => $rule->threshold, 'window_seconds' => $rule->window_seconds, 'sample_window_start' => $sample?->window_start?->toIso8601String(), 'sample_window_end' => $sample?->window_end?->toIso8601String(), 'sample' => $sampleEvidence, 'confidence' => $confidence, 'note' => $note] + $analysis, $batch->window_end, $rule->cooldown_seconds, (string) $rule->id);
         }
     }
 
@@ -229,7 +217,11 @@ class Analyzer
             SendAlertEmail::dispatch($alert->id)->afterCommit();
         }
         if (! $alert->wasRecentlyCreated) {
-            $alert->update(['occurrences' => $alert->occurrences + 1, 'last_seen_at' => max($alert->last_seen_at, $at), 'evidence' => $evidence]);
+            $data = ['occurrences' => $alert->occurrences + 1, 'last_seen_at' => max($alert->last_seen_at, $at), 'evidence' => $evidence];
+            if ($alert->status === 'open') {
+                $data += ['severity' => $severity, 'title' => $title];
+            }
+            $alert->update($data);
         }
 
         return $alert;

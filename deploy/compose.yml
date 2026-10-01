@@ -21,8 +21,6 @@ x-app: &app
     REDIS_QUEUE_RETRY_AFTER: 180
     CACHE_STORE: redis
     REDIS_HOST: redis
-    SESSION_DRIVER: database
-    SESSION_SECURE_COOKIE: "true"
     LOG_CHANNEL: daily
     LOG_DAILY_DAYS: 7
   volumes:

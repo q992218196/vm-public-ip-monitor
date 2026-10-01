@@ -5,8 +5,58 @@ import (
 	"encoding/binary"
 	"net"
 	"net/netip"
+	"net/url"
+	"sort"
 	"strings"
 )
+
+// RequestMetadata retains the first request path and query names only, never
+// credentials, cookies, query values or a request body. Long path segments are masked.
+func RequestMetadata(b []byte) (method, path string, keys []string) {
+	end := bytes.Index(b, []byte("\r\n"))
+	if end < 0 {
+		return
+	}
+	fields := strings.Fields(string(b[:end]))
+	if len(fields) != 3 || !strings.HasPrefix(fields[2], "HTTP/1.") {
+		return
+	}
+	u, err := url.ParseRequestURI(fields[1])
+	if err != nil || u.IsAbs() || u.User != nil {
+		return
+	}
+	method = fields[0]
+	segments := strings.Split(u.EscapedPath(), "/")
+	for i, segment := range segments {
+		if len(segment) > 32 {
+			segments[i] = ":redacted"
+		}
+	}
+	path = strings.Join(segments, "/")
+	if len(path) > 256 {
+		path = path[:256]
+	}
+	for key := range u.Query() {
+		if len(key) == 0 || len(key) > 32 {
+			continue
+		}
+		valid := true
+		for _, r := range key {
+			if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '_' || r == '-') {
+				valid = false
+				break
+			}
+		}
+		if valid {
+			keys = append(keys, key)
+		}
+	}
+	sort.Strings(keys)
+	if len(keys) > 8 {
+		keys = keys[:8]
+	}
+	return
+}
 
 func Host(s string) string {
 	s = strings.TrimSpace(strings.ToLower(s))

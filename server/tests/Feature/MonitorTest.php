@@ -11,9 +11,11 @@ use App\Models\ProtocolObservation;
 use App\Models\Rule;
 use App\Models\Website;
 use App\Services\ProbeQueue;
+use App\Services\ScanAssessment;
 use Database\Seeders\MonitorSeeder;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Queue;
+use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Str;
 use Tests\TestCase;
 
@@ -146,6 +148,61 @@ class MonitorTest extends TestCase
         $this->upload($node, $payload)->assertOk();
         ProcessBatch::dispatchSync(Batch::first()->id);
         $this->assertSame('high', Alert::where('kind', 'horizontal_scan')->firstOrFail()->severity);
+    }
+
+    public function test_replied_web_fanout_with_hotspot_is_not_high_scan_and_can_be_reassessed(): void
+    {
+        $this->seed(MonitorSeeder::class);
+        $node = $this->node();
+        foreach ([[1313, 1301, 232, 6], [386, 383, 123, 203]] as [$attempts, $replies, $targets, $hotspot]) {
+            $payload = $this->payload();
+            $payload['metrics'][0] = array_replace($payload['metrics'][0], [
+                'tcp_attempts' => $attempts, 'synack_replies' => $replies, 'unique_targets' => $targets,
+                'max_attempts_per_target' => $hotspot, 'max_ports_per_target' => 1, 'ports' => [443],
+            ]);
+            $this->upload($node, $payload)->assertOk();
+            ProcessBatch::dispatchSync(Batch::where('batch_id', $payload['batch_id'])->firstOrFail()->id);
+            $alert = Alert::where('kind', 'horizontal_scan')->firstOrFail();
+            $this->assertSame('medium', $alert->severity);
+            $this->assertSame('多目标 Web 端口连接（待复核）', $alert->title);
+            $this->assertGreaterThan(0.99, $alert->evidence['connection_analysis']['reply_ratio']);
+        }
+        $this->assertDatabaseHas('alerts', ['kind' => 'single_target_attempts']);
+        $alert->update(['severity' => 'high']);
+        $this->artisan('monitor:reassess-scans')->assertSuccessful();
+        $alert->refresh();
+        $this->assertSame('medium', $alert->severity);
+        $alert->update(['status' => 'resolved', 'severity' => 'high']);
+        $this->artisan('monitor:reassess-scans')->assertSuccessful();
+        $this->assertSame('high', $alert->fresh()->severity);
+    }
+
+    public function test_inconsistent_handshake_counts_do_not_imply_success(): void
+    {
+        $assessment = app(ScanAssessment::class)->assess(['tcp_attempts' => 100, 'synack_replies' => 101, 'max_ports_per_target' => 1]);
+        $this->assertSame('high', $assessment['severity']);
+        $this->assertNull($assessment['connection_analysis']['reply_ratio']);
+    }
+
+    public function test_endpoint_evidence_is_preserved_and_large_samples_rejected(): void
+    {
+        $node = $this->node();
+        $payload = $this->payload();
+        $endpoint = ['peer_ip' => '1.1.1.1', 'peer_port' => 80, 'attempts' => 5, 'synack_replies' => 5,
+            'payload_out' => 600, 'payload_in' => 800, 'scheme' => 'http', 'host' => 'example.com',
+            'http_method' => 'GET', 'http_path' => '/api', 'query_keys' => ['id']];
+        $payload['metrics'][0]['outbound_endpoints'] = [$endpoint];
+        $this->upload($node, $payload)->assertOk();
+        $this->assertSame('/api', Batch::firstOrFail()->payload['metrics'][0]['outbound_endpoints'][0]['http_path']);
+        $payload['metrics'][0]['outbound_endpoints'] = array_fill(0, 9, $endpoint);
+        $this->upload($node, $payload)->assertUnprocessable();
+    }
+
+    public function test_fresh_collector_has_no_management_account_tables(): void
+    {
+        $this->assertFalse(Schema::hasTable('users'));
+        $this->assertFalse(Schema::hasTable('sessions'));
+        $this->assertFalse(Schema::hasTable('password_reset_tokens'));
     }
 
     public function test_sparse_single_port_fanout_with_few_replies_remains_high_priority(): void
@@ -326,10 +383,21 @@ class MonitorTest extends TestCase
         app(ProbeQueue::class)->enqueue($site);
         $claim = $this->withToken($this->token)->postJson('/api/v1/worker/claim')->assertOk()->json('task');
         $this->withToken($this->token)->postJson('/api/v1/worker/tasks/'.$claim['id'].'/complete', [
+            'lease_token' => $claim['lease_token'], 'status' => 'verified',
+            'classification' => ['evidence' => [['source' => 'body', 'keyword' => 'word', 'excerpt' => str_repeat('x', 256)]]],
+        ])->assertUnprocessable();
+        $this->withToken($this->token)->postJson('/api/v1/worker/tasks/'.$claim['id'].'/complete', [
             'lease_token' => $claim['lease_token'], 'status' => 'verified', 'title' => '测试网站',
             'description' => '这是一段网站描述', 'http_status' => 200,
+            'classification' => ['risk_level' => 'medium', 'business_type' => '影视聚合／在线播放',
+                'nature' => '待人工核实', 'summary' => '公开首页文本命中，需要核实授权', 'observed_at' => now()->toIso8601String(),
+                'findings' => [['category' => '影视授权待核实', 'explanation' => '授权未确认', 'evidence' => [
+                    ['source' => 'description', 'keyword' => '免费影视', 'excerpt' => '提供免费影视'],
+                ]]],
+            ],
         ])->assertOk();
         $this->assertSame('这是一段网站描述', $site->fresh()->description);
+        $this->assertSame('description', $site->fresh()->classification['findings'][0]['evidence'][0]['source']);
 
     }
 

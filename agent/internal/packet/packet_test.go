@@ -34,6 +34,16 @@ func TestNormalizeHost(t *testing.T) {
 		}
 	}
 }
+func TestRequestMetadataDoesNotRetainSecrets(t *testing.T) {
+	method, path, keys := RequestMetadata([]byte("POST /api/abcdefghijklmnopqrstuvwxyz0123456789?token=secret&z=1&a=2 HTTP/1.1\r\nCookie: secret\r\n\r\npassword=secret"))
+	if method != "POST" || path != "/api/:redacted" || len(keys) != 3 || keys[0] != "a" {
+		t.Fatalf("unexpected bounded metadata: %s %s %v", method, path, keys)
+	}
+	_, path, _ = RequestMetadata([]byte("GET https://other.test/private HTTP/1.1\r\n"))
+	if path != "" {
+		t.Fatal("absolute proxy requests are not endpoint paths")
+	}
+}
 func FuzzPacketNoPanic(f *testing.F) {
 	f.Add([]byte{0, 1, 2})
 	f.Fuzz(func(t *testing.T, b []byte) {

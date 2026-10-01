@@ -56,6 +56,44 @@ func TestProxySuspicionNeedsBidirectionalPeersAndEgressFanout(t *testing.T) {
 func cfg() config.Config {
 	return config.Config{CIDRs: []string{"203.0.113.0/24", "2001:db8::/48"}, MaxIPs: 10, MaxFlows: 1000, MaxReassembly: 10, MaxSites: 20}
 }
+func TestOutboundEvidenceIsBoundedAndNotHostedWebsite(t *testing.T) {
+	now := time.Now()
+	e := New(cfg(), now)
+	for i := 1; i <= 10; i++ {
+		peer := fmt.Sprintf("192.0.2.%d", i)
+		sp := uint16(40000 + i)
+		for _, p := range [][]byte{
+			frame("203.0.113.1", peer, sp, 8080, 1, 2, ""),
+			frame(peer, "203.0.113.1", 8080, sp, 1, 18, ""),
+			frame("203.0.113.1", peer, sp, 8080, 2, 24, "GET /api/check?token=SECRET&id=123 HTTP/1.1\r\nHost: example.com\r\nCookie: private=SECRET\r\n\r\n"),
+			frame(peer, "203.0.113.1", 8080, sp, 2, 24, "HTTP/1.1 200 OK\r\n\r\nhello"),
+		} {
+			e.Process(p, len(p), "a", now)
+		}
+	}
+	b := e.Snapshot(now.Add(30 * time.Second))
+	m := b.Metrics[0]
+	if len(b.Sites) != 0 || len(m.OutboundEndpoints) != 8 || !m.OutboundSamplesTruncated {
+		t.Fatalf("incorrect scope or bounds: %+v", b)
+	}
+	first := m.OutboundEndpoints[0]
+	if first.Attempts != 1 || first.SYNACKReplies != 1 || first.PayloadIn == 0 || first.HTTPPath != "/api/check" || first.Host != "example.com" || len(first.QueryKeys) != 2 {
+		t.Fatalf("incorrect connection evidence: %+v", first)
+	}
+}
+func TestCrossWindowReplyDoesNotInflateCurrentHandshakeRatio(t *testing.T) {
+	now := time.Now()
+	e := New(cfg(), now)
+	p := frame("203.0.113.1", "192.0.2.1", 40000, 443, 1, 2, "")
+	e.Process(p, len(p), "a", now)
+	e.Snapshot(now.Add(time.Second))
+	p = frame("192.0.2.1", "203.0.113.1", 443, 40000, 1, 18, "")
+	e.Process(p, len(p), "a", now.Add(2*time.Second))
+	m := e.Snapshot(now.Add(3 * time.Second)).Metrics[0]
+	if m.TCPAttempts != 0 || m.SYNACKReplies != 0 {
+		t.Fatalf("cross-window reply must not count as paired: %+v", m)
+	}
+}
 func frame(src, dst string, sp, dp uint16, seq uint32, flags byte, payload string) []byte {
 	a, b := netip.MustParseAddr(src), netip.MustParseAddr(dst)
 	iplen := 20
