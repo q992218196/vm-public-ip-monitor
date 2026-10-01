@@ -18,12 +18,13 @@ import (
 	"vm-monitor/agent/internal/capture"
 	"vm-monitor/agent/internal/config"
 	"vm-monitor/agent/internal/engine"
+	"vm-monitor/agent/internal/evidence"
 	"vm-monitor/agent/internal/spool"
 	"vm-monitor/agent/internal/update"
 	"vm-monitor/agent/internal/wire"
 )
 
-var version = "0.5.0"
+var version = "0.6.0"
 
 func main() {
 	if e := run(); e != nil {
@@ -83,10 +84,15 @@ func run() error {
 	ctx, cancel := signal.NotifyContext(context.Background(), capture.StopSignals()...)
 	defer cancel()
 	eng := engine.New(c, time.Now())
+	recorder := evidence.New(c)
+	go recorder.Run(ctx)
 	errs := make(chan error, len(c.Interfaces))
 	for _, iface := range c.Interfaces {
 		go func(name string) {
-			if e := capture.Run(ctx, name, c.CaptureBufferMiB, eng.Process, eng.KernelDrops); e != nil {
+			if e := capture.Run(ctx, name, c.CaptureBufferMiB, func(data []byte, size int, iface string, at time.Time) {
+				eng.Process(data, size, iface, at)
+				recorder.Packet(data, size, iface, at)
+			}, func(n uint64) { eng.KernelDrops(n); recorder.KernelDrops(n) }); e != nil {
 				errs <- fmt.Errorf("capture %s: %w", name, e)
 			}
 		}(iface)

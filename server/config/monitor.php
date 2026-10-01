@@ -10,4 +10,7 @@ return [
     'screenshots_bytes' => (int) env('MONITOR_SCREENSHOTS_BYTES', 5368709120),
     'offline_minutes' => (int) env('MONITOR_OFFLINE_MINUTES', 5),
     'pending_bytes_per_node' => (int) env('MONITOR_PENDING_BYTES_PER_NODE', 67108864),
+    'auto_capture' => (bool) env('MONITOR_AUTO_CAPTURE', true),
+    'capture_bytes' => (int) env('MONITOR_CAPTURE_BYTES', 21474836480),
+    'capture_days' => (int) env('MONITOR_CAPTURE_DAYS', 7),
 ];

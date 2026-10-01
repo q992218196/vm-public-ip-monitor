@@ -39,6 +39,7 @@ services:
       MONITOR_DB_USERNAME: monitor
       MONITOR_DB_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD}
       MONITOR_PUBLIC_URL: ${APP_URL:?set APP_URL}
+      MONITOR_SECRET_KEY: ${APP_KEY:?set APP_KEY}
     volumes:
       - ${MONITOR_DATA_DIR:-/home/vm-monitor-server}/buildadmin/runtime:/var/www/html/runtime
       - ${MONITOR_DATA_DIR:-/home/vm-monitor-server}/buildadmin/uploads:/var/www/html/public/uploads

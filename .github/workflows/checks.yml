@@ -89,6 +89,7 @@ jobs:
       MONITOR_DB_DATABASE: monitor_test
       MONITOR_DB_USERNAME: monitor
       MONITOR_DB_PASSWORD: test-only-password
+      MONITOR_SECRET_KEY: test-only-shared-ai-key-32-bytes!!
     steps:
       - uses: actions/checkout@v4
       - uses: shivammathur/setup-php@v2
@@ -160,6 +161,7 @@ jobs:
           python3 -c 'import json; assert json.load(open("/tmp/buildadmin-profile.json"))["code"]==1'
           php -r '$db=new PDO("mysql:host=127.0.0.1;dbname=buildadmin","buildadmin","test-only-password");$rows=$db->query("SELECT email,nickname FROM ba_admin WHERE email IN (\"admin@example.test\",\"viewer@example.test\") ORDER BY email")->fetchAll(PDO::FETCH_ASSOC);if($rows[0]["nickname"]!=="Admin" || $rows[1]["nickname"]!=="ViewerUpdated")exit(1);'
           TEST_ADMIN_TOKEN="$token" php tools/test-alert-whitelists.php
+          TEST_ADMIN_TOKEN="$token" TEST_VIEWER_TOKEN="$viewer_token" php tools/test-event-evidence.php
         working-directory: admin
       - run: npm ci --no-audit --no-fund && npm run typecheck && npm run lint && npm run build
         working-directory: admin/web

@@ -25,7 +25,7 @@ docker compose -f compose.yml -f compose.buildadmin.yml up -d postgres redis bui
 docker compose -f compose.yml -f compose.buildadmin.yml run --rm --no-deps app php artisan migrate --force
 
 docker compose -f compose.yml -f compose.buildadmin.yml run --rm --no-deps app php artisan db:seed --class=MonitorSeeder --force
-docker compose -f compose.yml -f compose.buildadmin.yml up -d app web queue scheduler buildadmin-app buildadmin-web
+docker compose -f compose.yml -f compose.buildadmin.yml up -d app web queue scheduler ai-queue buildadmin-app buildadmin-web
 docker compose -f compose.yml -f compose.buildadmin.yml exec buildadmin-app php think migrate:run
 docker compose -f compose.yml -f compose.buildadmin.yml exec buildadmin-app php tools/init-admin.php admin@your-domain.example
 ```
@@ -53,13 +53,15 @@ cd deploy
 docker compose -f compose.yml -f compose.buildadmin.yml build app web buildadmin-app buildadmin-web
 docker compose -f compose.yml -f compose.buildadmin.yml --profile agent-build build agent-builder
 docker compose -f compose.yml -f compose.buildadmin.yml --profile agent-build run --rm agent-builder
+docker compose -f compose.yml -f compose.buildadmin.yml stop queue scheduler ai-queue
 docker compose -f compose.yml -f compose.buildadmin.yml run --rm --no-deps app php artisan migrate --force
 docker compose -f compose.yml -f compose.buildadmin.yml run --rm --no-deps app php artisan db:seed --class=MonitorSeeder --force
+docker compose -f compose.yml -f compose.buildadmin.yml run --rm --no-deps app php artisan monitor:reassess-scans
+docker compose -f compose.yml -f compose.buildadmin.yml run --rm --no-deps app php artisan monitor:group-events
 
-docker compose -f compose.yml -f compose.buildadmin.yml up -d --no-deps --force-recreate app web queue scheduler buildadmin-app buildadmin-web
+docker compose -f compose.yml -f compose.buildadmin.yml up -d --no-deps --force-recreate app web queue scheduler ai-queue buildadmin-app buildadmin-web
 docker compose -f compose.yml -f compose.buildadmin.yml exec buildadmin-app php think migrate:run
 docker compose -f compose.yml -f compose.buildadmin.yml --profile https up -d --no-deps --force-recreate https
-docker compose -f compose.yml -f compose.buildadmin.yml exec app php artisan monitor:reassess-scans
 ```
 
 数据库迁移保留网站资产、流量记录、其他告警和 BuildAdmin 账号；迁移会删除旧的“发现新网站线索”告警，并为白名单增加按告警类型的范围和不需要 CIDR 的节点健康范围。必须先执行迁移，再使用新版白名单。重新运行 `agent-builder` 会发布安装、卸载脚本及 SHA-256 清单；`buildadmin-web` 也必须重建才能提供卸载脚本下载。重建 PHP 应用时 Web 容器也会重建，避免连接到已更换的容器地址。升级后检查：
@@ -162,3 +164,35 @@ docker compose -f compose.yml -f compose.buildadmin.yml exec -T postgres pg_dump
 - **截图 worker 重启或无截图**：检查目录属主、`worker.log`、worker 内存及 IPv6 出口；探测任务页面会显示失败原因。
 
 管理员可在 BuildAdmin 右上角“个人资料”修改邮箱或密码，在“管理员管理”创建只读账号并分配“监控只读”分组。生产环境不开放公开注册。卸载流程见第 5 节，命令在宿主机执行。
+
+## 8. 事件、PCAP 留存与手动 DeepSeek 分析
+
+先按第 3 节升级主控，再在“采集节点”下发 Agent **0.6.0**。新版保留现有 `agent.json`；没有新增配置项时自动使用下面的默认值。刷新登录或重新登录后，告警中心使用新的事件页面，新增“AI 分析设置”菜单。无需安装 VM 内的组件。
+
+同一观察节点、公网 IP 的持续行为合并为事件，不再每十分钟新建一条。不同规则保留独立证据；超过 30 分钟没有命中，再出现时建立新事件。人工标记“已核查正常”或“已处理”后，同类行为仅增加计数；新类型或级别上升可重新打开事件并记录原因。`monitor:group-events` 为历史告警建立事件关联，不调用 AI、不补造历史抓包。历史记录仍保留。
+
+在告警详情中点击“申请定向抓包”，选择每包前 2048 字节或完整包。节点最多同时采集一个 IP，持续 60 秒或到 32 MiB 就停止；等待队列最多 10 项，同一 IP 的成功／等待任务间隔至少 30 分钟。新建高级别事件默认可申请一次自动抓包，`MONITOR_AUTO_CAPTURE=false` 可以关闭自动申请。**自动抓包不会调用 AI。**抓包从 Agent 接到任务时开始，不能恢复过去的报文。停止／禁用采集节点不会删除已经留存的证据。
+
+抓包复用现有抓包通道，不增加另一份网卡套接字。文件写入和上传独立处理，队列满时丢弃证据副本并计数；不能据此声称对宿主机没有任何 CPU、I/O 或内存影响。PCAP 元数据包含时间、采集接口、抓到的包数、截断数、队列丢弃数、内核丢弃观察数和停止原因。内核统计按 5 秒区间读取，可能跨越本次抓包的开始／结束边界，不能把该数字当成精确的抓包丢包率。主控计算 SHA-256，并提供“抓包分析”和受管理员权限保护的下载入口；只读账号可看摘要，不能下载原始 PCAP。PCAP 不通过公开静态目录提供。
+
+| 项目 | 默认值 |
+| --- | --- |
+| 节点文件目录 | `data_dir/evidence`，默认 `/home/vm-monitor/evidence` |
+| 节点证据预算 | 最多 512 MiB，包含在 Agent 总磁盘预算中；另保留上报缓存和 128 MiB 余量 |
+| 节点保留时间 | 最多 24 小时；容量／文件数达到上限时更早清理 |
+| 证据上传限速 | 每节点 2048 KiB/s，约 16.8 Mbps；仅在上传 PCAP 时使用，不含正常聚合上报 |
+| 主控私有目录 | `MONITOR_DATA_DIR/storage/app/private/packet-evidence` |
+| 主控 PCAP 总预算 | 20 GiB，`MONITOR_CAPTURE_BYTES` 可调整；文件数最多 10000，满额暂停领取或拒绝新增文件 |
+| 主控保留时间 | 7 天，`MONITOR_CAPTURE_DAYS` 可调整；等待／执行 AI 分析的文件暂缓清理 |
+
+节点可在 `agent.json` 增加 `evidence_enabled`、`evidence_limit_mib`、`evidence_keep_hours`、`evidence_upload_kibps`。关闭 `evidence_enabled` 停止任务轮询。修改后先用 Agent `-check` 校验，再重启服务。证据额度加上 `spool_limit_mib` 和 128 MiB 余量不能超过 `disk_limit_mib`；默认内存硬限额仍为 4 GiB。主控限额不包含数据库和 nginx 临时文件；nginx 抓包请求最多并行 4 个，每个不超过 32 MiB，临时文件也放在 `/home` 对应的 nginx 日志挂载目录。
+
+“抓包分析”由主控本地执行，**不需要 AI Key、不产生 AI 调用费用**。它列出目标与端口、SYNACK 回复、完整握手、RST、未观察到回复的流、可见明文 HTTP 请求头、完整单包 ClientHello 中的 SNI 及证据限制。SNI 不证明域名属于这台 VM，也不能恢复 ECH 隐藏的内部域名。解析最多 32 MiB、20 万帧、4096 个流，显示 32 个流样本；超限会注明。发起连接目标数只统计抓包内看到出站 SYN 的流，不能代表所有存量连接。IP 分片、不能解析的协议、未完整捕获的 TCP 请求会显示为缺失证据；多接口抓包可能包含重复包。HTTPS／TLS／QUIC 的正文和认证结果不能直接读取，SS/VLESS 等伪装代理协议也不能仅凭这些统计确定。
+
+管理员进入“AI 分析设置”，填写 DeepSeek API Key、模型、API 地址并启用。默认地址 `https://api.deepseek.com/chat/completions`，模型 `deepseek-flash`，可填写账户实际支持的模型。密钥由主控共享的 `APP_KEY` 派生密钥加密保存；BuildAdmin 容器通过 `MONITOR_SECRET_KEY` 使用同一密钥，Compose 已配置。升级时不要重置 `APP_KEY`。保存、启用、查看事件、抓包完成都不会调用 AI。
+
+DeepSeek 的官方 [Files API](https://api-docs.deepseek.com/guides/files_api/) 支持图片，未支持 PCAP。这里将 PCAP 保留在主控，由主控解析成文字证据后发送至 DeepSeek，而不是上传二进制文件、Base64 或公开 PCAP 链接。只在事件详情选择已留存的文件，点击“AI 分析”并确认提交后执行一次。发送内容包括目标 IP、端口、握手、流量、可见 HTTP 方法／Host／路径、采集质量及规则摘要；查询参数值、Cookie、Authorization 和请求正文不发送。路径本身仍可能包含业务信息，提交窗口会说明外发范围。
+
+`ai-queue` 使用独立队列顺序处理本地证据解析和 AI 任务，避免阻塞采集分析队列。AI 请求采用非思考模式，输出上限 4096 tokens，连接超时 10 秒、请求超时 90 秒，无自动 HTTP 重试；同一次任务不会重复调用。失败可能已产生供应商费用，需要再次分析时由管理员重新申请。后台报告保留发送的文字证据、文件哈希、模型、分析结果和用量，内容作为纯文本显示，不自动处理告警、封禁或修改白名单。
+
+故障排查：抓包任务过期时，核对节点版本、启用状态、`evidence_enabled`、节点日志和数据分区余量；文件已留存但摘要未生成时，检查 `ai-queue` 和 `scheduler`。AI 分析一直等待时，也检查这两个服务；失败时后台显示错误，不要用 `queue:retry all` 试图重新收费调用，直接在后台人工重新申请。原始文件过期后不能再申请 AI 分析，已生成的报告仍可查看。

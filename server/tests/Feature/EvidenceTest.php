@@ -1,0 +1,222 @@
+<?php
+
+namespace Tests\Feature;
+
+use App\Jobs\AnalyzeEvidence;
+use App\Jobs\SummarizeCapture;
+use App\Models\AiAnalysis;
+use App\Models\Alert;
+use App\Models\IpAsset;
+use App\Models\MonitorEvent;
+use App\Models\Node;
+use App\Models\PacketCapture;
+use App\Services\Analyzer;
+use App\Services\EventCorrelation;
+use App\Services\PcapSummary;
+use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Queue;
+use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Str;
+use Tests\TestCase;
+
+class EvidenceTest extends TestCase
+{
+    use RefreshDatabase;
+
+    private string $token = 'test-only-node-token-abcdefghijklmnopqrstuvwxyz';
+
+    private function event(): MonitorEvent
+    {
+        $node = Node::create(['name' => 'capture test', 'cidrs' => ['203.0.113.0/24'], 'health' => ['version' => '0.6.0'], 'token_hash' => hash('sha256', $this->token)]);
+        $ip = IpAsset::create(['ip' => '203.0.113.10', 'version' => 4, 'first_seen_at' => now(), 'last_seen_at' => now()]);
+
+        return app(EventCorrelation::class)->correlate($node, $ip, 'horizontal_scan', 'medium', '疑似扫描', now());
+    }
+
+    private function packet(string $src, string $dst, int $flags, int $sp = 20000, int $dp = 443, string $payload = ''): string
+    {
+        $ethernet = str_repeat("\0", 12).pack('n', 0x0800);
+        $ip = "\x45\0".pack('n', 40 + strlen($payload)).str_repeat("\0", 5)."\x06".str_repeat("\0", 2).inet_pton($src).inet_pton($dst);
+        $tcp = pack('nnNNCCnNN', $sp, $dp, $flags === 2 ? 100 : ($flags === 18 ? 200 : 101), $flags === 18 ? 101 : ($flags === 16 ? 201 : 0), 0x50, $flags, 1024, 0, 0);
+
+        return $ethernet.$ip.substr($tcp, 0, 20).$payload;
+    }
+
+    private function pcap(array $packets): string
+    {
+        $data = pack('VvvVVVV', 0xA1B2C3D4, 2, 4, 0, 0, 65535, 1);
+        foreach ($packets as $packet) {
+            $data .= pack('VVVV', time(), 0, strlen($packet), strlen($packet)).$packet;
+        }
+
+        return $data;
+    }
+
+    public function test_continuous_ip_events_merge_rules_and_keep_review_until_behavior_changes(): void
+    {
+        $event = $this->event();
+        $node = Node::find($event->node_id);
+        $ip = IpAsset::find($event->ip_asset_id);
+        $analyzer = app(Analyzer::class);
+        $at = now();
+        $first = $analyzer->alert($node, $ip, 'horizontal_scan', 'medium', '扫描', [], $at);
+        $second = $analyzer->alert($node, $ip, 'horizontal_scan', 'medium', '扫描', [], $at->copy()->addMinutes(15));
+        $this->assertSame($first->id, $second->id);
+        $this->assertDatabaseCount('monitor_events', 1);
+        $event->update(['status' => 'normal']);
+        $analyzer->alert($node, $ip, 'horizontal_scan', 'medium', '扫描', [], $at->copy()->addMinutes(16));
+        $this->assertSame('normal', $event->fresh()->status);
+        $analyzer->alert($node, $ip, 'vertical_scan', 'high', '端口扫描', [], $at->copy()->addMinutes(17));
+        $this->assertSame('open', $event->fresh()->status);
+        $this->assertCount(2, $event->fresh()->kinds);
+        $analyzer->alert($node, $ip, 'vertical_scan', 'high', '端口扫描', [], $at->copy()->addMinutes(48));
+        $this->assertDatabaseCount('monitor_events', 2);
+    }
+
+    public function test_capture_is_node_scoped_lease_fenced_and_saved_without_ai(): void
+    {
+        Storage::fake('local');
+        Http::preventStrayRequests();
+        Queue::fake();
+        $event = $this->event();
+        $task = PacketCapture::create(['event_id' => $event->id, 'node_id' => $event->node_id, 'ip' => '203.0.113.10']);
+        $this->getJson('/api/v1/agent/captures/claim')->assertUnauthorized();
+        $headers = ['Authorization' => 'Bearer '.$this->token, 'X-Node-ID' => $event->node_id];
+        $reply = $this->withHeaders($headers)->getJson('/api/v1/agent/captures/claim')->assertOk()->json('task');
+        $this->assertSame($task->id, $reply['id']);
+        $this->getJson('/api/v1/agent/captures/claim')->assertJson(['task' => null]);
+        $url = '/api/v1/agent/captures/'.$task->id.'/complete';
+        $this->postJson($url)->assertStatus(409);
+        $metadata = ['packets' => 1, 'queue_drops' => 0, 'snaplen_truncated' => 0, 'started_at' => now()->toIso8601String(), 'ended_at' => now()->toIso8601String(), 'stop_reason' => 'duration', 'interfaces' => ['eno1']];
+        $data = $this->pcap([$this->packet('203.0.113.10', '1.1.1.1', 2)]);
+        $this->call('POST', $url, [], [], [], ['HTTP_AUTHORIZATION' => 'Bearer '.$this->token, 'HTTP_X_NODE_ID' => $event->node_id, 'HTTP_X_CAPTURE_LEASE' => $reply['lease_token'], 'HTTP_X_CAPTURE_METADATA' => base64_encode(json_encode($metadata)), 'CONTENT_TYPE' => 'application/vnd.tcpdump.pcap'], $data)->assertOk();
+        $task->refresh();
+        $this->assertSame('uploaded', $task->status);
+        $this->assertSame(hash('sha256', $data), $task->sha256);
+        Storage::disk('local')->assertExists($task->path);
+        $this->assertDatabaseCount('ai_analyses', 0);
+        Http::assertNothingSent();
+        $other = Node::create(['name' => 'other', 'cidrs' => ['203.0.113.0/24'], 'token_hash' => hash('sha256', $this->token)]);
+        $this->withHeaders(['X-Node-ID' => $other->id])->postJson($url)->assertNotFound();
+    }
+
+    public function test_parser_distinguishes_replies_from_completed_handshakes_and_redacts_query_values(): void
+    {
+        $path = tempnam(sys_get_temp_dir(), 'pcap-test');
+        $data = $this->pcap([$this->packet('203.0.113.10', '1.1.1.1', 2), $this->packet('1.1.1.1', '203.0.113.10', 18, 443, 20000), $this->packet('203.0.113.10', '1.1.1.1', 16, 20000, 443, "GET /status?password=secret HTTP/1.1\r\nHost: example.test\r\nAuthorization: secret\r\n\r\n")]);
+        file_put_contents($path, $data);
+        try {
+            $summary = app(PcapSummary::class)->summarize($path, '203.0.113.10');
+            $this->assertSame(1, $summary['synack_flows']);
+            $this->assertSame(1, $summary['completed_handshakes']);
+            $this->assertSame('/status', $summary['flow_samples'][0]['http']['path']);
+            $this->assertStringNotContainsString('secret', json_encode($summary));
+            file_put_contents($path, $this->pcap([$this->packet('203.0.113.10', '1.1.1.1', 2), $this->packet('1.1.1.1', '203.0.113.10', 18, 443, 20000)]));
+            $this->assertSame(0, app(PcapSummary::class)->summarize($path, '203.0.113.10')['completed_handshakes']);
+        } finally {
+            unlink($path);
+        }
+    }
+
+    public function test_ai_only_processes_manual_records_once_and_never_sends_pcap_binary(): void
+    {
+        Storage::fake('local');
+        Http::fake(['api.deepseek.com/*' => Http::sequence()->push(['choices' => [['message' => ['content' => '证据不足，需要核查业务。']]], 'usage' => ['total_tokens' => 123]])->push(['error' => 'rate limit'], 429)]);
+        $event = $this->event();
+        $data = $this->pcap([$this->packet('203.0.113.10', '1.1.1.1', 2)]);
+        $path = 'packet-evidence/'.Str::uuid().'.pcap';
+        Storage::disk('local')->put($path, $data);
+        $capture = PacketCapture::create(['event_id' => $event->id, 'node_id' => $event->node_id, 'ip' => '203.0.113.10', 'status' => 'uploaded', 'path' => $path, 'sha256' => hash('sha256', $data)]);
+        config(['app.key' => 'base64:'.base64_encode(str_repeat('k', 32))]);
+        DB::table('ai_settings')->insert(['id' => 1, 'enabled' => true]);
+        $nonce = random_bytes(12);
+        $tag = '';
+        $cipher = openssl_encrypt('test-only-api-key-123456789', 'aes-256-gcm', hash('sha256', str_repeat('k', 32), true), OPENSSL_RAW_DATA, $nonce, $tag, 'vm-monitor-ai-v1');
+        $analysis = AiAnalysis::create(['event_id' => $event->id, 'capture_id' => $capture->id, 'requested_by' => 1, 'config_snapshot' => ['endpoint' => 'https://api.deepseek.com/chat/completions', 'model' => 'deepseek-flash', 'api_key_cipher' => base64_encode($nonce.$tag.$cipher)]]);
+        $job = new AnalyzeEvidence($analysis->id);
+        $job->handle();
+        $job->handle();
+        Http::assertSentCount(1);
+        Http::assertSent(fn ($request) => $request['messages'][1]['content'] && str_contains($request['messages'][1]['content'], 'pcap_summary') && ! str_contains($request->body(), base64_encode($data)));
+        $this->assertSame('completed', $analysis->fresh()->status);
+        $this->assertSame('open', $event->fresh()->status);
+        $this->assertArrayNotHasKey('api_key_cipher', $analysis->fresh()->config_snapshot);
+        $failed = AiAnalysis::create(['event_id' => $event->id, 'capture_id' => $capture->id, 'requested_by' => 1, 'config_snapshot' => $analysis->config_snapshot]);
+        $failedJob = new AnalyzeEvidence($failed->id);
+        $failedJob->handle();
+        $failedJob->handle();
+        $this->assertSame('failed', $failed->fresh()->status);
+        $this->assertStringContainsString('HTTP 429', $failed->fresh()->last_error);
+        Http::assertSentCount(2);
+    }
+
+    public function test_parser_exposes_only_complete_visible_client_hello_sni(): void
+    {
+        $name = 'cdn.example.test';
+        $serverName = "\0".pack('n', strlen($name)).$name;
+        $serverName = pack('n', strlen($serverName)).$serverName;
+        $extensions = pack('nn', 0, strlen($serverName)).$serverName;
+        $hello = "\x03\x03".str_repeat("\0", 32)."\0".pack('n', 2)."\x13\x01\x01\0".pack('n', strlen($extensions)).$extensions;
+        $handshake = "\x01".substr(pack('N', strlen($hello)), 1).$hello;
+        $tls = "\x16\x03\x01".pack('n', strlen($handshake)).$handshake;
+        $path = tempnam(sys_get_temp_dir(), 'sni-test');
+        try {
+            file_put_contents($path, $this->pcap([$this->packet('203.0.113.10', '1.1.1.1', 16, 20000, 443, $tls)]));
+            $summary = app(PcapSummary::class)->summarize($path, '203.0.113.10');
+            $this->assertSame($name, $summary['flow_samples'][0]['tls_client_hello_sni']);
+            file_put_contents($path, $this->pcap([$this->packet('203.0.113.10', '1.1.1.1', 16, 20000, 443, substr($tls, 0, -1))]));
+            $summary = app(PcapSummary::class)->summarize($path, '203.0.113.10');
+            $this->assertArrayNotHasKey('tls_client_hello_sni', $summary['flow_samples'][0]);
+        } finally {
+            unlink($path);
+        }
+    }
+
+    public function test_capture_summary_and_retention_never_dispatch_ai_without_manual_request(): void
+    {
+        Storage::fake('local');
+        Http::preventStrayRequests();
+        Queue::fake();
+        $event = $this->event();
+        $data = $this->pcap([$this->packet('203.0.113.10', '1.1.1.1', 2)]);
+        $path = 'packet-evidence/'.Str::uuid().'.pcap';
+        Storage::disk('local')->put($path, $data);
+        $capture = PacketCapture::create(['event_id' => $event->id, 'node_id' => $event->node_id, 'ip' => '203.0.113.10', 'status' => 'uploaded', 'path' => $path, 'sha256' => hash('sha256', $data), 'created_at' => now()->subDays(8)]);
+        (new SummarizeCapture($capture->id))->handle();
+        $this->assertSame(1, $capture->fresh()->summary['matched_packets']);
+        $this->artisan('monitor:evidence')->assertSuccessful();
+        $this->assertSame('expired', $capture->fresh()->status);
+        Storage::disk('local')->assertMissing($path);
+        Queue::assertNotPushed(AnalyzeEvidence::class);
+        Http::assertNothingSent();
+    }
+
+    public function test_historical_grouping_is_repeatable_and_preserves_rule_evidence(): void
+    {
+        $event = $this->event();
+        foreach ([0, 10, 20] as $index => $minutes) {
+            Alert::create(['dedup_key' => hash('sha256', 'history-'.$index), 'node_id' => $event->node_id, 'ip_asset_id' => $event->ip_asset_id, 'kind' => 'horizontal_scan', 'severity' => 'medium', 'title' => 'history', 'evidence' => ['sample' => ['ports' => [443]]], 'occurrences' => 20, 'first_seen_at' => now()->subMinutes(30)->addMinutes($minutes), 'last_seen_at' => now()->subMinutes(25)->addMinutes($minutes)]);
+        }
+        $this->artisan('monitor:group-events')->assertSuccessful();
+        $this->artisan('monitor:group-events')->assertSuccessful();
+        $this->assertDatabaseCount('monitor_events', 1);
+        $this->assertSame(61, $event->fresh()->occurrences);
+        $this->assertSame(0, Alert::whereNull('event_id')->count());
+        $this->assertSame([443], Alert::first()->evidence['sample']['ports']);
+    }
+
+    public function test_ai_failure_is_not_automatically_retried(): void
+    {
+        Http::preventStrayRequests();
+        $event = $this->event();
+        $capture = PacketCapture::create(['event_id' => $event->id, 'node_id' => $event->node_id, 'ip' => '203.0.113.10', 'status' => 'expired']);
+        $analysis = AiAnalysis::create(['event_id' => $event->id, 'capture_id' => $capture->id, 'requested_by' => 1, 'config_snapshot' => []]);
+        $job = new AnalyzeEvidence($analysis->id);
+        $job->handle();
+        $job->handle();
+        $this->assertSame('failed', $analysis->fresh()->status);
+        Http::assertNothingSent();
+    }
+}

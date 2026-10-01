@@ -43,6 +43,11 @@ services:
   scheduler:
     <<: *app
     command: ["php", "artisan", "schedule:work"]
+  ai-queue:
+    <<: *app
+    mem_limit: 512m
+    command: ["php", "artisan", "queue:work", "--queue=evidence,ai", "--sleep=2", "--tries=1", "--timeout=110", "--memory=256", "--max-jobs=100"]
+    networks: [backend, notifications]
   web:
     image: vm-monitor-web:local
     build:

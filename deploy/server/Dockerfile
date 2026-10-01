@@ -20,3 +20,5 @@ CMD ["php-fpm"]
 FROM nginx:1.28-alpine AS web
 COPY --from=app /var/www/html/public /var/www/html/public
 COPY deploy/server/nginx.conf /etc/nginx/conf.d/default.conf
+COPY deploy/server/web-temp.sh /docker-entrypoint.d/40-monitor-temp.sh
+RUN chmod +x /docker-entrypoint.d/40-monitor-temp.sh
