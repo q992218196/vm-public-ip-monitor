@@ -2,12 +2,14 @@
 
 namespace app\admin\controller;
 
+use app\common\service\EventReviewReport;
+
 class EventEvidence extends Monitor
 {
     private function query()
     {
         $q = $this->db()->table('monitor_events')->alias('e')->leftJoin('ip_assets i', 'i.id=e.ip_asset_id')->leftJoin('nodes n', 'n.id=e.node_id');
-        foreach (['status', 'severity', 'node_id'] as $key) {
+        foreach (['status', 'severity', 'node_id', 'assessment_category'] as $key) {
             $value = (string) $this->request->get($key, '');
             if ($value !== '') {
                 $q->where('e.'.$key, $value);
@@ -30,7 +32,7 @@ class EventEvidence extends Monitor
         $sort = match ((string) $this->request->get('sort')) {
             'ip' => 'i.ip', 'title' => 'e.title', 'severity' => 'e.severity', 'status' => 'e.status', 'occurrences' => 'e.occurrences', default => 'e.last_seen_at',
         };
-        $rows = $this->query()->field('e.id,e.title,e.severity,e.status,e.kinds,e.occurrences,e.first_seen_at,e.last_seen_at,i.ip,n.name AS node_name')
+        $rows = $this->query()->field('e.id,e.title,e.severity,e.status,e.assessment_category,e.kinds,e.occurrences,e.first_seen_at,e.last_seen_at,i.ip,n.name AS node_name')
             ->order($sort, $this->request->get('direction') === 'asc' ? 'asc' : 'desc')->order('e.id', 'desc')->page(max(1, (int) $this->request->get('page', 1)), max(10, min(500, (int) $this->request->get('limit', 25))))->select()->toArray();
         foreach ($rows as &$row) {
             $row['kinds'] = $this->decode($row['kinds']);
@@ -50,7 +52,7 @@ class EventEvidence extends Monitor
         if (! $event) {
             $this->error('事件不存在', [], 404);
         }
-        foreach (['kinds', 'quality', 'node_health'] as $key) {
+        foreach (['kinds', 'quality', 'node_health', 'behavior', 'review_context'] as $key) {
             $event[$key] = $this->decode($event[$key]);
         }
         unset($event['active_key']);
@@ -84,6 +86,25 @@ class EventEvidence extends Monitor
         $this->success('', $this->progressData($id));
     }
 
+    public function reviewReport(): void
+    {
+        $id = (int) $this->request->get('id');
+        $event = $this->db()->table('monitor_events')->alias('e')->leftJoin('ip_assets i', 'i.id=e.ip_asset_id')->leftJoin('nodes n', 'n.id=e.node_id')->field('e.*,i.ip,n.name AS node_name')->where('e.id', $id)->find();
+        if (! $event) {
+            $this->error('事件不存在', [], 404);
+        }
+        $ids = $this->db()->table('alerts')->where('event_id', $id)->group('kind')->column('MAX(id) AS id');
+        $alerts = $ids ? $this->db()->table('alerts')->whereIn('id', $ids)->field('kind,title,severity,status,evidence,last_seen_at')->limit(20)->select()->toArray() : [];
+        $metrics = [];
+        if ($event['ip_asset_id']) {
+            $cutoff = max(strtotime($event['first_seen_at'].' UTC'), strtotime($event['last_seen_at'].' UTC') - 3600);
+            $metrics = $this->db()->table('traffic_metrics')->where('node_id', $event['node_id'])->where('ip_asset_id', $event['ip_asset_id'])
+                ->where('window_end', '>=', gmdate('Y-m-d H:i:s', $cutoff))->where('window_end', '<=', $event['last_seen_at'])
+                ->field('window_start,window_end,tcp_attempts,bytes_in,bytes_out,evidence')->order('window_end', 'desc')->limit(121)->select()->toArray();
+        }
+        $this->success('', ['report' => EventReviewReport::build($event, $alerts, $metrics)]);
+    }
+
     public function review(): void
     {
         $this->writable();
@@ -93,8 +114,18 @@ class EventEvidence extends Monitor
         if (! $ids || count($ids) > 500 || ! in_array($status, ['open', 'acknowledged', 'normal', 'resolved'], true)) {
             $this->error('处理参数无效');
         }
+        if (in_array($status, ['normal', 'resolved'], true) && trim($notes) === '') {
+            $this->error('请填写业务核查依据或处理说明');
+        }
         $this->db()->transaction(function () use ($ids, $status, $notes) {
-            $this->db()->table('monitor_events')->whereIn('id', $ids)->update(['status' => $status, 'review_notes' => $notes, 'updated_at' => gmdate('Y-m-d H:i:s')]);
+            $events = $this->db()->table('monitor_events')->whereIn('id', $ids)->order('id')->lock(true)->select()->toArray();
+            foreach ($events as $event) {
+                $data = ['status' => $status, 'review_notes' => $notes, 'reopen_reason' => null, 'updated_at' => gmdate('Y-m-d H:i:s')];
+                if (in_array($status, ['normal', 'resolved'], true)) {
+                    $data['review_context'] = $event['behavior'] ?: '{}';
+                }
+                $this->db()->table('monitor_events')->where('id', $event['id'])->update($data);
+            }
             $this->db()->table('alerts')->whereIn('event_id', $ids)->update(['status' => in_array($status, ['normal', 'resolved'], true) ? 'resolved' : $status, 'resolution' => $notes, 'updated_at' => gmdate('Y-m-d H:i:s')]);
             $this->audit('events.reviewed', 'MonitorEvent', ['ids' => $ids, 'status' => $status]);
         });
@@ -128,7 +159,7 @@ class EventEvidence extends Monitor
                     $this->db()->table('exclusions')->insert($scope + $values + ['reason' => '管理员审核事件 #'.$id, 'created_at' => $now]);
                 }
             }
-            $this->db()->table('monitor_events')->where('id', $id)->update(['status' => 'normal', 'review_notes' => '当前节点、IP、已命中类型加入 30 天白名单', 'updated_at' => $now]);
+            $this->db()->table('monitor_events')->where('id', $id)->update(['status' => 'normal', 'review_context' => $event['behavior'] ?: '{}', 'reopen_reason' => null, 'review_notes' => '当前节点、IP、已命中类型加入 30 天白名单', 'updated_at' => $now]);
             $this->db()->table('alerts')->where('event_id', $id)->update(['status' => 'resolved', 'resolution' => '事件已加入 30 天白名单', 'updated_at' => $now]);
             $this->audit('event.whitelisted', 'MonitorEvent:'.$id, ['ip' => $ip, 'kinds' => $this->decode($event['kinds'])]);
         });

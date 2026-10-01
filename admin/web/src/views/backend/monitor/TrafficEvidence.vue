@@ -8,6 +8,9 @@
             <el-descriptions-item label="TCP 发起">{{ sample.tcp_attempts ?? '—' }}</el-descriptions-item>
             <el-descriptions-item label="SYN-ACK 回复">{{ sample.synack_replies ?? '未采集' }}</el-descriptions-item>
             <el-descriptions-item label="握手回复比例">{{ replyRatio }}</el-descriptions-item>
+            <el-descriptions-item label="完整握手">{{ sample.completed_handshakes ?? '未采集' }} · {{ completionRatio }}</el-descriptions-item>
+            <el-descriptions-item label="配对 RST">{{ sample.rst_replies ?? '未采集' }}</el-descriptions-item>
+            <el-descriptions-item label="等待至少 3 秒仍无回复">{{ sample.mature_no_reply ?? '未采集' }}（不等于失败）</el-descriptions-item>
             <el-descriptions-item label="目标端口">{{ (sample.ports || []).join('、') || '—' }}</el-descriptions-item>
         </el-descriptions>
         <p>{{ evidence.note }}</p>
@@ -18,6 +21,16 @@
             >
             <el-table-column prop="attempts" label="发起" width="65" />
             <el-table-column prop="synack_replies" label="回复" width="65" />
+            <el-table-column label="握手 / RST" width="115"
+                ><template #default="scope"
+                    >{{ scope.row.completed_handshakes ?? '—' }} / {{ scope.row.rst_replies ?? '—' }}</template
+                ></el-table-column
+            >
+            <el-table-column label="观察跨度" width="100"
+                ><template #default="scope">{{
+                    scope.row.max_observed_span_ms === undefined ? '未采集' : (scope.row.max_observed_span_ms / 1000).toFixed(1) + '秒'
+                }}</template></el-table-column
+            >
             <el-table-column label="载荷 出／入" min-width="150"
                 ><template #default="scope">{{ scope.row.payload_out }} / {{ scope.row.payload_in }} B</template></el-table-column
             >
@@ -45,6 +58,9 @@ const replyRatio = computed(() => {
     const ratio = analysis.value.reply_ratio
     return typeof ratio === 'number' ? (ratio * 100).toFixed(1) + '%' : '不可计算'
 })
+const completionRatio = computed(() =>
+    typeof analysis.value.completion_ratio === 'number' ? (100 * analysis.value.completion_ratio).toFixed(1) + '%' : '不可计算'
+)
 </script>
 <style scoped>
 section p {

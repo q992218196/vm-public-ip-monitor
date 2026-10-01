@@ -56,6 +56,82 @@ func TestProxySuspicionNeedsBidirectionalPeersAndEgressFanout(t *testing.T) {
 func cfg() config.Config {
 	return config.Config{CIDRs: []string{"203.0.113.0/24", "2001:db8::/48"}, MaxIPs: 10, MaxFlows: 1000, MaxReassembly: 10, MaxSites: 20}
 }
+func TestPairedHandshakeResetsAndMatureNoReplyAreWindowBounded(t *testing.T) {
+	for _, addresses := range [][2]string{{"203.0.113.1", "192.0.2.1"}, {"2001:db8::1", "2001:db9::1"}} {
+		now := time.Now()
+		e := New(cfg(), now)
+		vm, peer := addresses[0], addresses[1]
+		send := func(src, dst string, sp, dp uint16, seq, ack uint32, flags byte, second int) {
+			p := frame(src, dst, sp, dp, seq, flags, "")
+			off := 34
+			if netip.MustParseAddr(src).Is6() {
+				off = 54
+			}
+			binary.BigEndian.PutUint32(p[off+8:off+12], ack)
+			e.Process(p, len(p), "a", now.Add(time.Duration(second)*time.Second))
+		}
+		send(vm, peer, 40000, 443, 100, 0, 2, 0)
+		send(peer, vm, 443, 40000, 200, 999, 18, 1)
+		send(peer, vm, 443, 40000, 200, 101, 18, 2)
+		send(vm, peer, 40000, 443, 101, 999, 16, 3)
+		send(vm, peer, 40000, 443, 101, 201, 16, 4)
+		send(vm, peer, 40000, 443, 101, 201, 16, 5)
+		send(peer, vm, 443, 40000, 201, 101, 20, 6)
+		send(peer, vm, 443, 40000, 201, 101, 20, 7)
+		send(vm, peer, 40001, 22, 300, 0, 2, 0)
+		send(vm, peer, 40002, 22, 400, 0, 2, 9)
+		m := e.Snapshot(now.Add(10 * time.Second)).Metrics[0]
+		if m.TCPAttempts != 3 || m.SYNACKReplies != 1 || m.CompletedHandshakes != 1 || m.RSTReplies != 1 || m.MatureAttempts != 2 || m.MatureNoReply != 1 {
+			t.Fatalf("invalid cohort counters: %+v", m)
+		}
+		for _, ep := range m.OutboundEndpoints {
+			if ep.PeerPort == 443 && (ep.MaxObservedSpanMS != 7000 || ep.CompletedHandshakes != 1 || ep.RSTReplies != 1) {
+				t.Fatalf("invalid endpoint: %+v", ep)
+			}
+		}
+		send(peer, vm, 22, 40001, 500, 301, 18, 11)
+		send(vm, peer, 40001, 22, 301, 501, 16, 12)
+		next := e.Snapshot(now.Add(13 * time.Second)).Metrics[0]
+		if next.TCPAttempts != 0 || next.SYNACKReplies != 0 || next.CompletedHandshakes != 0 || next.MatureAttempts != 0 {
+			t.Fatalf("cross-window counters inflated: %+v", next)
+		}
+	}
+}
+func TestPortTargetSamplePrioritizesLargestFanout(t *testing.T) {
+	now := time.Now()
+	e := New(cfg(), now)
+	for i := 1; i <= 12; i++ {
+		for port := 1; port <= i; port++ {
+			p := frame("203.0.113.1", fmt.Sprintf("192.0.2.%d", i), uint16(40000+port), uint16(port), 1, 2, "")
+			e.Process(p, len(p), "a", now)
+		}
+	}
+	m := e.Snapshot(now.Add(30 * time.Second)).Metrics[0]
+	if len(m.PortScanTargets) != 8 || m.PortScanTargets[0].PeerIP != "192.0.2.12" || m.PortScanTargets[0].PortCount != 12 {
+		t.Fatalf("wrong port target samples: %+v", m.PortScanTargets)
+	}
+}
+func BenchmarkTrackedConnections500IPs(b *testing.B) {
+	c := cfg()
+	c.CIDRs = []string{"203.0.0.0/16"}
+	c.MaxIPs = 600
+	c.MaxFlows = 2000
+	now := time.Now()
+	e := New(c, now)
+	packets := make([][]byte, 500)
+	for i := range packets {
+		vm := fmt.Sprintf("203.0.%d.%d", i/250+1, i%250+1)
+		p := frame(vm, "192.0.2.1", 40000, 443, 1, 2, "")
+		e.Process(p, len(p), "a", now)
+		packets[i] = frame(vm, "192.0.2.1", 40000, 443, 2, 16, "")
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		p := packets[i%500]
+		e.Process(p, len(p), "a", now.Add(time.Second))
+	}
+}
 func TestOutboundEvidenceIsBoundedAndNotHostedWebsite(t *testing.T) {
 	now := time.Now()
 	e := New(cfg(), now)
@@ -120,6 +196,9 @@ func frame(src, dst string, sp, dp uint16, seq uint32, flags byte, payload strin
 	binary.BigEndian.PutUint16(p[off:off+2], sp)
 	binary.BigEndian.PutUint16(p[off+2:off+4], dp)
 	binary.BigEndian.PutUint32(p[off+4:off+8], seq)
+	if flags&16 != 0 {
+		binary.BigEndian.PutUint32(p[off+8:off+12], 2)
+	}
 	p[off+12] = 0x50
 	p[off+13] = flags
 	copy(p[off+20:], payload)

@@ -27,6 +27,11 @@
                     ><el-option label="高" value="high" /><el-option label="中" value="medium" /><el-option label="低" value="low"
                 /></el-select>
                 <el-button type="primary" :loading="loading" @click="search">查询</el-button>
+                <el-select v-model="filters.assessment_category" placeholder="全部证据结论" clearable @change="search"
+                    ><el-option label="一般行为提醒" value="behavior_notice" /><el-option label="疑似异常，待复核" value="needs_review" /><el-option
+                        label="强异常证据，优先复核"
+                        value="strong_anomaly"
+                /></el-select>
             </div>
             <div class="columns">
                 <el-popover placement="bottom-end" trigger="click" :width="220"
@@ -56,7 +61,7 @@
                             >{{ scope.row[column.key] || '—' }}</el-button
                         >
                         <el-tag
-                            v-else-if="['severity', 'status'].includes(column.key)"
+                            v-else-if="['severity', 'status', 'assessment_category'].includes(column.key)"
                             :type="color(scope.row[column.key])"
                             class="clickable"
                             @click="filterBy(column.key, scope.row[column.key])"
@@ -98,6 +103,12 @@
                         ><el-descriptions-item label="最后观察">{{ time(detail.event.last_seen_at) }}</el-descriptions-item></el-descriptions
                     >
                     <p>{{ detail.event.review_notes }}</p>
+                    <el-alert
+                        v-if="detail.event.reopen_reason"
+                        :title="'需要重新复核：' + detail.event.reopen_reason"
+                        type="warning"
+                        :closable="false"
+                    />
                     <el-alert :title="qualityText" type="info" :closable="false" />
                     <div v-if="isAdmin" class="actions">
                         <el-button @click="openReview([detail.event.id])">人工审核</el-button
@@ -109,6 +120,14 @@
                         ><el-button type="primary" :loading="capturing" :disabled="!detail.event.ip" @click="capture">申请定向抓包</el-button>
                     </div>
                     <p>抓包只记录申请后的流量：最长 60 秒、32 MiB；同一节点同时采集一个 IP。原始文件可能包含明文请求数据，下载仅限管理员。</p>
+                    <div v-loading="reviewReportLoading">
+                        <EventReviewReport v-if="reviewReport" :report="reviewReport" /><el-alert
+                            v-if="reviewReportError"
+                            :title="reviewReportError"
+                            type="error"
+                            :closable="false"
+                        />
+                    </div>
                     <h3>规则证据</h3>
                     <el-collapse
                         ><el-collapse-item v-for="alert in detail.alerts" :key="alert.id" :name="alert.id" :title="alert.title"
@@ -244,12 +263,16 @@ import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import createAxios from '/@/utils/axios'
 import TrafficEvidence from './TrafficEvidence.vue'
+import EventReviewReport from './EventReviewReport.vue'
 const statuses: Record<string, string> = { open: '待处理', acknowledged: '观察中', normal: '已核查正常', resolved: '已处理' }
 const names: Record<string, string> = {
     ...statuses,
     high: '高',
     medium: '中',
     low: '低',
+    behavior_notice: '一般行为提醒',
+    needs_review: '疑似异常，待复核',
+    strong_anomaly: '强异常证据，优先复核',
     pending: '等待执行',
     leased: '抓包中',
     uploaded: '已留存',
@@ -263,6 +286,7 @@ const columns = [
     { key: 'ip', label: '公网 IP', sort: true, width: 150 },
     { key: 'node_name', label: '观察节点' },
     { key: 'severity', label: '级别', sort: true },
+    { key: 'assessment_category', label: '证据结论', width: 200 },
     { key: 'status', label: '状态', sort: true },
     { key: 'occurrences', label: '触发次数', sort: true },
     { key: 'first_seen_at', label: '首次观察', width: 165 },
@@ -278,7 +302,16 @@ const rows = ref<any[]>([]),
     page = ref(1),
     limit = ref(25),
     exporting = ref(false)
-const filters = reactive({ search: '', ip: '', node_id: '', status: 'open', severity: '', sort: 'last_seen_at', direction: 'desc' })
+const filters = reactive({
+    search: '',
+    ip: '',
+    node_id: '',
+    status: 'open',
+    severity: '',
+    assessment_category: '',
+    sort: 'last_seen_at',
+    direction: 'desc',
+})
 const detailOpen = ref(false),
     detailLoading = ref(false),
     detailError = ref(''),
@@ -299,6 +332,9 @@ const reviewOpen = ref(false),
 const captureReportOpen = ref(false),
     captureReportLoading = ref(false),
     captureReport = ref<any>(null)
+const reviewReport = ref<any>(null),
+    reviewReportLoading = ref(false),
+    reviewReportError = ref('')
 let poll: ReturnType<typeof setTimeout> | undefined
 let generation = 0,
     detailGeneration = 0
@@ -312,9 +348,9 @@ function label(value: string) {
     return names[value] || value
 }
 function color(value: string): 'danger' | 'warning' | 'success' | 'info' {
-    return ['high', 'open', 'failed'].includes(value)
+    return ['high', 'open', 'failed', 'strong_anomaly'].includes(value)
         ? 'danger'
-        : ['medium', 'acknowledged', 'running'].includes(value)
+        : ['medium', 'acknowledged', 'running', 'needs_review'].includes(value)
           ? 'warning'
           : ['normal', 'resolved', 'completed', 'uploaded'].includes(value)
             ? 'success'
@@ -362,11 +398,14 @@ function filterBy(key: string, value: string) {
     else if (key === 'ip') filters.ip = value
     else if (key === 'severity') filters.severity = value
     else if (key === 'status') filters.status = value
+    else if (key === 'assessment_category') filters.assessment_category = value
     search()
 }
 async function openDetail(id: number) {
     detailId.value = id
     detail.value = null
+    reviewReport.value = null
+    reviewReportError.value = ''
     detailOpen.value = true
     detailLoading.value = true
     detailError.value = ''
@@ -381,6 +420,7 @@ async function refreshDetail() {
         const r = await api('detail', { id })
         if (g !== detailGeneration || !detailOpen.value || detailId.value !== id) return
         detail.value = r.data
+        loadReviewReport(id, g)
         if (
             r.data.captures.some((c: any) => ['pending', 'leased'].includes(c.status)) ||
             r.data.analyses.some((a: any) => ['pending', 'running'].includes(a.status))
@@ -412,6 +452,18 @@ function closeDetail() {
     detailGeneration++
     detailId.value = 0
     detail.value = null
+    reviewReportLoading.value = false
+}
+async function loadReviewReport(id: number, g: number) {
+    reviewReportLoading.value = true
+    try {
+        const r = await api('reviewReport', { id })
+        if (g === detailGeneration && detailOpen.value && id === detailId.value) reviewReport.value = r.data.report
+    } catch {
+        if (g === detailGeneration && detailOpen.value) reviewReportError.value = '审核报告加载失败；规则和抓包证据仍可查看'
+    } finally {
+        if (g === detailGeneration) reviewReportLoading.value = false
+    }
 }
 function openReview(ids: number[]) {
     reviewIds.value = ids

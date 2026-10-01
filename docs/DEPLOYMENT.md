@@ -56,8 +56,8 @@ docker compose -f compose.yml -f compose.buildadmin.yml --profile agent-build ru
 docker compose -f compose.yml -f compose.buildadmin.yml stop queue scheduler ai-queue
 docker compose -f compose.yml -f compose.buildadmin.yml run --rm --no-deps app php artisan migrate --force
 docker compose -f compose.yml -f compose.buildadmin.yml run --rm --no-deps app php artisan db:seed --class=MonitorSeeder --force
-docker compose -f compose.yml -f compose.buildadmin.yml run --rm --no-deps app php artisan monitor:reassess-scans
 docker compose -f compose.yml -f compose.buildadmin.yml run --rm --no-deps app php artisan monitor:group-events
+docker compose -f compose.yml -f compose.buildadmin.yml run --rm --no-deps app php artisan monitor:reassess-connections
 
 docker compose -f compose.yml -f compose.buildadmin.yml up -d --no-deps --force-recreate app web queue scheduler ai-queue buildadmin-app buildadmin-web
 docker compose -f compose.yml -f compose.buildadmin.yml exec buildadmin-app php think migrate:run
@@ -66,7 +66,7 @@ docker compose -f compose.yml -f compose.buildadmin.yml --profile https up -d --
 
 数据库迁移保留网站资产、流量记录、其他告警和 BuildAdmin 账号；迁移会删除旧的“发现新网站线索”告警，并为白名单增加按告警类型的范围和不需要 CIDR 的节点健康范围。必须先执行迁移，再使用新版白名单。重新运行 `agent-builder` 会发布安装、卸载脚本及 SHA-256 清单；`buildadmin-web` 也必须重建才能提供卸载脚本下载。重建 PHP 应用时 Web 容器也会重建，避免连接到已更换的容器地址。升级后检查：
 
-本版采集服务没有管理界面、管理账号模型或账号导入工具。历史安装中不再使用的账号／会话表保留原样，新安装不会创建这些表；BuildAdmin 账号独立存于 MySQL。采集服务继续负责上报、异步分析和任务调度。`monitor:reassess-scans` 分批重新评估未处理横向扫描告警，保留已确认和已解决记录。升级截图 worker 后，对需要新报告的站点点击“验证／截图”；历史报告不会凭空补出新证据。
+本版采集服务没有管理界面、管理账号模型或账号导入工具。历史安装中不再使用的账号／会话表保留原样，新安装不会创建这些表；BuildAdmin 账号独立存于 MySQL。采集服务继续负责上报、异步分析和任务调度。`monitor:reassess-connections` 分批重新评估未处理连接／带宽告警及事件，保留人工审核结果。升级截图 worker 后，对需要新报告的站点点击“验证／截图”；历史报告不会凭空补出新证据。
 
 ```sh
 docker compose -f compose.yml -f compose.buildadmin.yml --profile https ps
@@ -167,7 +167,7 @@ docker compose -f compose.yml -f compose.buildadmin.yml exec -T postgres pg_dump
 
 ## 8. 事件、PCAP 留存与手动 DeepSeek 分析
 
-先按第 3 节升级主控，再在“采集节点”下发 Agent **0.6.0**。新版保留现有 `agent.json`；没有新增配置项时自动使用下面的默认值。刷新登录或重新登录后，告警中心使用新的事件页面，新增“AI 分析设置”菜单。无需安装 VM 内的组件。
+先按第 3 节升级主控，再在“采集节点”下发 Agent **1.0.0**。新版保留现有 `agent.json`；没有新增配置项时自动使用下面的默认值。刷新登录或重新登录后，告警中心使用事件页面及“AI 分析设置”菜单。无需安装 VM 内的组件。
 
 同一观察节点、公网 IP 的持续行为合并为事件，不再每十分钟新建一条。不同规则保留独立证据；超过 30 分钟没有命中，再出现时建立新事件。人工标记“已核查正常”或“已处理”后，同类行为仅增加计数；新类型或级别上升可重新打开事件并记录原因。`monitor:group-events` 为历史告警建立事件关联，不调用 AI、不补造历史抓包。历史记录仍保留。
 
@@ -196,3 +196,27 @@ DeepSeek 的官方 [Files API](https://api-docs.deepseek.com/guides/files_api/) 
 `ai-queue` 使用独立队列顺序处理本地证据解析和 AI 任务，避免阻塞采集分析队列。AI 请求采用非思考模式，输出上限 4096 tokens，连接超时 10 秒、请求超时 90 秒，无自动 HTTP 重试；同一次任务不会重复调用。失败可能已产生供应商费用，需要再次分析时由管理员重新申请。后台报告保留发送的文字证据、文件哈希、模型、分析结果和用量，内容作为纯文本显示，不自动处理告警、封禁或修改白名单。
 
 故障排查：抓包任务过期时，核对节点版本、启用状态、`evidence_enabled`、节点日志和数据分区余量；文件已留存但摘要未生成时，检查 `ai-queue` 和 `scheduler`。AI 分析一直等待时，也检查这两个服务；失败时后台显示错误，不要用 `queue:retry all` 试图重新收费调用，直接在后台人工重新申请。原始文件过期后不能再申请 AI 分析，已生成的报告仍可查看。
+
+## 9. 1.0 证据审核版的使用与边界
+
+主控先升级，再更新 Agent 到 1.0.0；旧 Agent 可以继续上报，缺少新统计时标为证据不足，不补造握手、时长或请求内容。第 3 节的 `monitor:reassess-connections` 对未处理的六类连接／带宽规则重新分级，同时刷新未处理事件的列表级别；已核查正常、观察中和已处理结果保留。旧命令 `monitor:reassess-scans` 是同一策略的兼容入口。迁移新增审核基线、行为变化原因及证据结论索引，不需要清空数据库或修改 Agent 配置。
+
+告警中心新增“证据结论”列，可点击过滤，或用下拉框选择：
+
+| 结论 | 使用条件 |
+| --- | --- |
+| 一般行为提醒 | 只有连接数量、单目标频率或带宽较高，没有更强的连接异常证据 |
+| 疑似异常，待复核 | 多目标／多端口活动、认证服务重复连接或较多 RST，需要核对业务；旧版本或质量不足也不直接标高 |
+| 强异常证据，优先复核 | 横向／端口扫描在规则观察范围内至少两个采集窗口持续扩散，并出现多数配对 RST、较少完整握手和可接受的采集质量；仍不等于确认攻击 |
+
+规则配置的级别是自动评估上限，可以压低级别，不能仅凭把规则设为“高”绕过证据要求。默认高风险条件同时要求每窗口至少 50 次发起、至少 20 次已等待 3 秒的发起、至少 50% 配对 RST、最多 10% 完整握手；横向至少 50 个目标、纵向至少 10 个端口，且达到规则阈值。内核丢弃／捕获比不超过 1%、解码跳过不超过 10%、状态丢弃为零且目标计数未封顶。这些是可解释的行为筛选条件，不是经过生产标注验证的攻击概率；客户授权扫描、服务拒绝和故障也可能符合，应保留人工核查。
+
+点击“详情与证据”后，自动加载本地 IP 审核报告，无需 AI：综合证据结论、判断理由、正常业务解释、主要目标和端口、完整握手／RST、双向载荷、可见请求线索、数量趋势、采集质量、证据缺口及核实建议。报告只查询该节点、该 IP、事件区间内最后一小时最多 120 个流量窗口，目标汇总最多 32 条、多端口目标最多 16 条；不把报告塞进列表、分页或批量处理请求。窗口数据默认保存 7 天，`MONITOR_METRICS_DAYS` 控制保存时间；过期后报告会说明缺失，不能凭规则快照补回趋势。可以导出含结构化证据的文本审核报告，供内部或客户复核。
+
+Agent 复用现有 TCP 状态表，SYN-ACK 和最终 ACK 都核对序号，RST 按观察到的配对连接计数；同窗口重复报文不重复计握手／拒绝。计数限定为本窗口发起的连接，跨窗口到达的回复不混入新窗口发起比例。已等待至少 3 秒仍没有观察到回复，可能是防火墙、漏采或单向可见性，不等于失败。TCP 状态最多跟踪 60 秒，成熟样本计数是保守下界。每窗口最多上报 8 个目标连接样本，以及按端口数排序的 8 个多端口目标，每目标最多 32 个端口；多余部分标明截断。观察跨度仅是发起后前 60 秒内实际看到的报文跨度，不是整个连接寿命。载荷字节来自捕获到的数据，包含可能的重传；TLS 域名和 HTTP 首个请求仍是有限线索，不代表 VM 部署了对应的网站。
+
+新增字段有固定数量上限，内存估算已计入配置校验；默认软／硬预算继续是 2048／4096 MiB，不扩大抓包缓冲、证据磁盘或 PCAP 上传限速。实际 CPU 与内存仍取决于流量和活跃连接，需要用节点健康页的 RSS、丢弃及状态限额观察。不会为了取证主动攻击目标或在 VM 内安装组件。
+
+标记“已核查正常”或“已处理”必须填写依据，并保存当时行为基线。同类型重复活动只累加；新增检测类型、级别上升会重新复核。同规则中，新增认证／管理端口、明显扩大端口范围或新增更强异常证据，连续两个相隔超过 5 秒的新窗口出现时也可重新打开，详情说明原因。随机更换目标 IP 不会单独触发重新审核，端口样本不完整时不据此比较端口变化。补传的旧窗口不会覆盖较新的规则证据或仅凭旧级别重新打开事件。30 天白名单仍按节点、IP、类型限定；白名单期间相应规则不触发事件，新类型仍独立检测。
+
+建议审核顺序：先看“强异常证据”，再核查“疑似异常”；纯数量提醒可以结合客户申报业务处理。无法判断时先申请定向 PCAP，再看本地抓包分析，需要辅助意见才手动申请 DeepSeek。AI 设置、调用条件、费用与保存上限继续按第 8 节执行，AI 不自动审核、不自动封禁。

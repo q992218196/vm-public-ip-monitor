@@ -43,9 +43,20 @@ class IngestController extends Controller
             'metrics.*.port_samples_truncated' => 'sometimes|boolean', 'metrics.*.endpoint_samples_truncated' => 'sometimes|boolean',
             'metrics.*.cardinality_capped' => 'required|boolean',
             'metrics.*.synack_replies' => 'sometimes|integer|min:0|max:1000000000000000',
+            'metrics.*.connection_stats_version' => 'sometimes|integer|in:1',
+            ...collect(['completed_handshakes', 'rst_replies', 'mature_attempts', 'mature_no_reply'])->mapWithKeys(fn ($f) => ["metrics.*.$f" => 'sometimes|integer|min:0|max:1000000000000000'])->all(),
+            'metrics.*.port_scan_targets' => 'sometimes|array|max:8',
+            'metrics.*.port_scan_targets.*' => 'array:peer_ip,port_count,ports,truncated',
+            'metrics.*.port_scan_targets.*.peer_ip' => 'required|ip',
+            'metrics.*.port_scan_targets.*.port_count' => 'required|integer|min:1|max:256',
+            'metrics.*.port_scan_targets.*.ports' => 'required|array|max:32',
+            'metrics.*.port_scan_targets.*.ports.*' => 'integer|min:1|max:65535',
+            'metrics.*.port_scan_targets.*.truncated' => 'required|boolean',
             'metrics.*.outbound_samples_truncated' => 'sometimes|boolean',
             'metrics.*.outbound_endpoints' => 'sometimes|array|max:8',
-            'metrics.*.outbound_endpoints.*' => 'array:peer_ip,peer_port,attempts,synack_replies,payload_out,payload_in,scheme,host,http_method,http_path,query_keys',
+            'metrics.*.outbound_endpoints.*' => 'array:peer_ip,peer_port,attempts,synack_replies,payload_out,payload_in,scheme,host,http_method,http_path,query_keys,completed_handshakes,rst_replies,max_observed_span_ms',
+            ...collect(['completed_handshakes', 'rst_replies'])->mapWithKeys(fn ($f) => ["metrics.*.outbound_endpoints.*.$f" => 'sometimes|integer|min:0|max:1000000000000000'])->all(),
+            'metrics.*.outbound_endpoints.*.max_observed_span_ms' => 'sometimes|integer|min:0|max:60000',
             'metrics.*.outbound_endpoints.*.peer_ip' => 'required|ip',
             'metrics.*.outbound_endpoints.*.peer_port' => 'required|integer|min:1|max:65535',
             'metrics.*.outbound_endpoints.*.attempts' => 'required|integer|min:0|max:1000000000000000',
@@ -104,6 +115,24 @@ class IngestController extends Controller
             }$health[$f] = $n;
         }
         $v['health'] = $health + ['version' => $v['health']['version'], 'interfaces' => $v['health']['interfaces'] ?? [], 'update_error' => $v['health']['update_error'] ?? null];
+        foreach ($v['metrics'] as $index => $metric) {
+            if (($metric['connection_stats_version'] ?? 0) !== 1) {
+                continue;
+            }
+            foreach (['completed_handshakes', 'rst_replies', 'mature_attempts', 'mature_no_reply', 'synack_replies'] as $counter) {
+                if (! isset($metric[$counter]) || $metric[$counter] > $metric['tcp_attempts']) {
+                    throw ValidationException::withMessages(["metrics.$index.$counter" => '新版配对统计缺失或超过本窗口发起数']);
+                }
+            }
+            if ($metric['completed_handshakes'] > $metric['synack_replies'] || $metric['mature_no_reply'] > $metric['mature_attempts']) {
+                throw ValidationException::withMessages(["metrics.$index.completed_handshakes" => '配对统计不一致']);
+            }
+            foreach ($metric['outbound_endpoints'] ?? [] as $endpoint) {
+                if (($endpoint['completed_handshakes'] ?? 0) > ($endpoint['synack_replies'] ?? 0) || max($endpoint['completed_handshakes'] ?? 0, $endpoint['rst_replies'] ?? 0, $endpoint['synack_replies'] ?? 0) > $endpoint['attempts']) {
+                    throw ValidationException::withMessages(["metrics.$index.outbound_endpoints" => '目标配对统计不一致']);
+                }
+            }
+        }
         // A durable DB inbox is the acknowledgement boundary. The scheduler retries
         // undispatched rows after crashes / Redis outages; no event is acked in RAM.
         $duplicate = DB::transaction(function () use ($node, $v, $start, $end) {

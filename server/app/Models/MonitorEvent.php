@@ -10,6 +10,6 @@ class MonitorEvent extends Model
 
     protected function casts(): array
     {
-        return ['kinds' => 'array', 'quality' => 'array', 'first_seen_at' => 'datetime', 'last_seen_at' => 'datetime'];
+        return ['kinds' => 'array', 'quality' => 'array', 'behavior' => 'array', 'review_context' => 'array', 'first_seen_at' => 'datetime', 'last_seen_at' => 'datetime'];
     }
 }

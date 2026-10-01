@@ -120,6 +120,30 @@ class MonitorTest extends TestCase
         $this->assertDatabaseHas('alerts', ['kind' => 'tcp_connection_burst']);
     }
 
+    public function test_new_agent_counters_are_validated_and_window_quality_is_saved_with_evidence(): void
+    {
+        $this->seed(MonitorSeeder::class);
+        $node = $this->node();
+        $payload = $this->payload();
+        $payload['health'] = ['version' => '1.0.0', 'captured' => 10000, 'kernel_drops' => 0, 'state_dropped' => 0, 'decode_skipped' => 0];
+        $payload['metrics'][0] += ['connection_stats_version' => 1, 'synack_replies' => 100, 'completed_handshakes' => 90, 'rst_replies' => 10, 'mature_attempts' => 110, 'mature_no_reply' => 10,
+            'port_scan_targets' => [['peer_ip' => '192.0.2.1', 'port_count' => 2, 'ports' => [22, 443], 'truncated' => false]]];
+        $invalid = $payload;
+        $invalid['metrics'][0]['completed_handshakes'] = 101;
+        $this->upload($node, $invalid)->assertUnprocessable();
+        $invalid = $payload;
+        unset($invalid['metrics'][0]['mature_no_reply']);
+        $this->upload($node, $invalid)->assertUnprocessable();
+        $this->upload($node, $payload)->assertOk();
+        ProcessBatch::dispatchSync(Batch::firstOrFail()->id);
+        $alert = Alert::where('kind', 'horizontal_scan')->firstOrFail();
+        $this->assertSame('medium', $alert->severity);
+        $this->assertSame('paired_transport', $alert->evidence['confidence']);
+        $this->assertSame(10000, $alert->evidence['sample']['capture_quality']['captured']);
+        $this->assertSame([22, 443], $alert->evidence['sample']['port_scan_targets'][0]['ports']);
+        $this->assertSame('needs_review', $alert->assessment_category);
+    }
+
     public function test_horizontal_scan_with_many_replied_bidirectional_connections_is_review_level(): void
     {
         $this->seed(MonitorSeeder::class);
@@ -135,11 +159,11 @@ class MonitorTest extends TestCase
         ProcessBatch::dispatchSync(Batch::first()->id);
         $alert = Alert::where('kind', 'horizontal_scan')->firstOrFail();
         $this->assertSame('medium', $alert->severity);
-        $this->assertSame('bidirectional_candidate', $alert->evidence['confidence']);
+        $this->assertSame('limited_behavior', $alert->evidence['confidence']);
         $this->assertSame(100, $alert->evidence['sample']['synack_replies']);
     }
 
-    public function test_horizontal_scan_without_replies_keeps_high_severity(): void
+    public function test_horizontal_scan_without_paired_evidence_requires_review(): void
     {
         $this->seed(MonitorSeeder::class);
         $node = $this->node();
@@ -147,7 +171,7 @@ class MonitorTest extends TestCase
         $payload['metrics'][0]['synack_replies'] = 0;
         $this->upload($node, $payload)->assertOk();
         ProcessBatch::dispatchSync(Batch::first()->id);
-        $this->assertSame('high', Alert::where('kind', 'horizontal_scan')->firstOrFail()->severity);
+        $this->assertSame('medium', Alert::where('kind', 'horizontal_scan')->firstOrFail()->severity);
     }
 
     public function test_replied_web_fanout_with_hotspot_is_not_high_scan_and_can_be_reassessed(): void
@@ -164,8 +188,8 @@ class MonitorTest extends TestCase
             ProcessBatch::dispatchSync(Batch::where('batch_id', $payload['batch_id'])->firstOrFail()->id);
             $alert = Alert::where('kind', 'horizontal_scan')->firstOrFail();
             $this->assertSame('medium', $alert->severity);
-            $this->assertSame('多目标 Web 端口连接（待复核）', $alert->title);
-            $this->assertGreaterThan(0.99, $alert->evidence['connection_analysis']['reply_ratio']);
+            $this->assertSame('多目标连接（待复核）', $alert->title);
+            $this->assertNull($alert->evidence['connection_analysis']['completion_ratio']);
         }
         $this->assertDatabaseHas('alerts', ['kind' => 'single_target_attempts']);
         $alert->update(['severity' => 'high']);
@@ -180,8 +204,8 @@ class MonitorTest extends TestCase
     public function test_inconsistent_handshake_counts_do_not_imply_success(): void
     {
         $assessment = app(ScanAssessment::class)->assess(['tcp_attempts' => 100, 'synack_replies' => 101, 'max_ports_per_target' => 1]);
-        $this->assertSame('high', $assessment['severity']);
-        $this->assertNull($assessment['connection_analysis']['reply_ratio']);
+        $this->assertSame('medium', $assessment['severity']);
+        $this->assertNull($assessment['connection_analysis']['completion_ratio']);
     }
 
     public function test_endpoint_evidence_is_preserved_and_large_samples_rejected(): void
@@ -205,7 +229,7 @@ class MonitorTest extends TestCase
         $this->assertFalse(Schema::hasTable('password_reset_tokens'));
     }
 
-    public function test_sparse_single_port_fanout_with_few_replies_remains_high_priority(): void
+    public function test_sparse_single_port_fanout_does_not_imply_attack_from_missing_replies(): void
     {
         $this->seed(MonitorSeeder::class);
         $node = $this->node();
@@ -219,9 +243,9 @@ class MonitorTest extends TestCase
         $this->upload($node, $payload)->assertOk();
         ProcessBatch::dispatchSync(Batch::firstOrFail()->id);
         $alert = Alert::where('kind', 'horizontal_scan')->firstOrFail();
-        $this->assertSame('high', $alert->severity);
-        $this->assertSame('behavioral', $alert->evidence['confidence']);
-        $this->assertStringContainsString('13/103', $alert->evidence['note']);
+        $this->assertSame('medium', $alert->severity);
+        $this->assertSame('limited_behavior', $alert->evidence['confidence']);
+        $this->assertSame(13, $alert->evidence['connection_analysis']['synack_replies']);
     }
 
     public function test_scan_only_exclusion_preserves_other_alert_types_and_metrics(): void

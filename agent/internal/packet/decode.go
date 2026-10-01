@@ -9,6 +9,7 @@ type Packet struct {
 	Src, Dst         netip.Addr
 	SrcPort, DstPort uint16
 	Seq              uint32
+	AckSeq           uint32
 	SYN, ACK, RST    bool
 	Protocol         uint8
 	Payload          []byte
@@ -91,6 +92,7 @@ func Decode(b []byte, wireLen int) (p Packet, ok bool) {
 		p.SrcPort = binary.BigEndian.Uint16(b[off : off+2])
 		p.DstPort = binary.BigEndian.Uint16(b[off+2 : off+4])
 		p.Seq = binary.BigEndian.Uint32(b[off+4 : off+8])
+		p.AckSeq = binary.BigEndian.Uint32(b[off+8 : off+12])
 		p.SYN = b[off+13]&2 != 0
 		p.ACK = b[off+13]&16 != 0
 		p.RST = b[off+13]&4 != 0

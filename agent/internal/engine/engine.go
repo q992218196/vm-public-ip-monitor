@@ -38,8 +38,11 @@ type seen struct {
 	at    time.Time
 }
 type synState struct {
-	at        time.Time
-	responded bool
+	at           time.Time
+	responded    bool
+	completed    bool
+	reset        bool
+	seq, peerSeq uint32
 }
 type vpnKey struct {
 	VM, Peer            netip.Addr
@@ -168,10 +171,11 @@ func (e *Engine) Process(b []byte, wireLen int, iface string, now time.Time) {
 		return
 	}
 	k := flowKey{p.Src, p.Dst, p.SrcPort, p.DstPort}
-	if dst && p.SYN && p.ACK {
+	if dst && p.SYN && p.ACK && !p.RST {
 		reverse := flowKey{p.Dst, p.Src, p.DstPort, p.SrcPort}
-		if attempt, ok := e.syns[reverse]; ok && !attempt.responded && now.Sub(attempt.at) < 60*time.Second {
+		if attempt, ok := e.syns[reverse]; ok && !attempt.responded && p.AckSeq == attempt.seq+1 && now.Sub(attempt.at) < 60*time.Second {
 			attempt.responded = true
+			attempt.peerSeq = p.Seq
 			e.syns[reverse] = attempt
 			if s := e.state(p.Dst); s != nil && !attempt.at.Before(e.start) {
 				s.m.SYNACKReplies++
@@ -181,15 +185,15 @@ func (e *Engine) Process(b []byte, wireLen int, iface string, now time.Time) {
 			}
 		}
 	}
-	if src && p.SYN && !p.ACK {
-		if attempt, ok := e.syns[k]; ok && now.Sub(attempt.at) < 60*time.Second {
+	if src && p.SYN && !p.ACK && !p.RST {
+		if attempt, ok := e.syns[k]; ok && attempt.seq == p.Seq && now.Sub(attempt.at) < 60*time.Second {
 			return
 		}
-		if len(e.syns) >= e.c.MaxFlows {
+		if _, exists := e.syns[k]; !exists && len(e.syns) >= e.c.MaxFlows {
 			e.health.StateDropped++
 			return
 		}
-		e.syns[k] = synState{at: now}
+		e.syns[k] = synState{at: now, seq: p.Seq}
 		s := e.state(p.Src)
 		if s == nil {
 			return
@@ -237,6 +241,16 @@ func (e *Engine) Process(b []byte, wireLen int, iface string, now time.Time) {
 	}
 	if endpoint != nil {
 		endpoint.PayloadOut += uint64(len(p.Payload))
+		attempt := e.syns[k]
+		if p.ACK && !p.SYN && !p.RST && attempt.responded && !attempt.completed && p.AckSeq == attempt.peerSeq+1 && p.Seq == attempt.seq+1 {
+			attempt.completed = true
+			e.syns[k] = attempt
+			if !attempt.at.Before(e.start) {
+				e.ips[p.Src].m.CompletedHandshakes++
+				endpoint.CompletedHandshakes++
+			}
+		}
+		endpoint.MaxObservedSpanMS = max(endpoint.MaxObservedSpanMS, uint64(max(0, now.Sub(attempt.at).Milliseconds())))
 	}
 	inboundReply := false
 	if dst {
@@ -246,6 +260,15 @@ func (e *Engine) Process(b []byte, wireLen int, iface string, now time.Time) {
 			if s := e.state(p.Dst); s != nil {
 				if reply := e.endpoint(s, p.Src, p.SrcPort); reply != nil {
 					reply.PayloadIn += uint64(len(p.Payload))
+					reply.MaxObservedSpanMS = max(reply.MaxObservedSpanMS, uint64(max(0, now.Sub(attempt.at).Milliseconds())))
+					if p.RST && !attempt.reset && (attempt.completed || (p.ACK && p.AckSeq == attempt.seq+1)) {
+						attempt.reset = true
+						e.syns[reverse] = attempt
+						if !attempt.at.Before(e.start) {
+							s.m.RSTReplies++
+							reply.RSTReplies++
+						}
+					}
 				}
 			}
 		}
@@ -482,7 +505,18 @@ func (e *Engine) Snapshot(now time.Time) wire.Batch {
 		return b.Proxies[i].IP < b.Proxies[j].IP
 	})
 	b.Health = e.health
+	for key, attempt := range e.syns {
+		if !attempt.at.Before(e.start) && now.Sub(attempt.at) >= 3*time.Second {
+			if s := e.ips[key.Src]; s != nil {
+				s.m.MatureAttempts++
+				if !attempt.responded && !attempt.reset {
+					s.m.MatureNoReply++
+				}
+			}
+		}
+	}
 	for _, s := range e.ips {
+		s.m.ConnectionStatsVersion = 1
 		s.m.UniqueTargets = len(s.targets)
 		ts := make([]string, 0, len(s.targets))
 		for t := range s.targets {
@@ -494,9 +528,11 @@ func (e *Engine) Snapshot(now time.Time) wire.Batch {
 		}
 		s.m.Targets = ts
 		portSet := map[uint16]bool{}
+		portsByTarget := map[netip.Addr][]uint16{}
 		endpoints := make([]string, 0, len(s.edges))
 		for endpoint := range s.edges {
 			portSet[endpoint.Port()] = true
+			portsByTarget[endpoint.Addr()] = append(portsByTarget[endpoint.Addr()], endpoint.Port())
 			endpoints = append(endpoints, endpoint.String())
 		}
 		ports := make([]int, 0, len(portSet))
@@ -527,6 +563,18 @@ func (e *Engine) Snapshot(now time.Time) wire.Batch {
 		})
 		s.m.OutboundSamplesTruncated = s.m.OutboundSamplesTruncated || len(outbound) > 8
 		s.m.OutboundEndpoints = outbound[:min(len(outbound), 8)]
+		portTargets := make([]wire.PortTarget, 0, len(portsByTarget))
+		for target, portList := range portsByTarget {
+			sort.Slice(portList, func(i, j int) bool { return portList[i] < portList[j] })
+			portTargets = append(portTargets, wire.PortTarget{PeerIP: target.String(), PortCount: len(portList), Ports: portList[:min(len(portList), 32)], Truncated: len(portList) > 32 || s.m.CardinalityCapped})
+		}
+		sort.Slice(portTargets, func(i, j int) bool {
+			if portTargets[i].PortCount != portTargets[j].PortCount {
+				return portTargets[i].PortCount > portTargets[j].PortCount
+			}
+			return portTargets[i].PeerIP < portTargets[j].PeerIP
+		})
+		s.m.PortScanTargets = portTargets[:min(len(portTargets), 8)]
 		b.Metrics = append(b.Metrics, s.m)
 	}
 	for _, s := range e.sites {

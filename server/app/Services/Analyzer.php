@@ -33,6 +33,7 @@ class Analyzer
         $this->rules = Rule::where('enabled', true)->where(fn ($q) => $q->whereNull('node_id')->orWhere('node_id', $node->id))->get();
         $this->exclusions = Exclusion::where('expires_at', '>', $at)->where(fn ($q) => $q->whereNull('node_id')->orWhere('node_id', $node->id))->get();
         foreach ($p['metrics'] as $m) {
+            $m['capture_quality'] = array_intersect_key($p['health'], array_flip(['captured', 'kernel_drops', 'decode_skipped', 'state_dropped', 'reassembly_dropped', 'interfaces', 'version']));
             $asset = $this->observe($m['ip'], $node, $at);
             TrafficMetric::create(['node_id' => $node->id, 'ip_asset_id' => $asset->id, 'batch_id' => $batch->id, 'window_start' => $batch->window_start, 'window_end' => $at,
                 ...array_intersect_key($m, array_flip(['bytes_out', 'bytes_in', 'packets_out', 'packets_in', 'tcp_attempts'])), 'evidence' => $m]);
@@ -191,8 +192,8 @@ class Analyzer
             $severity = $rule->severity;
             $confidence = 'behavioral';
             $analysis = [];
-            if ($rule->kind === 'horizontal_scan') {
-                $assessment = app(ScanAssessment::class)->assess($sampleEvidence, $severity);
+            if (in_array($rule->kind, ConnectionAssessment::KINDS, true)) {
+                $assessment = app(ConnectionAssessment::class)->assess($rule->kind, $sampleEvidence, $rule->threshold, $severity, $rows->pluck('evidence')->all());
                 $severity = $assessment['severity'];
                 $title = $assessment['title'];
                 $confidence = $assessment['confidence'];
@@ -215,18 +216,34 @@ class Analyzer
         if ($asset === null && Exclusion::where('node_id', $node->id)->whereNull('cidr')->where('kind', $kind)->where('expires_at', '>', $at)->exists()) {
             return null;
         }
-        $event = app(EventCorrelation::class)->correlate($node, $asset, $kind, $severity, $title, $at);
+        $event = app(EventCorrelation::class)->correlate($node, $asset, $kind, $severity, $title, $at, $evidence);
         $key = hash('sha256', implode('|', [$event->id, $kind, $salt]));
-        $alert = Alert::firstOrCreate(['dedup_key' => $key], ['event_id' => $event->id, 'node_id' => $node->id, 'ip_asset_id' => $asset?->id, 'kind' => $kind, 'severity' => $severity, 'title' => $title, 'evidence' => $evidence, 'first_seen_at' => $at, 'last_seen_at' => $at]);
+        $category = $evidence['connection_analysis']['category'] ?? 'needs_review';
+        $alert = Alert::firstOrCreate(['dedup_key' => $key], ['event_id' => $event->id, 'node_id' => $node->id, 'ip_asset_id' => $asset?->id, 'kind' => $kind, 'severity' => $severity, 'assessment_category' => $category, 'title' => $title, 'evidence' => $evidence, 'first_seen_at' => $at, 'last_seen_at' => $at]);
         if ($alert->wasRecentlyCreated && config('monitor.alert_email')) {
             SendAlertEmail::dispatch($alert->id)->afterCommit();
         }
         if (! $alert->wasRecentlyCreated) {
-            $data = ['occurrences' => $alert->occurrences + 1, 'last_seen_at' => max($alert->last_seen_at, $at), 'evidence' => $evidence];
-            if ($alert->status === 'open') {
-                $data += ['severity' => $severity, 'title' => $title];
+            $freshEvidence = $alert->last_seen_at->lte($at);
+            $data = ['occurrences' => $alert->occurrences + 1, 'last_seen_at' => max($alert->last_seen_at, $at)];
+            if ($freshEvidence) {
+                $data['evidence'] = $evidence;
+            }
+            if ($event->status === 'open' && $freshEvidence) {
+                $data += ['severity' => $severity, 'title' => $title, 'assessment_category' => $category];
+                if ($alert->status === 'resolved') {
+                    $data['status'] = 'open';
+                }
             }
             $alert->update($data);
+        }
+
+        if ($event->status === 'open') {
+            $ranked = Alert::where('event_id', $event->id)->whereIn('status', ['open', 'acknowledged'])->get(['severity', 'title', 'assessment_category'])
+                ->sortByDesc(fn ($row) => 10 * (['low' => 1, 'medium' => 2, 'high' => 3][$row->severity] ?? 0) + (['behavior_notice' => 1, 'needs_review' => 2, 'strong_anomaly' => 3][$row->assessment_category] ?? 2))->first();
+            if ($ranked) {
+                $event->update(['severity' => $ranked->severity, 'title' => $ranked->title, 'assessment_category' => $ranked->assessment_category]);
+            }
         }
 
         return $alert;

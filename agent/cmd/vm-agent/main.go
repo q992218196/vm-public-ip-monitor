@@ -24,7 +24,7 @@ import (
 	"vm-monitor/agent/internal/wire"
 )
 
-var version = "0.6.0"
+var version = "1.0.0"
 
 func main() {
 	if e := run(); e != nil {

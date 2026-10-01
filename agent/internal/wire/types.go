@@ -8,6 +8,12 @@ type Metric struct {
 	PacketsIn                uint64             `json:"packets_in"`
 	TCPAttempts              uint64             `json:"tcp_attempts"`
 	SYNACKReplies            uint64             `json:"synack_replies"`
+	ConnectionStatsVersion   int                `json:"connection_stats_version"`
+	CompletedHandshakes      uint64             `json:"completed_handshakes"`
+	RSTReplies               uint64             `json:"rst_replies"`
+	MatureAttempts           uint64             `json:"mature_attempts"`
+	MatureNoReply            uint64             `json:"mature_no_reply"`
+	PortScanTargets          []PortTarget       `json:"port_scan_targets,omitempty"`
 	UniqueTargets            int                `json:"unique_targets"`
 	MaxPortsPerTarget        int                `json:"max_ports_per_target"`
 	MaxAttemptsPerTarget     int                `json:"max_attempts_per_target"`
@@ -22,17 +28,26 @@ type Metric struct {
 	OutboundSamplesTruncated bool               `json:"outbound_samples_truncated"`
 }
 type EndpointEvidence struct {
-	PeerIP        string   `json:"peer_ip"`
-	PeerPort      uint16   `json:"peer_port"`
-	Attempts      uint64   `json:"attempts"`
-	SYNACKReplies uint64   `json:"synack_replies"`
-	PayloadOut    uint64   `json:"payload_out"`
-	PayloadIn     uint64   `json:"payload_in"`
-	Scheme        string   `json:"scheme,omitempty"`
-	Host          string   `json:"host,omitempty"`
-	HTTPMethod    string   `json:"http_method,omitempty"`
-	HTTPPath      string   `json:"http_path,omitempty"`
-	QueryKeys     []string `json:"query_keys,omitempty"`
+	PeerIP              string   `json:"peer_ip"`
+	PeerPort            uint16   `json:"peer_port"`
+	Attempts            uint64   `json:"attempts"`
+	SYNACKReplies       uint64   `json:"synack_replies"`
+	CompletedHandshakes uint64   `json:"completed_handshakes"`
+	RSTReplies          uint64   `json:"rst_replies"`
+	MaxObservedSpanMS   uint64   `json:"max_observed_span_ms"`
+	PayloadOut          uint64   `json:"payload_out"`
+	PayloadIn           uint64   `json:"payload_in"`
+	Scheme              string   `json:"scheme,omitempty"`
+	Host                string   `json:"host,omitempty"`
+	HTTPMethod          string   `json:"http_method,omitempty"`
+	HTTPPath            string   `json:"http_path,omitempty"`
+	QueryKeys           []string `json:"query_keys,omitempty"`
+}
+type PortTarget struct {
+	PeerIP    string   `json:"peer_ip"`
+	PortCount int      `json:"port_count"`
+	Ports     []uint16 `json:"ports"`
+	Truncated bool     `json:"truncated"`
 }
 type Site struct {
 	IP     string `json:"ip"`

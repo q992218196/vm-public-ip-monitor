@@ -8,6 +8,9 @@ $db = new PDO('pgsql:host=127.0.0.1;dbname=monitor_test', getenv('MONITOR_DB_USE
 $db->exec(<<<'SQL'
 ALTER TABLE alerts ADD COLUMN event_id bigint, ADD COLUMN evidence jsonb, ADD COLUMN first_seen_at timestamp;
 CREATE TABLE monitor_events (id bigserial primary key,node_id uuid,ip_asset_id bigint,active_key text,title text,severity text,status text default 'open',kinds jsonb,quality jsonb,occurrences bigint default 1,review_notes text,first_seen_at timestamp,last_seen_at timestamp,created_at timestamp,updated_at timestamp);
+ALTER TABLE monitor_events ADD COLUMN behavior jsonb, ADD COLUMN review_context jsonb, ADD COLUMN reopen_reason text, ADD COLUMN assessment_category text default 'needs_review';
+ALTER TABLE alerts ADD COLUMN assessment_category text default 'needs_review';
+CREATE TABLE traffic_metrics (id bigserial primary key,node_id uuid,ip_asset_id bigint,window_start timestamp,window_end timestamp,tcp_attempts bigint,bytes_in bigint,bytes_out bigint,evidence jsonb);
 CREATE TABLE packet_captures (id uuid primary key,event_id bigint,node_id uuid,ip text,status text default 'pending',source text default 'manual',lease_token text,lease_until timestamp,duration_seconds integer default 60,max_bytes integer default 33554432,snaplen integer default 2048,path text,sha256 text,bytes bigint default 0,metadata jsonb,summary jsonb,last_error text,created_at timestamp,updated_at timestamp);
 CREATE TABLE ai_settings (id integer primary key,endpoint text,model text,enabled boolean default false,api_key_cipher text,created_at timestamp,updated_at timestamp);
 CREATE TABLE ai_analyses (id bigserial primary key,event_id bigint,capture_id uuid,requested_by bigint,status text default 'pending',config_snapshot jsonb,evidence jsonb,report text,usage jsonb,last_error text,dispatched_at timestamp,started_at timestamp,finished_at timestamp,created_at timestamp,updated_at timestamp);
@@ -48,6 +51,18 @@ if (isset($ok($request('progress', ['id' => 100]))['alerts'])) {
 }
 if (count($detail['alerts']) !== 1 || $detail['alerts'][0]['evidence']['note'] !== 'test evidence') {
     throw new RuntimeException('Evidence detail incorrect');
+}
+$db->prepare('INSERT INTO traffic_metrics(node_id,ip_asset_id,window_start,window_end,tcp_attempts,bytes_in,bytes_out,evidence) VALUES(?,?,now()-INTERVAL \'30 second\',now(),10,1000,500,?)')->execute(['00000000-0000-4000-8000-000000000001', 1, json_encode(['tcp_attempts' => 10, 'connection_stats_version' => 1, 'completed_handshakes' => 8, 'rst_replies' => 1, 'outbound_endpoints' => [['peer_ip' => '192.0.2.2', 'peer_port' => 443, 'attempts' => 10, 'synack_replies' => 8, 'completed_handshakes' => 8, 'rst_replies' => 1, 'payload_out' => 100, 'payload_in' => 200, 'max_observed_span_ms' => 6000]], 'port_scan_targets' => [['peer_ip' => '192.0.2.2', 'port_count' => 1, 'ports' => [443], 'truncated' => false]]])]);
+$db->exec('UPDATE monitor_events SET first_seen_at=now()-INTERVAL \'60 second\',last_seen_at=now() WHERE id=100');
+$reviewReport = $ok($request('reviewReport', ['id' => 100]))['report'];
+if ($reviewReport['totals']['completed'] !== 8 || count($reviewReport['timeline']) !== 1 || $reviewReport['targets'][0]['peer_ip'] !== '192.0.2.2' || strlen(json_encode($reviewReport)) > 16384) {
+    throw new RuntimeException('Review report scope or bounds incorrect');
+}
+if ($ok($request('reviewReport', ['id' => 100], false, true))['report']['totals']['attempts'] !== 10) {
+    throw new RuntimeException('Viewer cannot read local review report');
+}
+if (($request('review', ['ids' => [100], 'status' => 'normal', 'notes' => ''], true)['code'] ?? null) === 1) {
+    throw new RuntimeException('Normal review has no justification');
 }
 $settings = ['endpoint' => 'https://api.deepseek.com/chat/completions', 'model' => 'deepseek-flash', 'enabled' => false, 'api_key' => 'test-only-api-key-for-ci-123456'];
 $ok($request('saveSettings', $settings, true));
