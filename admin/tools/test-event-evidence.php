@@ -20,14 +20,20 @@ $request = function (string $action, array $data = [], bool $post = false, bool 
         'header' => ['Content-Type: application/json', 'server: true', 'batoken: '.getenv($viewer ? 'TEST_VIEWER_TOKEN' : 'TEST_ADMIN_TOKEN')], 'content' => $post ? json_encode($data) : '']]);
     $url = 'http://127.0.0.1:8099/admin/EventEvidence/'.$action.($post ? '' : '?'.http_build_query($data));
 
-    return json_decode(file_get_contents($url, false, $context), true, 512, JSON_THROW_ON_ERROR);
+    $body = file_get_contents($url, false, $context);
+    $result = json_decode($body, true, 512, JSON_THROW_ON_ERROR);
+    if (! is_array($result)) {
+        throw new RuntimeException('Invalid response for '.$action.': '.substr($body, 0, 1000));
+    }
+
+    return $result;
 };
 $ok = function (array $result): array {
     if (($result['code'] ?? null) !== 1) {
         throw new RuntimeException(json_encode($result));
     }
 
-    return $result['data'];
+    return $result['data'] ?? [];
 };
 $rows = $ok($request('index', ['limit' => 500]));
 if (count($rows['list']) !== 1 || isset($rows['list'][0]['evidence']) || strlen(json_encode($rows)) > 4096) {
