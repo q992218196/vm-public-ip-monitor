@@ -5,9 +5,16 @@ umask 077
 [[ ${EUID} -eq 0 ]] || { echo 'Run as root'; exit 1; }
 [[ $# -eq 2 ]] || { echo 'Usage: install.sh CONFIG BINARY'; exit 1; }
 config=$(readlink -f "$1"); binary=$(readlink -f "$2")
+[[ -f "$config" && -r "$config" && -f "$binary" && -r "$binary" ]] || { echo 'Config and binary must be readable files'; exit 1; }
+chmod 700 "$binary"
+script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 python_bin=$(command -v python3 || command -v python || true)
 [[ -n "$python_bin" ]] || { echo 'Python 2.7+ or 3 is required by installer'; exit 1; }
 command -v systemctl >/dev/null || { echo 'systemctl is required by installer'; exit 1; }
+command -v flock >/dev/null || { echo 'flock is required by installer'; exit 1; }
+mkdir -p /run/lock
+exec 9>/run/lock/vm-monitor-agent-install.lock
+flock -n 9 || { echo 'Another Agent installation is in progress'; exit 1; }
 version=$(systemctl --version | awk 'NR==1 {print $2}')
 [[ $version =~ ^[0-9]+$ ]] || { echo 'Unable to detect systemd version'; exit 1; }
 mapfile -t settings < <("$python_bin" - "$config" <<'PY'
@@ -25,10 +32,23 @@ data=${settings[0]}; hard=${settings[1]}
 mkdir -p "$data"/{config,bin,logs,spool,tmp}
 chmod 700 "$data" "$data"/{config,bin,logs,spool,tmp}
 "$binary" -config "$config" -check
-[[ "$config" == "$data/config/agent.json" ]] || install -m 600 "$config" "$data/config/agent.json"
+if systemctl is-active --quiet vm-monitor-agent; then systemctl stop vm-monitor-agent; fi
+if [[ -f "$data/config/agent.json" ]]; then
+    install -m 600 "$data/config/agent.json" "$data/config/agent.json.previous"
+fi
+if [[ -f /etc/systemd/system/vm-monitor-agent.service ]]; then
+    install -m 600 /etc/systemd/system/vm-monitor-agent.service "$data/config/vm-monitor-agent.service.previous"
+fi
+if [[ "$config" != "$data/config/agent.json" ]]; then
+    install -m 600 "$config" "$data/config/agent.json.new"
+    mv -f "$data/config/agent.json.new" "$data/config/agent.json"
+fi
 if [[ -f "$data/bin/vm-agent" ]]; then cp -p "$data/bin/vm-agent" "$data/bin/vm-agent.previous"; fi
 install -m 700 "$binary" "$data/bin/vm-agent.new"
 mv -f "$data/bin/vm-agent.new" "$data/bin/vm-agent"
+if [[ -f "$script_dir/uninstall.sh" && "$script_dir/uninstall.sh" != "$data/bin/uninstall.sh" ]]; then
+    install -m 700 "$script_dir/uninstall.sh" "$data/bin/uninstall.sh"
+fi
 if (( version >= 231 )); then limit="MemoryMax=${hard}M"; else limit="MemoryLimit=${hard}M"; fi
 cat > /etc/systemd/system/vm-monitor-agent.service <<EOF
 [Unit]
@@ -69,3 +89,4 @@ systemctl restart vm-monitor-agent
 sleep 2
 systemctl --no-pager status vm-monitor-agent
 echo "Installed; data=$data; memory hard limit=${hard} MiB. No firewall/bridge/OVS configuration was changed."
+if [[ -f "$data/bin/uninstall.sh" ]]; then echo "Uninstall service (keep data): bash $data/bin/uninstall.sh"; fi

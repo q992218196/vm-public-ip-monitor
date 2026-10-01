@@ -256,6 +256,94 @@ class MonitorTest extends TestCase
         $this->assertDatabaseCount('traffic_metrics', 2);
     }
 
+    public function test_all_ip_alert_types_can_be_excluded_without_losing_evidence(): void
+    {
+        $this->seed(MonitorSeeder::class);
+        Rule::query()->update(['threshold' => 1]);
+        $node = $this->node();
+        $payload = $this->payload();
+        $payload['metrics'][0]['bytes_out'] = 1000000000;
+        $payload['metrics'][0]['auth_attempts'] = 100;
+        $payload['vpn'] = [[
+            'ip' => '203.0.113.10', 'peer_ip' => '1.1.1.1', 'local_port' => 40000,
+            'peer_port' => 51820, 'protocol' => 'wireguard', 'initiator' => 'vm',
+            'request_count' => 1, 'response_count' => 1, 'request_length' => 148,
+            'response_length' => 92, 'request_header' => '010000007b000000',
+            'response_header' => '02000000c8010000',
+        ]];
+        $payload['proxies'] = [[
+            'ip' => '203.0.113.10', 'local_port' => 8443, 'transport' => 'tls',
+            'peer_count' => 3, 'session_count' => 4, 'bytes_from_peers' => 12000,
+            'bytes_to_peers' => 34000, 'peer_samples' => ['198.51.100.1'],
+            'egress_target_count' => 5, 'egress_target_samples' => ['192.0.2.1'],
+        ]];
+        $this->upload($node, $payload)->assertOk();
+        ProcessBatch::dispatchSync(Batch::firstOrFail()->id);
+        $this->assertDatabaseCount('alerts', 8);
+        foreach (Alert::all() as $alert) {
+            Exclusion::create(['node_id' => $node->id, 'cidr' => '203.0.113.10/32',
+                'kind' => $alert->kind, 'reason' => '业务复核', 'expires_at' => now()->addDays(30)]);
+        }
+        $payload['batch_id'] = Str::uuid()->toString();
+        $this->upload($node, $payload)->assertOk();
+        ProcessBatch::dispatchSync(Batch::where('batch_id', $payload['batch_id'])->firstOrFail()->id);
+        $this->assertDatabaseCount('alerts', 8);
+        $this->assertSame(8, (int) Alert::sum('occurrences'));
+        $this->assertDatabaseCount('traffic_metrics', 2);
+        $this->assertDatabaseCount('protocol_observations', 4);
+        $this->assertDatabaseCount('websites', 1);
+
+        $otherNode = $this->node();
+        $payload['batch_id'] = Str::uuid()->toString();
+        $this->upload($otherNode, $payload)->assertOk();
+        ProcessBatch::dispatchSync(Batch::where('batch_id', $payload['batch_id'])->firstOrFail()->id);
+        $this->assertSame(8, Alert::where('node_id', $otherNode->id)->count());
+    }
+
+    public function test_node_health_whitelist_is_scoped_by_node_kind_and_expiry(): void
+    {
+        $this->seed(MonitorSeeder::class);
+        $node = $this->node();
+        $exclusion = Exclusion::create(['node_id' => $node->id, 'cidr' => null,
+            'kind' => 'capture_degraded', 'reason' => '维护', 'expires_at' => now()->addDays(30)]);
+        $payload = $this->payload();
+        $payload['health']['kernel_drops'] = 1;
+        $this->upload($node, $payload)->assertOk();
+        ProcessBatch::dispatchSync(Batch::firstOrFail()->id);
+        $this->assertDatabaseMissing('alerts', ['kind' => 'capture_degraded']);
+        $this->assertDatabaseHas('alerts', ['kind' => 'horizontal_scan']);
+        $this->assertSame(1, $node->fresh()->health['kernel_drops']);
+        $node->update(['last_seen_at' => now()->subHour()]);
+        $this->artisan('monitor:maintain')->assertSuccessful();
+        $this->assertDatabaseHas('alerts', ['node_id' => $node->id, 'kind' => 'node_offline']);
+
+        $otherNode = $this->node();
+        $payload['batch_id'] = Str::uuid()->toString();
+        $this->upload($otherNode, $payload)->assertOk();
+        ProcessBatch::dispatchSync(Batch::where('batch_id', $payload['batch_id'])->firstOrFail()->id);
+        $this->assertDatabaseHas('alerts', ['node_id' => $otherNode->id, 'kind' => 'capture_degraded']);
+
+        $exclusion->update(['expires_at' => now()->subSecond()]);
+        $payload['batch_id'] = Str::uuid()->toString();
+        $this->upload($node, $payload)->assertOk();
+        ProcessBatch::dispatchSync(Batch::where('batch_id', $payload['batch_id'])->firstOrFail()->id);
+        $this->assertDatabaseHas('alerts', ['node_id' => $node->id, 'kind' => 'capture_degraded']);
+    }
+
+    public function test_offline_whitelist_does_not_mute_another_node(): void
+    {
+        $node = $this->node();
+        $otherNode = $this->node();
+        foreach ([$node, $otherNode] as $offlineNode) {
+            $offlineNode->update(['last_seen_at' => now()->subHour()]);
+        }
+        Exclusion::create(['node_id' => $node->id, 'cidr' => null,
+            'kind' => 'node_offline', 'reason' => '维护', 'expires_at' => now()->addDays(30)]);
+        $this->artisan('monitor:maintain')->assertSuccessful();
+        $this->assertDatabaseMissing('alerts', ['node_id' => $node->id, 'kind' => 'node_offline']);
+        $this->assertDatabaseHas('alerts', ['node_id' => $otherNode->id, 'kind' => 'node_offline']);
+    }
+
     public function test_old_batch_cannot_replace_latest_health(): void
     {
         $n = $this->node();

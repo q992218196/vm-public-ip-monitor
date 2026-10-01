@@ -62,7 +62,7 @@ docker compose -f compose.yml -f compose.buildadmin.yml --profile https up -d --
 docker compose -f compose.yml -f compose.buildadmin.yml exec app php artisan monitor:reassess-scans
 ```
 
-数据库迁移保留网站资产、流量记录、其他告警和 BuildAdmin 账号；本次迁移会删除旧的“发现新网站线索”告警，并为白名单增加按告警类型的范围。重建 PHP 应用时 Web 容器也会重建，避免连接到已更换的容器地址。升级后检查：
+数据库迁移保留网站资产、流量记录、其他告警和 BuildAdmin 账号；迁移会删除旧的“发现新网站线索”告警，并为白名单增加按告警类型的范围和不需要 CIDR 的节点健康范围。必须先执行迁移，再使用新版白名单。重新运行 `agent-builder` 会发布安装、卸载脚本及 SHA-256 清单；`buildadmin-web` 也必须重建才能提供卸载脚本下载。重建 PHP 应用时 Web 容器也会重建，避免连接到已更换的容器地址。升级后检查：
 
 本版采集服务没有管理界面、管理账号模型或账号导入工具。历史安装中不再使用的账号／会话表保留原样，新安装不会创建这些表；BuildAdmin 账号独立存于 MySQL。采集服务继续负责上报、异步分析和任务调度。`monitor:reassess-scans` 分批重新评估未处理横向扫描告警，保留已确认和已解决记录。升级截图 worker 后，对需要新报告的站点点击“验证／截图”；历史报告不会凭空补出新证据。
 
@@ -93,7 +93,9 @@ docker compose -f compose.yml -f compose.buildadmin.yml --profile screenshots up
 
 在 BuildAdmin 的“采集节点”创建节点，填写采集接口、可能出现的公网 IPv4／IPv6 CIDR 和资源预算。同一 CIDR 可以出现在多个节点；CIDR 只是授权匹配范围，不表示 VM 的唯一归属。默认 Agent 工作内存预算 2048 MiB、systemd 硬限额 4096 MiB、数据目录预算 2048 MiB，均可配置。Agent 默认把持续数据写到宿主机 `/home/vm-monitor`。
 
-点击“生成安装命令”，在 10 分钟内到目标宿主机以 root 执行。命令会从本站 HTTPS 下载一次性 `agent.json`、安装脚本和已在主控编译的 amd64 二进制，并校验 SHA-256。一次性配置只能下载一次；生成新命令会立即轮换该节点令牌，因此应及时执行，且不要把命令贴到工单、公开日志或聊天记录。需要通过自己的安全通道传输时，可选择“接入配置”下载文件。
+点击“生成安装命令”，在 10 分钟内到目标宿主机以 root 执行。命令会从本站 HTTPS 下载一次性 `agent.json`、安装／卸载脚本和已在主控编译的 amd64 二进制，校验 SHA-256，然后为程序和脚本设置 `700` 执行权限、配置设置 `600`。一次性配置只能下载一次；生成新命令会立即轮换该节点令牌，因此应及时执行，且不要把命令贴到工单、公开日志或聊天记录。需要通过自己的安全通道传输时，可选择“接入配置”下载文件。
+
+**重复安装会覆盖程序和配置并重启服务**，不必先卸载。安装器先检查新配置，检查失败不停止原服务；替换前在配置所在目录保留 `agent.json.previous`、`vm-monitor-agent.service.previous`，在程序目录保留 `vm-agent.previous`，各保留一份。继续使用相同 `data_dir` 时，缓存批次和日志保留；修改目录后不会自动迁移原目录的数据。安装器也会将卸载脚本存到 `${data_dir}/bin/uninstall.sh`。宿主机需有 `curl`、SHA-256 校验工具、Python 2.7+／3、systemd 和 `flock`。
 
 安装器不改防火墙、路由、网桥或 OVS。应先确认宿主机选定接口能看到公网 IP 的双向流量；KVM/libvirt 的 VM 身份无需由 Agent 推断。CentOS 7 的 systemd 使用 `MemoryLimit`，较新的系统使用 `MemoryMax`。`/home` 若挂载为 `noexec`，应改用允许执行的大分区数据目录。
 
@@ -116,6 +118,16 @@ sudo systemctl restart vm-monitor-agent
 ```
 
 自定义 `data_dir` 时替换路径。更改采集接口、CIDR 或内存硬限额需要重新生成并部署配置。
+
+### 卸载宿主机 Agent
+
+在“采集节点”点击“卸载命令”，复制到**对应宿主机**以 root 执行。此命令单独下载并校验卸载脚本，既不下载新配置，也不轮换凭据；旧安装没有本地卸载脚本时也能使用。如果已使用新版安装器，默认目录下可以直接执行：
+
+```sh
+sudo bash /home/vm-monitor/bin/uninstall.sh
+```
+
+卸载停止并禁用 `vm-monitor-agent`，移除 systemd 服务文件并重新加载 systemd。配置、二进制、缓存、日志、后台节点记录及人工创建的镜像接口全部保留；如不再使用，在后台禁用该节点以避免上报中断告警。自定义数据目录时替换命令路径；数据文件由管理员确认后另行清理。
 
 ## 6. 功能验证与维护
 
@@ -149,4 +161,4 @@ docker compose -f compose.yml -f compose.buildadmin.yml exec -T postgres pg_dump
 - **Agent 收到 422**：该批次不符合校验规则，优先核对授权 CIDR、采集窗口时间及新版日志中的字段错误；已丢弃批次不能通过重启恢复。
 - **截图 worker 重启或无截图**：检查目录属主、`worker.log`、worker 内存及 IPv6 出口；探测任务页面会显示失败原因。
 
-管理员可在 BuildAdmin 右上角“个人资料”修改邮箱或密码，在“管理员管理”创建只读账号并分配“监控只读”分组。生产环境不开放公开注册。卸载宿主机 Agent 可执行 `sudo bash deploy/agent/uninstall.sh`；该操作保留数据和人工配置的镜像接口，需单独检查后清理。
+管理员可在 BuildAdmin 右上角“个人资料”修改邮箱或密码，在“管理员管理”创建只读账号并分配“监控只读”分组。生产环境不开放公开注册。卸载流程见第 5 节，命令在宿主机执行。

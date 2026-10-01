@@ -217,7 +217,7 @@ class Monitor extends Backend
         $this->success(count($ids) . ' 条告警已更新');
     }
 
-    public function whitelistScan(): void
+    public function whitelistAlert(): void
     {
         $this->writable();
         $id = (int)$this->request->post('id', 0);
@@ -226,13 +226,19 @@ class Monitor extends Backend
         $db->startTrans();
         try {
             $alert = $db->table('alerts')->where('id', $id)->lock(true)->find();
-            if (!$alert || $alert['kind'] !== 'horizontal_scan' || !$alert['ip_asset_id']) $this->error('仅支持对横向扫描告警建立白名单', [], 404);
-            $asset = $db->table('ip_assets')->where('id', $alert['ip_asset_id'])->lock(true)->find();
-            if (!$asset || !filter_var($asset['ip'], FILTER_VALIDATE_IP)) $this->error('公网 IP 不存在', [], 404);
-            $cidr = $asset['ip'] . (str_contains($asset['ip'], ':') ? '/128' : '/32');
+            if (!$alert) $this->error('告警不存在', [], 404);
+            $asset = null;
+            $cidr = null;
+            if ($alert['ip_asset_id']) {
+                $asset = $db->table('ip_assets')->where('id', $alert['ip_asset_id'])->lock(true)->find();
+                if (!$asset || !filter_var($asset['ip'], FILTER_VALIDATE_IP)) $this->error('公网 IP 不存在', [], 404);
+                $cidr = $asset['ip'] . (str_contains($asset['ip'], ':') ? '/128' : '/32');
+            } elseif (!in_array($alert['kind'], ['node_offline', 'capture_degraded'], true)) {
+                $this->error('此告警的公网 IP 资产已删除，无法确定白名单范围', [], 404);
+            }
             $now = gmdate('Y-m-d H:i:s');
             $expires = gmdate('Y-m-d H:i:s', time() + 30 * 86400);
-            $scope = ['node_id' => $alert['node_id'], 'cidr' => $cidr, 'kind' => 'horizontal_scan'];
+            $scope = ['node_id' => $alert['node_id'], 'cidr' => $cidr, 'kind' => $alert['kind']];
             $existing = $db->table('exclusions')->where($scope)->find();
             if ($existing) {
                 $db->table('exclusions')->where('id', $existing['id'])->update(['expires_at' => $expires, 'updated_at' => $now]);
@@ -243,16 +249,16 @@ class Monitor extends Backend
                 ]);
             }
             $db->table('alerts')->where('node_id', $alert['node_id'])->where('ip_asset_id', $alert['ip_asset_id'])
-                ->where('kind', 'horizontal_scan')->where('status', 'open')
-                ->update(['status' => 'resolved', 'resolution' => '已按节点、公网 IP 和横向扫描类型加入 30 天白名单；待业务复核',
+                ->where('kind', $alert['kind'])->where('status', 'open')
+                ->update(['status' => 'resolved', 'resolution' => '已按节点、' . ($asset ? '公网 IP、' : '') . '此告警类型加入 30 天白名单；待业务复核',
                     'updated_at' => $now]);
-            $this->audit('horizontal_scan_whitelisted', 'Alert:' . $id, ['node_id' => $alert['node_id'], 'ip' => $asset['ip'], 'expires_at' => $expires]);
+            $this->audit('alert_whitelisted', 'Alert:' . $id, ['node_id' => $alert['node_id'], 'ip' => $asset['ip'] ?? null, 'kind' => $alert['kind'], 'expires_at' => $expires]);
             $db->commit();
         } catch (\Throwable $e) {
             $db->rollback();
             throw $e;
         }
-        $this->success('该节点此公网 IP 的横向扫描告警已暂停 30 天');
+        $this->success('该节点' . ($asset ? '此公网 IP 的' : '的') . '此类型告警已暂停 30 天');
     }
 
     public function save(): void
@@ -271,7 +277,7 @@ class Monitor extends Backend
         };
         $data = array_intersect_key($data, array_flip($allowed));
         if (!$data) $this->error('没有可保存的字段');
-        $this->validateRecord($resource, $data, $id === '');
+        $this->validateRecord($resource, $data, $id === '', $id);
         if (isset($data['cidrs'])) $data['cidrs'] = json_encode($data['cidrs']);
         if (isset($data['settings'])) $data['settings'] = json_encode($data['settings']);
         $data['updated_at'] = gmdate('Y-m-d H:i:s');
@@ -292,7 +298,7 @@ class Monitor extends Backend
         $this->success('已保存', ['id' => $id]);
     }
 
-    private function validateRecord(string $resource, array &$data, bool $creating): void
+    private function validateRecord(string $resource, array &$data, bool $creating, string $id = ''): void
     {
         if ($resource === 'nodes') {
             if (isset($data['name']) && (trim($data['name']) === '' || mb_strlen($data['name']) > 100)) $this->error('节点名称无效');
@@ -329,10 +335,15 @@ class Monitor extends Backend
             if (isset($data['enabled'])) $data['enabled'] = (bool)$data['enabled'];
         }
         if ($resource === 'exclusions') {
-            if ($creating && (empty($data['cidr']) || empty($data['reason']) || empty($data['expires_at']))) $this->error('白名单信息不完整');
-            if (isset($data['cidr']) && !$this->validCidr((string)$data['cidr'])) $this->error('CIDR 格式无效');
+            if ($creating && (empty($data['reason']) || empty($data['expires_at']))) $this->error('白名单信息不完整');
+            if (array_key_exists('cidr', $data) && $data['cidr'] === '') $data['cidr'] = null;
+            $scope = $creating ? $data : array_replace($this->db()->table('exclusions')->where('id', $id)->find() ?: [], $data);
+            $nodeAlert = in_array($scope['kind'] ?? '', ['node_offline', 'capture_degraded'], true);
+            if ($nodeAlert) {
+                if (empty($scope['node_id']) || !empty($scope['cidr'])) $this->error('节点健康白名单必须指定节点，公网 IP/CIDR 留空');
+            } elseif (empty($scope['cidr']) || !is_string($scope['cidr']) || !$this->validCidr($scope['cidr'])) $this->error('IP 告警白名单必须填写有效 CIDR');
             if (isset($data['reason']) && (trim((string)$data['reason']) === '' || mb_strlen((string)$data['reason']) > 255)) $this->error('原因无效');
-            if (isset($data['kind']) && $data['kind'] !== '' && !in_array($data['kind'], ['horizontal_scan', 'vertical_scan', 'suspected_bruteforce', 'single_target_attempts', 'tcp_connection_burst', 'egress_mbps', 'vpn_protocol', 'proxy_suspect'], true)) $this->error('白名单类型无效');
+            if (isset($data['kind']) && $data['kind'] !== '' && !in_array($data['kind'], ['horizontal_scan', 'vertical_scan', 'suspected_bruteforce', 'single_target_attempts', 'tcp_connection_burst', 'egress_mbps', 'vpn_protocol', 'proxy_suspect', 'node_offline', 'capture_degraded'], true)) $this->error('白名单类型无效');
             if (isset($data['kind']) && $data['kind'] === '') $data['kind'] = null;
             if (isset($data['expires_at']) && strtotime((string)$data['expires_at'] . ' UTC') <= time()) $this->error('失效时间必须在未来');
         }

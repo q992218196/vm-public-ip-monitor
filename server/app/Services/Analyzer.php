@@ -206,11 +206,15 @@ class Analyzer
     private function isExcluded(string $ip, string $kind): bool
     {
         return $this->exclusions->contains(fn ($exclusion) => ($exclusion->kind === null || $exclusion->kind === $kind)
+            && $exclusion->cidr !== null
             && Ip::contains($exclusion->cidr, $ip));
     }
 
-    public function alert(Node $node, ?IpAsset $asset, string $kind, string $severity, string $title, array $evidence, $at, int $cooldown = 600, string $salt = ''): Alert
+    public function alert(Node $node, ?IpAsset $asset, string $kind, string $severity, string $title, array $evidence, $at, int $cooldown = 600, string $salt = ''): ?Alert
     {
+        if ($asset === null && Exclusion::where('node_id', $node->id)->whereNull('cidr')->where('kind', $kind)->where('expires_at', '>', $at)->exists()) {
+            return null;
+        }
         $key = hash('sha256', implode('|', [$node->id, $asset?->id, $kind, $salt, intdiv($at->getTimestamp(), max(1, $cooldown))]));
         $alert = Alert::firstOrCreate(['dedup_key' => $key], ['node_id' => $node->id, 'ip_asset_id' => $asset?->id, 'kind' => $kind, 'severity' => $severity, 'title' => $title, 'evidence' => $evidence, 'first_seen_at' => $at, 'last_seen_at' => $at]);
         if ($alert->wasRecentlyCreated && config('monitor.alert_email')) {

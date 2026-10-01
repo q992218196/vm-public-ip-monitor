@@ -139,6 +139,9 @@
                         <el-button v-if="isAdmin && resource === 'nodes'" link type="primary" @click="openAgentCommand(scope.row)"
                             >生成安装命令</el-button
                         >
+                        <el-button v-if="isAdmin && resource === 'nodes'" link type="warning" @click="openUninstallCommand(scope.row)">
+                            卸载命令</el-button
+                        >
                         <el-button
                             v-if="isAdmin && resource === 'nodes'"
                             link
@@ -148,12 +151,12 @@
                             >更新 Agent</el-button
                         >
                         <el-button
-                            v-if="isAdmin && resource === 'alerts' && scope.row.kind === 'horizontal_scan'"
+                            v-if="isAdmin && resource === 'alerts'"
                             link
                             type="warning"
                             :loading="actionId === scope.row.id"
-                            @click="whitelistScan(scope.row)"
-                            >加入扫描白名单</el-button
+                            @click="whitelistAlert(scope.row)"
+                            >加入白名单</el-button
                         >
                     </template>
                 </el-table-column>
@@ -178,6 +181,13 @@
                 <template #extra><el-button type="primary" @click="retryDetail">重试</el-button></template>
             </el-result>
             <template v-else>
+                <el-button
+                    v-if="resource === 'alerts' && detail && isAdmin"
+                    type="warning"
+                    :loading="actionId === detail.id"
+                    @click="whitelistAlert(detail)"
+                    >加入白名单</el-button
+                >
                 <SiteReport v-if="resource === 'websites' && detail" :record="detail" />
                 <TrafficEvidence
                     v-if="detail && ((resource === 'alerts' && detail.evidence?.sample) || (resource === 'metrics' && detail.evidence))"
@@ -254,6 +264,18 @@
                 ><el-button type="primary" :disabled="editorLoading" :loading="saving" @click="save">保存</el-button></template
             >
         </el-dialog>
+        <el-dialog v-model="uninstallCommandOpen" :title="'卸载 Agent · ' + agentCommandNode" width="min(760px, 94vw)">
+            <el-alert
+                title="在目标宿主机以 root 执行。仅停止并移除 Agent 服务；保留配置、程序、缓存、日志和网络配置。不轮换节点凭据，后台节点记录也会保留。"
+                type="warning"
+                :closable="false"
+            />
+            <pre class="monitor-command">{{ uninstallCommand }}</pre>
+            <template #footer>
+                <el-button @click="uninstallCommandOpen = false">关闭</el-button>
+                <el-button type="primary" @click="copyCommand(uninstallCommand)">复制卸载命令</el-button>
+            </template>
+        </el-dialog>
 
         <el-dialog v-model="manualOpen" title="添加已知公网 IP 网站" width="min(520px, 94vw)">
             <el-form label-position="top">
@@ -286,7 +308,7 @@
         </el-dialog>
         <el-dialog v-model="agentCommandOpen" :title="'安装 Agent · ' + agentCommandNode" width="min(760px, 94vw)">
             <el-alert
-                title="命令会自动下载 agent.json、Agent 和安装脚本。配置链接只能使用一次，10 分钟后过期；生成时旧节点令牌已撤销。请勿把命令贴到工单或公共日志。"
+                title="命令下载配置、Agent、安装和卸载脚本并设置权限。重复安装会备份并替换程序和配置、重启服务；相同数据目录内的缓存与日志保留。配置链接只能使用一次，10 分钟后过期；旧令牌已撤销，请勿公开命令。"
                 type="warning"
                 :closable="false"
             />
@@ -446,6 +468,8 @@ const definitions: Record<string, Definition> = {
                     egress_mbps: '出站 Mbps',
                     vpn_protocol: 'VPN 双向握手',
                     proxy_suspect: '疑似加密代理',
+                    node_offline: '节点上报中断（CIDR 留空）',
+                    capture_degraded: '采集覆盖下降（CIDR 留空）',
                 }),
             },
             col('reason', '原因'),
@@ -542,6 +566,8 @@ const manual = reactive({ ip: '', port: 443, scheme: 'https', host: '' })
 const agentCommandOpen = ref(false)
 const agentCommandNode = ref('')
 const agentCommand = ref('')
+const uninstallCommandOpen = ref(false)
+const uninstallCommand = ref('')
 const visibleKeys = ref<string[]>([])
 const visibleColumns = computed(() => definition.value.columns.filter((column) => visibleKeys.value.includes(column.key)))
 const canCreate = computed(() => isAdmin.value && definition.value.create)
@@ -812,11 +838,11 @@ async function bulkSave() {
         saving.value = false
     }
 }
-async function whitelistScan(row: any) {
+async function whitelistAlert(row: any) {
     try {
         await ElMessageBox.confirm(
-            `仅暂停节点“${row.node_name || row.node_id}”上公网 IP ${row.ip} 的横向扫描告警 30 天，并处理当前未关闭的同类告警。其他告警和采集不受影响。`,
-            '加入扫描白名单',
+            `暂停节点“${row.node_name || row.node_id}”${row.ip ? '上公网 IP ' + row.ip : ''}的“${row.title}”类型告警 30 天，并处理同范围待处理告警。采集继续运行。`,
+            '加入白名单',
             { type: 'warning', confirmButtonText: '确认加入' }
         )
     } catch {
@@ -824,10 +850,11 @@ async function whitelistScan(row: any) {
     }
     actionId.value = row.id
     try {
-        const result = await request('whitelistScan', 'post', { id: row.id })
+        const result = await request('whitelistAlert', 'post', { id: row.id })
         ElMessage.success(result.msg || '白名单已生效')
         countKey = ''
         await load()
+        if (detailOpen.value && detailId.value === row.id) await fetchDetail()
     } finally {
         actionId.value = null
     }
@@ -874,7 +901,7 @@ async function openAgentCommand(row: any) {
         const result = await request('nodeBootstrap', 'post', { id: row.id })
         const origin = window.location.origin
         const ticket = String(result.data.ticket)
-        agentCommand.value = `set -e\numask 077\nmkdir -p /home/vm-monitor-install\ncd /home/vm-monitor-install\ncurl --proto '=https' --tlsv1.2 -H 'server: true' -fsSLo agent.json '${origin}/api/AgentBootstrap/config?ticket=${ticket}'\nchmod 600 agent.json\ncurl --proto '=https' --tlsv1.2 -fsSLo vm-agent-linux-amd64 '${origin}/downloads/vm-agent-linux-amd64'\ncurl --proto '=https' --tlsv1.2 -fsSLo install.sh '${origin}/downloads/install.sh'\ncurl --proto '=https' --tlsv1.2 -fsSLo SHA256SUMS '${origin}/downloads/SHA256SUMS'\nsha256sum -c SHA256SUMS\nbash install.sh ./agent.json ./vm-agent-linux-amd64`
+        agentCommand.value = `set -e\numask 077\nmkdir -p /home/vm-monitor-install\ncd /home/vm-monitor-install\ncurl --proto '=https' --tlsv1.2 -H 'server: true' -fsSLo agent.json '${origin}/api/AgentBootstrap/config?ticket=${ticket}'\nchmod 600 agent.json\ncurl --proto '=https' --tlsv1.2 -fsSLo vm-agent-linux-amd64 '${origin}/downloads/vm-agent-linux-amd64'\ncurl --proto '=https' --tlsv1.2 -fsSLo install.sh '${origin}/downloads/install.sh'\ncurl --proto '=https' --tlsv1.2 -fsSLo uninstall.sh '${origin}/downloads/uninstall.sh'\ncurl --proto '=https' --tlsv1.2 -fsSLo SHA256SUMS '${origin}/downloads/SHA256SUMS'\nsha256sum -c SHA256SUMS\nchmod 700 vm-agent-linux-amd64 install.sh uninstall.sh\nbash install.sh ./agent.json ./vm-agent-linux-amd64`
         agentCommandNode.value = String(row.name || row.id)
         agentCommandOpen.value = true
     } finally {
@@ -903,8 +930,17 @@ async function requestAgentUpdate(ids: string[]) {
     }
 }
 async function copyAgentCommand() {
+    await copyCommand(agentCommand.value)
+}
+function openUninstallCommand(row: any) {
+    const origin = window.location.origin
+    agentCommandNode.value = String(row.name || row.id)
+    uninstallCommand.value = `set -e\numask 077\nmkdir -p /home/vm-monitor-install\ncd /home/vm-monitor-install\ncurl --proto '=https' --tlsv1.2 -fsSLo uninstall.sh '${origin}/downloads/uninstall.sh'\ncurl --proto '=https' --tlsv1.2 -fsSLo SHA256SUMS '${origin}/downloads/SHA256SUMS'\nawk '$2 == "uninstall.sh" {print; found=1} END {if (!found) exit 1}' SHA256SUMS > uninstall.sha256\nsha256sum -c uninstall.sha256\nchmod 700 uninstall.sh\nbash ./uninstall.sh`
+    uninstallCommandOpen.value = true
+}
+async function copyCommand(command: string) {
     try {
-        await navigator.clipboard.writeText(agentCommand.value)
+        await navigator.clipboard.writeText(command)
         ElMessage.success('命令已复制')
     } catch {
         ElMessage.error('复制失败，请手动复制文本')

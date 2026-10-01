@@ -13,7 +13,8 @@ jobs:
         working-directory: agent
       - run: go vet ./...
         working-directory: agent
-      - run: bash -n deploy/agent/install.sh
+      - run: for script in deploy/agent/*.sh; do bash -n "$script"; done
+      - run: docker run --rm -v "$PWD:/workspace:ro" python:3.13-bookworm bash /workspace/deploy/agent/test-install.sh
       - run: bash deploy/agent/build.sh
       - run: test "$(./agent/bin/vm-agent-linux-amd64 -version)" = "$(cat agent/VERSION)"
   server:
@@ -145,7 +146,7 @@ jobs:
           curl -fsS -H 'server: true' -H "batoken: $token" -H 'Content-Type: application/json' -d '{"ids":[1],"status":"resolved","resolution":"reviewed"}' http://127.0.0.1:8099/admin/Monitor/bulkAlerts >/tmp/buildadmin-bulk.json
           python3 -c 'import json; assert json.load(open("/tmp/buildadmin-bulk.json"))["code"]==1'
           php -r '$db=new PDO("pgsql:host=127.0.0.1;dbname=monitor_test","monitor","test-only-password");if($db->query("SELECT status FROM alerts WHERE id=1")->fetchColumn()!=="resolved" || $db->query("SELECT count(*) FROM audit_logs")->fetchColumn()!=1)exit(1);'
-          curl -fsS -H 'server: true' -H "batoken: $token" -H 'Content-Type: application/json' -d '{"id":1}' http://127.0.0.1:8099/admin/Monitor/whitelistScan >/tmp/buildadmin-whitelist.json
+          curl -fsS -H 'server: true' -H "batoken: $token" -H 'Content-Type: application/json' -d '{"id":1}' http://127.0.0.1:8099/admin/Monitor/whitelistAlert >/tmp/buildadmin-whitelist.json
           python3 -c 'import json; assert json.load(open("/tmp/buildadmin-whitelist.json"))["code"]==1'
           php -r '$db=new PDO("pgsql:host=127.0.0.1;dbname=monitor_test","monitor","test-only-password");$e=$db->query("SELECT node_id,cidr,kind FROM exclusions")->fetch(PDO::FETCH_ASSOC);if($e["node_id"]!=="00000000-0000-4000-8000-000000000001" || $e["cidr"]!=="203.0.113.10/32" || $e["kind"]!=="horizontal_scan" || $db->query("SELECT count(*) FROM audit_logs")->fetchColumn()!=2)exit(1);'
           curl -fsS -H 'server: true' -d 'username=viewer@example.test&password=test-admin-password-2026' http://127.0.0.1:8099/admin/Index/login >/tmp/buildadmin-viewer.json
@@ -153,11 +154,12 @@ jobs:
           curl -fsS -H 'server: true' -H "batoken: $viewer_token" 'http://127.0.0.1:8099/admin/Monitor/count?resource=alerts' >/tmp/buildadmin-viewer-count.json
           curl -sS -H 'server: true' -H "batoken: $viewer_token" -H 'Content-Type: application/json' -d '{"ids":[1],"status":"open","resolution":"unauthorized"}' http://127.0.0.1:8099/admin/Monitor/bulkAlerts >/tmp/buildadmin-viewer-write.json
           python3 -c 'import json; assert json.load(open("/tmp/buildadmin-viewer-count.json"))["data"]["total"]==1 and json.load(open("/tmp/buildadmin-viewer-write.json"))["code"]==403'
-          curl -sS -H 'server: true' -H "batoken: $viewer_token" -H 'Content-Type: application/json' -d '{"id":1}' http://127.0.0.1:8099/admin/Monitor/whitelistScan >/tmp/buildadmin-viewer-whitelist.json
+          curl -sS -H 'server: true' -H "batoken: $viewer_token" -H 'Content-Type: application/json' -d '{"id":1}' http://127.0.0.1:8099/admin/Monitor/whitelistAlert >/tmp/buildadmin-viewer-whitelist.json
           python3 -c 'import json; assert json.load(open("/tmp/buildadmin-viewer-whitelist.json"))["code"]==403'
           curl -fsS -H 'server: true' -H "batoken: $viewer_token" -d 'id=2&nickname=ViewerUpdated' http://127.0.0.1:8099/admin/routine.AdminInfo/edit >/tmp/buildadmin-profile.json
           python3 -c 'import json; assert json.load(open("/tmp/buildadmin-profile.json"))["code"]==1'
           php -r '$db=new PDO("mysql:host=127.0.0.1;dbname=buildadmin","buildadmin","test-only-password");$rows=$db->query("SELECT email,nickname FROM ba_admin WHERE email IN (\"admin@example.test\",\"viewer@example.test\") ORDER BY email")->fetchAll(PDO::FETCH_ASSOC);if($rows[0]["nickname"]!=="Admin" || $rows[1]["nickname"]!=="ViewerUpdated")exit(1);'
+          TEST_ADMIN_TOKEN="$token" php tools/test-alert-whitelists.php
         working-directory: admin
       - run: npm ci --no-audit --no-fund && npm run typecheck && npm run lint && npm run build
         working-directory: admin/web
@@ -201,6 +203,8 @@ jobs:
           curl -fsS http://127.0.0.1:8081/downloads/SHA256SUMS | grep -q 'vm-agent-linux-amd64'
           curl -fsS -o /tmp/vm-agent-smoke http://127.0.0.1:8081/downloads/vm-agent-linux-amd64
           cmp /tmp/vm-agent-smoke /home/vm-monitor-server/agent-dist/vm-agent-linux-amd64
+          curl -fsS -o /tmp/uninstall-smoke.sh http://127.0.0.1:8081/downloads/uninstall.sh
+          cmp /tmp/uninstall-smoke.sh /home/vm-monitor-server/agent-dist/uninstall.sh
           docker compose -f compose.yml -f compose.buildadmin.yml up -d --no-build app web
           for attempt in 1 2 3 4 5 6 7 8 9 10; do
             status=$(curl -sS -o /dev/null -w '%{http_code}' 'http://127.0.0.1:8080/api/v1/agent/update?version=0.3.0' || true)
