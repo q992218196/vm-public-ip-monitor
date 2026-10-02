@@ -6,7 +6,7 @@ if (getenv('MONITOR_DB_DATABASE') !== 'monitor_test' || ! getenv('TEST_ADMIN_TOK
 }
 $db = new PDO('pgsql:host=127.0.0.1;dbname=monitor_test', getenv('MONITOR_DB_USERNAME'), getenv('MONITOR_DB_PASSWORD'), [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
 $db->exec(<<<'SQL'
-ALTER TABLE alerts ADD COLUMN event_id bigint, ADD COLUMN evidence jsonb, ADD COLUMN first_seen_at timestamp;
+ALTER TABLE alerts ADD COLUMN event_id bigint, ADD COLUMN first_seen_at timestamp;
 CREATE TABLE monitor_events (id bigserial primary key,node_id uuid,ip_asset_id bigint,active_key text,title text,severity text,status text default 'open',kinds jsonb,quality jsonb,occurrences bigint default 1,review_notes text,first_seen_at timestamp,last_seen_at timestamp,created_at timestamp,updated_at timestamp);
 ALTER TABLE monitor_events ADD COLUMN behavior jsonb, ADD COLUMN review_context jsonb, ADD COLUMN reopen_reason text, ADD COLUMN assessment_category text default 'needs_review';
 ALTER TABLE alerts ADD COLUMN assessment_category text default 'needs_review';
@@ -18,10 +18,10 @@ INSERT INTO monitor_events (id,node_id,ip_asset_id,title,severity,kinds,quality,
 UPDATE alerts SET event_id=100,first_seen_at=now(),evidence='{"note":"test evidence"}' WHERE id=1;
 UPDATE nodes SET health='{"version":"0.6.0"}',cidrs='["203.0.113.0/24"]',enabled=true WHERE id='00000000-0000-4000-8000-000000000001';
 SQL);
-$request = function (string $action, array $data = [], bool $post = false, bool $viewer = false): array {
+$request = function (string $action, array $data = [], bool $post = false, bool $viewer = false, string $controller = 'EventEvidence'): array {
     $context = stream_context_create(['http' => ['method' => $post ? 'POST' : 'GET', 'ignore_errors' => true, 'timeout' => 20,
         'header' => ['Content-Type: application/json', 'server: true', 'batoken: '.getenv($viewer ? 'TEST_VIEWER_TOKEN' : 'TEST_ADMIN_TOKEN')], 'content' => $post ? json_encode($data) : '']]);
-    $url = 'http://127.0.0.1:8099/admin/EventEvidence/'.$action.($post ? '' : '?'.http_build_query($data));
+    $url = 'http://127.0.0.1:8099/admin/'.$controller.'/'.$action.($post ? '' : '?'.http_build_query($data));
 
     $body = file_get_contents($url, false, $context);
     $result = json_decode($body, true, 512, JSON_THROW_ON_ERROR);
@@ -123,3 +123,16 @@ if (($request('whitelist', ['id' => 100], true)['code'] ?? null) === 1 || $db->q
     throw new RuntimeException('Capture quality can be muted through event whitelist');
 }
 echo "Event list/count/detail, local PCAP summary, manual AI, encrypted secrets, duplicate prevention and read-only permissions passed.\n";
+
+$db->exec('CREATE TABLE websites (id bigserial primary key,ip_asset_id bigint,host text,port integer,scheme text,status text,ownership_status text,title text,description text,category text,manual_category text,last_probed_at timestamp,last_seen_at timestamp)');
+$db->exec("INSERT INTO websites(ip_asset_id,host,port,scheme,status,ownership_status,last_seen_at) VALUES(1,'owned.example',443,'https','verified','dns_match',now()),(1,'foreign.example',80,'http','failed','dns_mismatch',now()),(1,'unknown.example',80,'http','observed','unverified',now())");
+foreach (['assets' => 1, 'foreign' => 1, 'candidates' => 1, 'all' => 3] as $ownership => $count) {
+    $query = ['resource' => 'websites', 'ownership' => $ownership];
+    if ($ok($request('count', $query, false, false, 'Monitor'))['total'] !== $count || count($ok($request('index', $query, false, true, 'Monitor'))['list']) !== $count) {
+        throw new RuntimeException('Website ownership filter incorrect: '.$ownership);
+    }
+}
+if ($ok($request('index', ['resource' => 'websites'], false, false, 'Monitor'))['list'][0]['host'] !== 'owned.example') {
+    throw new RuntimeException('Default website list exposes unrelated client Host');
+}
+echo "Website default/list/count ownership separation passed.\n";

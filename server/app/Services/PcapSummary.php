@@ -4,6 +4,8 @@ namespace App\Services;
 
 class PcapSummary
 {
+    public const ANALYSIS_VERSION = 3;
+
     public const PACKET_TEXT_LIMIT = 2097152;
 
     public function summarize(string $path, string $ip, bool $includePackets = false): array
@@ -23,6 +25,8 @@ class PcapSummary
         }
         $summary = ['ip' => $ip, 'frames' => 0, 'matched_packets' => 0, 'skipped_frames' => 0, 'unrelated_frames' => 0, 'bytes_out' => 0, 'bytes_in' => 0, 'truncated_frames' => 0, 'summary_capped' => false];
         $flows = [];
+        $activeSequences = [];
+        $summary['analysis_version'] = self::ANALYSIS_VERSION;
         $packetText = "frame\ttime_unix\tdirection\tprotocol\tsource\tdestination\tflags_hex\tseq\tack\twire_bytes\tcaptured_bytes\tpayload_bytes_advertised\tapplication_clue_json\n";
         $textFrames = 0;
         $textCapped = false;
@@ -73,14 +77,22 @@ class PcapSummary
                     $peer = $out ? $packet['dst'] : $packet['src'];
                     $remote = $out ? $packet['dp'] : $packet['sp'];
                     $local = $out ? $packet['sp'] : $packet['dp'];
-                    $key = $peer.'|'.$remote.'|'.$local.'|'.$packet['protocol'];
+                    $tuple = $peer.'|'.$remote.'|'.$local.'|'.$packet['protocol'];
+                    if ($packet['protocol'] === 6 && $out && ($packet['flags'] & 0x16) === 0x02 && (isset($activeSequences[$tuple]) || count($activeSequences) < 4096)) {
+                        $activeSequences[$tuple] = $packet['seq'];
+                    }
+                    $initialSequence = $activeSequences[$tuple] ?? 'midstream';
+                    if ($packet['protocol'] === 6 && ! $out && ($packet['flags'] & 0x12) === 0x12) {
+                        $initialSequence = ($packet['ack'] - 1) & 0xFFFFFFFF;
+                    }
+                    $key = $tuple.'|'.$initialSequence;
                     if (! isset($flows[$key]) && count($flows) < 4096) {
                         $flows[$key] = ['peer_ip' => $peer, 'peer_port' => $remote, 'local_port' => $local, 'transport' => $packet['protocol'] === 6 ? 'tcp' : 'udp', 'syn_out' => 0, 'synack_in' => false, 'handshake_completed' => false, 'rst_in' => false, 'payload_bytes_out' => 0, 'payload_bytes_in' => 0, 'local_syn_seq' => null, 'peer_syn_seq' => null];
                     }
                     if (isset($flows[$key])) {
                         $flow = &$flows[$key];
                         $flags = $packet['flags'];
-                        if ($out && ($flags & 0x12) === 0x02) {
+                        if ($out && ($flags & 0x16) === 0x02) {
                             $flow['syn_out']++;
                             $flow['local_syn_seq'] = $packet['seq'];
                         }
@@ -91,7 +103,7 @@ class PcapSummary
                         if ($out && ($flags & 0x12) === 0x10 && $flow['synack_in'] && ! ($flags & 0x04) && $packet['ack'] === (($flow['peer_syn_seq'] + 1) & 0xFFFFFFFF) && $packet['seq'] === (($flow['local_syn_seq'] + 1) & 0xFFFFFFFF)) {
                             $flow['handshake_completed'] = true;
                         }
-                        if (! $out && ($flags & 0x04)) {
+                        if (! $out && ($flags & 0x04) && ($flow['handshake_completed'] || (($flags & 0x10) && $flow['local_syn_seq'] !== null && $packet['ack'] === (($flow['local_syn_seq'] + 1) & 0xFFFFFFFF)))) {
                             $flow['rst_in'] = true;
                         }
                         $flow[$out ? 'payload_bytes_out' : 'payload_bytes_in'] += $packet['payload_size'];
@@ -119,6 +131,9 @@ class PcapSummary
         }
         $outbound = array_filter($flows, fn ($flow) => $flow['syn_out'] > 0);
         $summary['observed_outbound_flows'] = count($outbound);
+        $summary['syn_packets_out'] = array_sum(array_column($outbound, 'syn_out'));
+        $summary['syn_retransmissions_observed'] = $summary['syn_packets_out'] - count($outbound);
+        $summary['counting_unit'] = 'TCP tuple plus initial SYN sequence; same-sequence SYN retransmissions do not create new initiations';
         $summary['synack_flows'] = count(array_filter($outbound, fn ($flow) => $flow['synack_in']));
         $summary['completed_handshakes'] = count(array_filter($outbound, fn ($flow) => $flow['handshake_completed']));
         $summary['rst_reply_flows'] = count(array_filter($outbound, fn ($flow) => $flow['rst_in']));
@@ -156,9 +171,48 @@ class PcapSummary
         if ($includePackets) {
             $summary['packet_text'] = ['format' => 'tab-separated; one row per stored PCAP frame, including unsupported/unrelated frames', 'frames' => $textFrames, 'bytes' => strlen($packetText), 'complete' => ! $textCapped && $summary['pcap_fully_read'] && $textFrames === $summary['frames'], 'text' => $packetText, 'omitted' => 'raw payload, ciphertext hex, HTTP query/fragment values, cookies, authorization and bodies; no TCP reassembly; unknown frames retain timestamp and lengths only'];
         }
-        uasort($flows, fn ($a, $b) => ($b['syn_out'] * 1024 + $b['payload_bytes_out'] + $b['payload_bytes_in']) <=> ($a['syn_out'] * 1024 + $a['payload_bytes_out'] + $a['payload_bytes_in']));
-        $summary['flow_samples'] = array_values(array_slice($flows, 0, 32));
-        $summary['flow_samples_truncated'] = count($flows) > 32;
+        $peerGroups = [];
+        foreach ($outbound as $flow) {
+            $peer = $flow['peer_ip'];
+            $peerGroups[$peer] ??= ['peer_ip' => $peer, 'initiations' => 0, 'completed_handshakes' => 0, 'rst_reply_flows' => 0, 'no_reply_observed_flows' => 0, 'ports' => []];
+            $peerGroups[$peer]['initiations']++;
+            $peerGroups[$peer]['completed_handshakes'] += (int) $flow['handshake_completed'];
+            $peerGroups[$peer]['rst_reply_flows'] += (int) $flow['rst_in'];
+            $peerGroups[$peer]['no_reply_observed_flows'] += (int) (! $flow['synack_in'] && ! $flow['rst_in']);
+            $peerGroups[$peer]['ports'][$flow['peer_port']] = true;
+        }
+        foreach ($peerGroups as &$group) {
+            $group['port_count'] = count($group['ports']);
+            $group['ports'] = array_slice(array_keys($group['ports']), 0, 32);
+            sort($group['ports']);
+            $group['ports_truncated'] = $group['port_count'] > 32;
+        }
+        unset($group);
+        uasort($peerGroups, fn ($a, $b) => $b['initiations'] <=> $a['initiations']);
+        $summary['peer_groups'] = array_values(array_slice($peerGroups, 0, 16));
+        $summary['peer_groups_truncated'] = count($peerGroups) > 16;
+        $chosen = [];
+        $strata = ['completed' => fn ($flow) => $flow['handshake_completed'],
+            'no_reply' => fn ($flow) => $flow['syn_out'] > 0 && ! $flow['synack_in'] && ! $flow['rst_in'],
+            'reset' => fn ($flow) => $flow['rst_in'], 'midstream' => fn ($flow) => $flow['syn_out'] === 0];
+        $summary['sample_strata'] = [];
+        foreach ($strata as $name => $filter) {
+            $pool = array_filter($flows, $filter);
+            $summary['sample_strata'][$name] = count($pool);
+            uasort($pool, fn ($a, $b) => ($b['payload_bytes_out'] + $b['payload_bytes_in']) <=> ($a['payload_bytes_out'] + $a['payload_bytes_in']));
+            foreach (array_slice($pool, 0, 8, true) as $key => $flow) {
+                $chosen[$key] = $flow + ['sample_group' => $name];
+            }
+        }
+        foreach ($flows as $key => $flow) {
+            if (count($chosen) >= 32) {
+                break;
+            }
+            $chosen[$key] ??= $flow + ['sample_group' => 'other'];
+        }
+        $summary['flow_samples'] = array_values($chosen);
+        $summary['flow_samples_truncated'] = count($flows) > count($chosen);
+        $summary['sampling_note'] = 'Stratified examples include successful, unanswered, reset and pre-existing sessions; sample proportions are NOT population proportions. Use port_groups and peer_groups for conclusions.';
         $summary['limitations'] = ['Only the requested future capture interval is available; it does not reconstruct or disprove the original alert interval.', 'Outbound target and handshake counts require an outbound SYN in this capture; existing sessions are not counted as newly initiated flows.', 'Missing replies do not prove connection failure: loss, sampling, asymmetry and capture boundaries matter.', 'Multiple capture interfaces may include duplicate packets; retransmissions and tuple reuse affect counts.', 'HTTPS/TLS/QUIC payloads are encrypted; URL, request body, login result and actual proxy protocol cannot be recovered without keys or service logs. Visible SNI is only a single complete ClientHello clue, not ownership proof; ECH inner names are unavailable.', 'Flow and frame limits are conservative samples. HTTP header extraction has no TCP reassembly; query values, cookies, authorization and request bodies are omitted.'];
 
         $summary['limitations'][] = 'Port groups cover tracked outbound TCP flows, capped at 4096 tuples and 64 port groups. Advertised payload lengths are from IP headers and may exceed captured payload bytes when snaplen truncates a frame.';

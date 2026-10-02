@@ -28,7 +28,7 @@ async function loop() {
   while(!stopped) {
     try {
       const {task} = await api('claim',{});if(!task){await sleep(5000);continue;}
-      let result;try{result=await probe(task,{dataDir,diskLimitBytes:diskLimitMiB*1024*1024});}catch(e){result={status:'failed',error:String(e.message).slice(0,1000)};}
+      let result;try{result=await probe(task,{dataDir,diskLimitBytes:diskLimitMiB*1024*1024});}catch(e){result={status:'failed',...(e.ownership||{}),error:String(e.message).slice(0,1000)};}
       await api(`tasks/${task.id}/complete`,{lease_token:task.lease_token,...result});
       await log(JSON.stringify({task:task.id,status:result.status}));
     } catch(e) {await log(String(e.message));await sleep(10000);}

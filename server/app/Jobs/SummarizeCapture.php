@@ -27,7 +27,7 @@ class SummarizeCapture implements ShouldQueue
     public function handle(): void
     {
         $capture = PacketCapture::find($this->captureId);
-        if (! $capture || $capture->status !== 'uploaded' || ! $capture->path || $capture->summary) {
+        if (! $capture || $capture->status !== 'uploaded' || ! $capture->path || ($capture->summary['analysis_version'] ?? 0) >= PcapSummary::ANALYSIS_VERSION) {
             return;
         }
         try {

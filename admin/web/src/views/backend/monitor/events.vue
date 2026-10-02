@@ -26,12 +26,12 @@
                 <el-select v-model="filters.severity" placeholder="全部级别" clearable @change="search"
                     ><el-option label="高" value="high" /><el-option label="中" value="medium" /><el-option label="低" value="low"
                 /></el-select>
-                <el-button type="primary" :loading="loading" @click="search">查询</el-button>
                 <el-select v-model="filters.assessment_category" placeholder="全部证据结论" clearable @change="search"
                     ><el-option label="一般行为提醒" value="behavior_notice" /><el-option label="疑似异常，待复核" value="needs_review" /><el-option
                         label="强异常证据，优先复核"
                         value="strong_anomaly"
                 /></el-select>
+                <el-button type="primary" :loading="loading" @click="search">查询</el-button>
             </div>
             <div class="columns">
                 <el-popover placement="bottom-end" trigger="click" :width="220"
@@ -281,6 +281,38 @@
                             captureReport.summary.summary_capped ? '是，统计为下界' : '否'
                         }}</el-descriptions-item>
                     </el-descriptions>
+                    <p>
+                        以下分组统计覆盖已跟踪的出站 TCP 发起连接；SYN 重传不计为新的连接。32
+                        条连接样本按成功、无回复、重置和已有会话分组选取，样本比例不代表总体比例。
+                    </p>
+                    <el-descriptions border :column="2">
+                        <el-descriptions-item label="SYN 包数">{{ captureReport.summary.syn_packets_out ?? '—' }}</el-descriptions-item>
+                        <el-descriptions-item label="观察到的 SYN 重传">{{
+                            captureReport.summary.syn_retransmissions_observed ?? '—'
+                        }}</el-descriptions-item>
+                    </el-descriptions>
+                    <h3>按目标 IP 分组</h3>
+                    <el-table :data="captureReport.summary.peer_groups || []" border>
+                        <el-table-column prop="peer_ip" label="目标 IP" min-width="140" />
+                        <el-table-column prop="initiations" label="发起连接" width="100" />
+                        <el-table-column prop="completed_handshakes" label="完成握手" width="100" />
+                        <el-table-column prop="no_reply_observed_flows" label="未观察回复" width="110" />
+                        <el-table-column prop="port_count" label="不同端口数" width="110" />
+                        <el-table-column label="端口样本" min-width="200"
+                            ><template #default="scope"
+                                >{{ scope.row.ports.join(', ') }}{{ scope.row.ports_truncated ? '（截断）' : '' }}</template
+                            ></el-table-column
+                        >
+                    </el-table>
+                    <h3>按目标端口分组</h3>
+                    <el-table :data="captureReport.summary.port_groups || []" border>
+                        <el-table-column prop="port" label="端口" width="90" />
+                        <el-table-column prop="outbound_flows" label="发起连接" width="100" />
+                        <el-table-column prop="completed_handshakes" label="完成握手" width="100" />
+                        <el-table-column prop="no_reply_observed_flows" label="未观察回复" width="110" />
+                        <el-table-column prop="unique_targets" label="目标 IP 数" width="110" />
+                    </el-table>
+                    <h3>分组连接样本</h3>
                     <el-table :data="captureReport.summary.flow_samples" border>
                         <el-table-column label="目标" min-width="150"
                             ><template #default="scope">{{ scope.row.peer_ip }}:{{ scope.row.peer_port }}</template></el-table-column
@@ -542,9 +574,13 @@ async function review() {
     }
 }
 async function whitelist(id: number) {
-    await ElMessageBox.confirm('将当前节点、IP、已命中的告警类型加入 30 天白名单。新类型仍会告警，原始证据保留。', '加入白名单', { type: 'warning' })
-    await api('whitelist', { id }, 'post')
-    ElMessage.success('已加入白名单')
+    const answer = await ElMessageBox.prompt(
+        '默认批准当前可见目标和端口。可填写已核实的目标 IP／CIDR（逗号分隔）。新目标、端口、强度超限、更强证据或截断样本仍告警，不停止检测。',
+        '定向业务例外（30 天）',
+        { inputPlaceholder: '留空使用当前目标；例如 198.51.100.0/24', inputType: 'textarea' }
+    )
+    const result = await api('whitelist', { id, target_cidrs: answer.value.split(/[\s,，]+/).filter(Boolean) }, 'post')
+    ElMessage.success(result.msg || '已保存定向业务例外')
     load()
     if (detailOpen.value) await refreshDetail()
 }

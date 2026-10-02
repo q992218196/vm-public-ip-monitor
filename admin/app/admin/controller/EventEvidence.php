@@ -155,18 +155,20 @@ class EventEvidence extends Monitor
             foreach ($this->decode($event['kinds']) as $kind) {
                 $scope = ['node_id' => $event['node_id'], 'cidr' => $cidr, 'kind' => $kind];
                 $existing = $this->db()->table('exclusions')->where($scope)->find();
-                $values = ['expires_at' => gmdate('Y-m-d H:i:s', time() + 30 * 86400), 'updated_at' => $now];
+                $alert = $this->db()->table('alerts')->where('event_id', $id)->where('kind', $kind)->order('last_seen_at', 'desc')->find();
+                $behaviorScope = $ip ? $this->behaviorWhitelistScope((array) $this->decode($alert['evidence'] ?? null), $alert['severity'] ?? $event['severity']) : null;
+                $values = ['expires_at' => gmdate('Y-m-d H:i:s', time() + 30 * 86400), 'behavior_scope' => $behaviorScope, 'updated_at' => $now];
                 if ($existing) {
                     $this->db()->table('exclusions')->where('id', $existing['id'])->update($values);
                 } else {
                     $this->db()->table('exclusions')->insert($scope + $values + ['reason' => '管理员审核事件 #'.$id, 'created_at' => $now]);
                 }
             }
-            $this->db()->table('monitor_events')->where('id', $id)->update(['status' => 'normal', 'review_context' => $event['behavior'] ?: '{}', 'reopen_reason' => null, 'review_notes' => '当前节点、IP、已命中类型加入 30 天白名单', 'updated_at' => $now]);
-            $this->db()->table('alerts')->where('event_id', $id)->update(['status' => 'resolved', 'resolution' => '事件已加入 30 天白名单', 'updated_at' => $now]);
+            $this->db()->table('monitor_events')->where('id', $id)->update(['status' => 'normal', 'review_context' => $event['behavior'] ?: '{}', 'reopen_reason' => null, 'review_notes' => '当前节点、IP、已命中类型建立 30 天定向业务例外；目标或行为变化重新复核', 'updated_at' => $now]);
+            $this->db()->table('alerts')->where('event_id', $id)->update(['status' => 'resolved', 'resolution' => '事件已建立 30 天定向业务例外，范围变化时重新复核', 'updated_at' => $now]);
             $this->audit('event.whitelisted', 'MonitorEvent:'.$id, ['ip' => $ip, 'kinds' => $this->decode($event['kinds'])]);
         });
-        $this->success('已加入 30 天白名单；原始证据保留');
+        $this->success('已保存 30 天定向业务例外；证据不完整、目标或行为变化时继续告警');
     }
 
     public function capture(): void

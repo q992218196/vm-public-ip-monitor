@@ -324,4 +324,66 @@ class EvidenceTest extends TestCase
         $this->assertSame('failed', $analysis->fresh()->status);
         Http::assertNothingSent();
     }
+
+    public function test_tcp_retransmissions_tuple_reuse_and_peer_port_groups_are_distinct(): void
+    {
+        $rewrite = function (string $packet, int $seq, int $ack): string {
+            return substr_replace($packet, pack('NN', $seq, $ack), 38, 8);
+        };
+        $local = '203.0.113.10';
+        $peer = '198.51.100.1';
+        $syn = $this->packet($local, $peer, 2, 20000, 443);
+        $packets = [$syn, $syn, $this->packet($peer, $local, 18, 443, 20000), $this->packet($local, $peer, 16, 20000, 443)];
+        $packets[] = $rewrite($syn, 500, 0);
+        $packets[] = $rewrite($this->packet($peer, $local, 18, 443, 20000), 600, 501);
+        $packets[] = $rewrite($this->packet($local, $peer, 16, 20000, 443), 501, 601);
+        foreach (range(10000, 10009) as $port) {
+            $packets[] = $this->packet($local, $peer, 2, 20001, $port);
+        }
+        $path = tempnam(sys_get_temp_dir(), 'pcap-groups');
+        file_put_contents($path, $this->pcap($packets));
+        try {
+            $summary = app(PcapSummary::class)->summarize($path, $local);
+            $this->assertSame(12, $summary['observed_outbound_flows']);
+            $this->assertSame(13, $summary['syn_packets_out']);
+            $this->assertSame(1, $summary['syn_retransmissions_observed']);
+            $this->assertSame(2, $summary['completed_handshakes']);
+            $this->assertSame(11, $summary['peer_groups'][0]['port_count']);
+            $this->assertSame(10, $summary['peer_groups'][0]['no_reply_observed_flows']);
+            $this->assertSame(2, $summary['sample_strata']['completed']);
+            $this->assertSame(10, $summary['sample_strata']['no_reply']);
+            $this->assertCount(12, $summary['flow_samples']);
+        } finally {
+            unlink($path);
+        }
+    }
+
+    public function test_flow_samples_include_successful_and_unanswered_strata_without_claiming_population_proportions(): void
+    {
+        $packets = [];
+        foreach (range(20000, 20079) as $port) {
+            $packets[] = $this->packet('203.0.113.10', '198.51.100.1', 2, $port, 443);
+            $packets[] = $this->packet('198.51.100.1', '203.0.113.10', 18, 443, $port);
+            $packets[] = $this->packet('203.0.113.10', '198.51.100.1', 16, $port, 443);
+        }
+        foreach (range(30000, 30009) as $port) {
+            foreach (range(1, 3) as $retry) {
+                $packets[] = $this->packet('203.0.113.10', '198.51.100.2', 2, $port, 443);
+            }
+        }
+        $path = tempnam(sys_get_temp_dir(), 'pcap-sampling');
+        file_put_contents($path, $this->pcap($packets));
+        try {
+            $summary = app(PcapSummary::class)->summarize($path, '203.0.113.10');
+            $this->assertSame(80, $summary['port_groups'][0]['completed_handshakes']);
+            $this->assertSame(10, $summary['port_groups'][0]['no_reply_observed_flows']);
+            $this->assertSame(20, $summary['syn_retransmissions_observed']);
+            $this->assertCount(32, $summary['flow_samples']);
+            $this->assertContains('completed', array_column($summary['flow_samples'], 'sample_group'));
+            $this->assertContains('no_reply', array_column($summary['flow_samples'], 'sample_group'));
+            $this->assertTrue($summary['flow_samples_truncated']);
+        } finally {
+            unlink($path);
+        }
+    }
 }

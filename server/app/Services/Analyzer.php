@@ -42,7 +42,7 @@ class Analyzer
         foreach ($p['sites'] as $s) {
             $asset = $this->observe($s['ip'], $node, $at);
             $key = hash('sha256', implode('|', [$s['ip'], $s['port'], $s['scheme'], $s['host']]));
-            $website = Website::firstOrCreate(['fingerprint' => $key], ['ip_asset_id' => $asset->id, 'port' => $s['port'], 'scheme' => $s['scheme'], 'host' => $s['host'], 'source' => $s['source'], 'first_seen_at' => $at, 'last_seen_at' => $at]);
+            $website = Website::firstOrCreate(['fingerprint' => $key], ['ip_asset_id' => $asset->id, 'port' => $s['port'], 'scheme' => $s['scheme'], 'host' => $s['host'], 'source' => $s['source'], 'ownership_status' => ($s['host'] === '' || (filter_var(trim($s['host'], '[]'), FILTER_VALIDATE_IP) && inet_pton(trim($s['host'], '[]')) === inet_pton($s['ip']))) ? 'ip_only' : 'unverified', 'first_seen_at' => $at, 'last_seen_at' => $at]);
             if ($website->last_seen_at->lt($at)) {
                 $website->update(['last_seen_at' => $at]);
             }
@@ -63,9 +63,6 @@ class Analyzer
                 'evidence' => $observation,
             ]);
             if ($vpnRule) {
-                if ($this->isExcluded($asset->ip, 'vpn_protocol')) {
-                    continue;
-                }
                 if (min($observation['request_count'], $observation['response_count']) < $vpnRule->threshold) {
                     continue;
                 }
@@ -112,9 +109,6 @@ class Analyzer
             if (! $proxyRule || $observation['peer_count'] < max(3, $proxyRule->threshold) || $observation['egress_target_count'] < 5) {
                 continue;
             }
-            if ($this->isExcluded($asset->ip, 'proxy_suspect')) {
-                continue;
-            }
             $evidence = $recordEvidence + ['observation_id' => $stored->id];
             $salt = implode('|', [$observation['local_port'], $observation['transport']]);
             $this->alert($node, $asset, 'proxy_suspect', $proxyRule->severity, '疑似加密代理样态（未确认协议）', $evidence, $at, $proxyRule->cooldown_seconds, $salt);
@@ -153,9 +147,6 @@ class Analyzer
         }
         $history = TrafficMetric::where('node_id', $node->id)->where('ip_asset_id', $asset->id)->where('window_end', '>', $batch->window_end->copy()->subSeconds($this->rules->max('window_seconds')))->where('window_end', '<=', $batch->window_end)->orderBy('window_end')->get();
         foreach ($this->rules as $rule) {
-            if ($this->isExcluded($asset->ip, $rule->kind)) {
-                continue;
-            }
             $cutoff = $batch->window_end->copy()->subSeconds($rule->window_seconds);
             $rows = $history->filter(fn ($row) => $row->window_end->gt($cutoff));
             $value = match ($rule->kind) {
@@ -204,17 +195,32 @@ class Analyzer
         }
     }
 
-    private function isExcluded(string $ip, string $kind): bool
-    {
-        return $this->exclusions->contains(fn ($exclusion) => ($exclusion->kind === null || $exclusion->kind === $kind)
-            && $exclusion->cidr !== null
-            && Ip::contains($exclusion->cidr, $ip));
-    }
-
     public function alert(Node $node, ?IpAsset $asset, string $kind, string $severity, string $title, array $evidence, $at, int $cooldown = 600, string $salt = ''): ?Alert
     {
         if ($asset === null && Exclusion::where('node_id', $node->id)->whereNull('cidr')->where('kind', $kind)->where('expires_at', '>', $at)->exists()) {
             return null;
+        }
+        if ($asset !== null) {
+            $entries = $this->exclusions ?? Exclusion::where('expires_at', '>', $at)->where(fn ($q) => $q->whereNull('node_id')->orWhere('node_id', $node->id))
+                ->where(fn ($q) => $q->whereNull('kind')->orWhere('kind', $kind))->get();
+            $deviations = [];
+            foreach ($entries as $entry) {
+                if (($entry->kind !== null && $entry->kind !== $kind) || $entry->cidr === null || ! Ip::contains($entry->cidr, $asset->ip)) {
+                    continue;
+                }
+                $result = app(BehaviorWhitelist::class)->evaluate($entry, $evidence + ['assessed_severity' => $severity]);
+                if ($result['match']) {
+                    return null;
+                }
+                $reviewedAt = $entry->behavior_scope['reviewed_at'] ?? null;
+                $observedAt = $evidence['sample_window_end'] ?? $at;
+                if (! $reviewedAt || CarbonImmutable::parse($observedAt)->gte(CarbonImmutable::parse($reviewedAt))) {
+                    $deviations[] = ['id' => $entry->id, 'reason' => $result['reason']];
+                }
+            }
+            if ($deviations) {
+                $evidence['whitelist_review'] = ['required' => true, 'deviations' => $deviations];
+            }
         }
         $event = app(EventCorrelation::class)->correlate($node, $asset, $kind, $severity, $title, $at, $evidence);
         $key = hash('sha256', implode('|', [$event->id, $kind, $salt]));

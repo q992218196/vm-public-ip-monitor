@@ -5,7 +5,18 @@
             <el-tag :type="report.review_required ? 'warning' : 'info'">{{ report.review_required ? '中风险 · 待人工复核' : '风险未确定' }}</el-tag>
         </header>
         <el-alert v-if="record.status !== 'verified'" type="warning" :closable="false" title="最近一次未验证成功；已有分析及截图可能来自历史验证。" />
+        <el-alert
+            v-if="!['manual', 'dns_match', 'ip_only'].includes(record.ownership_status)"
+            type="warning"
+            :closable="false"
+            title="此条仅为客户端请求的域名线索，尚未确认站点归属；历史分类不能作为本 VM 部署该网站的证据。"
+        />
         <el-descriptions :column="1" border>
+            <el-descriptions-item label="归属核实">{{ ownershipLabel }}；DNS 匹配也不等于已确认站点部署。</el-descriptions-item>
+            <el-descriptions-item v-if="record.ownership_evidence" label="归属证据"
+                >{{ record.ownership_evidence.addresses?.join(', ') || '人工登记／IP 对比' }} · {{ record.ownership_evidence.checked_at }} ·
+                {{ record.last_error || '' }}</el-descriptions-item
+            >
             <el-descriptions-item label="公网 IP">{{ record.ip || '—' }}</el-descriptions-item>
             <el-descriptions-item label="域名／端口">{{ record.host || 'IP 直连' }} : {{ record.port }} / {{ record.scheme }}</el-descriptions-item>
             <el-descriptions-item label="站点标题">{{ record.title || '—' }}</el-descriptions-item>
@@ -39,6 +50,19 @@
 import { computed } from 'vue'
 const props = defineProps<{ record: Record<string, any> }>()
 const report = computed(() => props.record.classification || {})
+const ownershipLabel = computed(
+    () =>
+        (
+            ({
+                manual: '人工登记',
+                dns_match: '解析匹配',
+                ip_only: 'IP 直连',
+                dns_mismatch: '解析不匹配',
+                dns_unknown: 'DNS 暂不可确认',
+                unverified: '归属待验证',
+            }) as Record<string, string>
+        )[props.record.ownership_status] || '归属待验证'
+)
 const observedAt = computed(() => {
     const value = report.value.observed_at
     if (!value) return '旧记录未标明报告生成时间'

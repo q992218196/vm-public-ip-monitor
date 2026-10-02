@@ -6,6 +6,7 @@ use App\Jobs\AnalyzeEvidence;
 use App\Jobs\SummarizeCapture;
 use App\Models\AiAnalysis;
 use App\Models\PacketCapture;
+use App\Services\PcapSummary;
 use Illuminate\Console\Attributes\Description;
 use Illuminate\Console\Attributes\Signature;
 use Illuminate\Console\Command;
@@ -35,7 +36,7 @@ class MaintainEvidence extends Command
             });
         }
         $disk = Storage::disk('local');
-        foreach (PacketCapture::where('status', 'uploaded')->whereNull('summary')->whereNull('last_error')->where('updated_at', '<', now()->subMinute())->limit(10)->get() as $pendingSummary) {
+        foreach (PacketCapture::where('status', 'uploaded')->where(fn ($q) => $q->whereNull('summary')->orWhereNull('summary->analysis_version')->orWhere('summary->analysis_version', '<', PcapSummary::ANALYSIS_VERSION))->whereNull('last_error')->where('updated_at', '<', now()->subMinute())->limit(10)->get() as $pendingSummary) {
             $pendingSummary->update(['updated_at' => now()]);
             SummarizeCapture::dispatch($pendingSummary->id)->afterCommit();
         }

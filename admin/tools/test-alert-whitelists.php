@@ -27,6 +27,7 @@ foreach ($kinds as $index => $kind) {
     foreach ([[$id, $node], [$id + 1, $node], [$id + 2, $otherNode]] as [$alertId, $observer]) {
         $insert->execute([$alertId, $observer, $asset, $kind, $kind, 'medium', 'open', 1, '2026-10-01 00:00:00']);
     }
+    $db->prepare('UPDATE alerts SET evidence=? WHERE id IN (?,?,?)')->execute([json_encode(['value' => 100, 'sample' => ['targets' => ['192.0.2.2'], 'ports' => [443], 'unique_targets' => 1]]), $id, $id + 1, $id + 2]);
     if ($kind === 'capture_degraded') {
         if (($request('whitelistAlert', ['id' => $id])['code'] ?? null) === 1 || $db->query("SELECT count(*) FROM exclusions WHERE kind='capture_degraded'")->fetchColumn() != 0 || $db->query('SELECT status FROM alerts WHERE id='.$id)->fetchColumn() !== 'open') {
             throw new RuntimeException('Capture quality can be muted through alert whitelist');
@@ -46,6 +47,16 @@ foreach ($kinds as $index => $kind) {
     $expectedCidr = $asset === null ? null : ($asset === 2 ? '2001:db8::1/128' : '203.0.113.10/32');
     if (count($entries) !== 1 || $entries[0]['cidr'] !== $expectedCidr || strtotime($entries[0]['expires_at'].' UTC') < time() + 29 * 86400) {
         throw new RuntimeException('Incorrect whitelist scope or duplicate for '.$kind);
+    }
+    if ($asset !== null) {
+        $scope = json_decode($entries[0]['behavior_scope'], true);
+        if ($scope['target_cidrs'] !== ['192.0.2.2/32'] || $scope['ports'] !== [443] || $scope['max_value'] !== 200 || $scope['severity'] !== 'medium') {
+            throw new RuntimeException('Destination business scope was not captured for '.$kind);
+        }
+        $result = $request('save', ['resource' => 'exclusions', 'id' => $entries[0]['id'], 'data' => ['target_cidrs' => ['198.51.100.0/24'], 'allowed_ports' => [443], 'max_value' => 250, 'allowed_severity' => 'medium', 'reason' => 'Explicit reviewed targets']]);
+        if (($result['code'] ?? null) !== 1 || json_decode($db->query('SELECT behavior_scope FROM exclusions WHERE id='.(int) $entries[0]['id'])->fetchColumn(), true)['target_cidrs'] !== ['198.51.100.0/24']) {
+            throw new RuntimeException('Explicit destination edit failed for '.$kind);
+        }
     }
     $statuses = $db->prepare('SELECT status FROM alerts WHERE id IN (?,?,?) ORDER BY id');
     $statuses->execute([$id, $id + 1, $id + 2]);

@@ -50,6 +50,12 @@
                 <el-select v-if="resource === 'alerts'" v-model="filters.severity" placeholder="全部级别" clearable @change="resetAndLoad">
                     <el-option label="高" value="high" /><el-option label="中" value="medium" /><el-option label="低" value="low" />
                 </el-select>
+                <el-select v-if="resource === 'websites'" v-model="filters.ownership" @change="resetAndLoad">
+                    <el-option label="网站资产" value="assets" />
+                    <el-option label="归属待核实线索" value="candidates" />
+                    <el-option label="解析不匹配线索" value="foreign" />
+                    <el-option label="全部资产和原始线索" value="all" />
+                </el-select>
                 <el-select v-if="resource === 'websites'" v-model="filters.review" placeholder="全部分类" clearable @change="resetAndLoad">
                     <el-option label="待人工复核" value="1" />
                 </el-select>
@@ -389,6 +395,7 @@ const definitions: Record<string, Definition> = {
             col('port', '端口'),
             col('scheme', '协议'),
             col('status', '验证状态'),
+            col('ownership_status', '归属状态'),
             col('title', '标题'),
             col('description', '网站描述'),
             col('category', '自动分类'),
@@ -449,6 +456,10 @@ const definitions: Record<string, Definition> = {
         create: true,
         columns: [
             col('cidr', '源公网 IP/CIDR'),
+            { ...col('target_cidrs', '已核实的目标 IP/CIDR（逗号分隔）'), type: 'textarea' },
+            col('allowed_ports', '允许的目标端口（逗号分隔）'),
+            { ...col('max_value', '规则行为值上限'), type: 'number' },
+            { ...col('allowed_severity', '允许的证据级别'), type: 'select', options: options({ low: '低', medium: '中', high: '高' }) },
             col('kind', '告警类型'),
             col('reason', '原因'),
             col('node_id', '适用节点'),
@@ -457,7 +468,7 @@ const definitions: Record<string, Definition> = {
         edit: [
             col('cidr', '源公网 IP/CIDR'),
             {
-                ...col('kind', '仅抑制此类型（留空为全部）'),
+                ...col('kind', '仅对此类型应用业务例外'),
                 type: 'select',
                 options: options({
                     horizontal_scan: '横向扫描',
@@ -544,7 +555,7 @@ const selected = ref<number[]>([])
 const selectedNodes = ref<string[]>([])
 const updatingAgent = ref(false)
 const agentReleaseVersion = ref('')
-const filters = reactive({ search: '', ip: '', node: '', status: '', severity: '', review: '' })
+const filters = reactive({ search: '', ip: '', node: '', status: '', severity: '', review: '', ownership: 'assets' })
 const detail = ref<any>(null)
 const detailOpen = ref(false)
 const detailLoading = ref(false)
@@ -668,7 +679,7 @@ watch(
         selected.value = []
         selectedNodes.value = []
         visibleKeys.value = definition.value.columns.filter((column) => column.key !== 'description').map((column) => column.key)
-        Object.assign(filters, { search: '', ip: '', node: '', status: '', severity: '', review: '' })
+        Object.assign(filters, { search: '', ip: '', node: '', status: '', severity: '', review: '', ownership: 'assets' })
         load()
         if (resource.value === 'nodes') void loadAgentRelease()
     },
@@ -692,6 +703,12 @@ function display(value: any): string {
         pending: '等待',
         leased: '执行中',
         complete: '完成',
+        dns_match: '解析匹配（非部署证明）',
+        manual: '人工登记',
+        ip_only: 'IP 直连',
+        dns_mismatch: '解析不匹配',
+        dns_unknown: 'DNS 暂不可确认',
+        unverified: '归属待验证',
         high: '高',
         medium: '中',
         low: '低',
@@ -760,6 +777,12 @@ async function openEditor(row?: any) {
             const record = result.data.record
             for (const field of definition.value.edit || []) {
                 let value = record[field.key]
+                if (resource.value === 'exclusions') {
+                    if (field.key === 'target_cidrs') value = (record.behavior_scope?.target_cidrs || []).join(', ')
+                    if (field.key === 'allowed_ports') value = (record.behavior_scope?.ports || []).join(', ')
+                    if (field.key === 'max_value') value = record.behavior_scope?.max_value || 1
+                    if (field.key === 'allowed_severity') value = record.behavior_scope?.severity || 'medium'
+                }
                 if (field.key === 'cidrs' && Array.isArray(value)) value = value.join('\n')
                 if (field.key === 'expires_at' && value) value = displayUtcTime(value)
                 if (['interfaces', 'memory_soft_mib', 'memory_hard_mib', 'disk_limit_mib', 'data_dir'].includes(field.key)) {
@@ -769,6 +792,7 @@ async function openEditor(row?: any) {
                 form[field.key] = value
             }
         } else {
+            if (resource.value === 'exclusions') Object.assign(form, { max_value: 200, allowed_severity: 'medium' })
             form.enabled = true
             form.severity = 'medium'
             form.window_seconds = 60
@@ -788,6 +812,15 @@ async function openEditor(row?: any) {
 }
 async function save() {
     const data = { ...form }
+    if (resource.value === 'exclusions') {
+        data.target_cidrs = String(data.target_cidrs || '')
+            .split(/[\s,，]+/)
+            .filter(Boolean)
+        data.allowed_ports = String(data.allowed_ports || '')
+            .split(/[\s,，]+/)
+            .filter(Boolean)
+            .map(Number)
+    }
     if (resource.value === 'exclusions' && data.expires_at) {
         const local = new Date(String(data.expires_at).replace(' ', 'T'))
         if (!Number.isNaN(local.getTime())) data.expires_at = local.toISOString().slice(0, 19).replace('T', ' ')
@@ -838,19 +871,25 @@ async function bulkSave() {
     }
 }
 async function whitelistAlert(row: any) {
+    let targetCidrs: string[] = []
     try {
-        await ElMessageBox.confirm(
-            `暂停节点“${row.node_name || row.node_id}”${row.ip ? '上公网 IP ' + row.ip : ''}的“${row.title}”类型告警 30 天，并处理同范围待处理告警。采集继续运行。`,
-            '加入白名单',
-            { type: 'warning', confirmButtonText: '确认加入' }
-        )
+        if (row.ip) {
+            const answer = await ElMessageBox.prompt(
+                '限定当前目标与端口 30 天。可填写已核实的目标 IP／CIDR（逗号分隔），留空使用当前目标。新目标、端口、强度或更强证据仍告警；截断样本不自动放行。',
+                '定向业务例外',
+                { inputType: 'textarea' }
+            )
+            targetCidrs = answer.value.split(/[\s,，]+/).filter(Boolean)
+        } else {
+            await ElMessageBox.confirm('暂停此节点的上报中断告警 30 天；其他检测继续。', '维护例外')
+        }
     } catch {
         return
     }
     actionId.value = row.id
     try {
-        const result = await request('whitelistAlert', 'post', { id: row.id })
-        ElMessage.success(result.msg || '白名单已生效')
+        const result = await request('whitelistAlert', 'post', { id: row.id, target_cidrs: targetCidrs })
+        ElMessage.success(result.msg || '已保存定向业务例外')
         countKey = ''
         await load()
         if (detailOpen.value && detailId.value === row.id) await fetchDetail()
@@ -858,6 +897,7 @@ async function whitelistAlert(row: any) {
         actionId.value = null
     }
 }
+
 async function probe(row: any) {
     actionId.value = row.id
     try {

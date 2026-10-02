@@ -5,12 +5,15 @@ import {pinnedProxy} from './proxy.mjs';
 import {classify} from './classify.mjs';
 import {preflight} from './preflight.mjs';
 import {directoryBytes} from './temp.mjs';
+import {verifyOwnership} from './ownership.mjs';
 
 export async function probe(task,limits={}) {
   const diskLimit=limits.diskLimitBytes||512*1024*1024;
   if(limits.dataDir && await directoryBytes(limits.dataDir)>diskLimit)throw new Error('Worker disk budget exhausted');
   const t = target(task);
-  await preflight(t);
+  const ownership = await verifyOwnership(task);
+  if (['dns_mismatch','dns_unknown'].includes(ownership.ownership_status)) return {status:'failed',...ownership,error:ownership.ownership_status==='dns_mismatch'?'请求 Host/SNI 的 DNS 未指向此公网 IP，保留为未归属线索，未请求网页':'DNS 归属核实暂不可用，未请求网页'};
+  try {await preflight(t);}catch(error){error.ownership=ownership;throw error;}
   const proxy = await pinnedProxy(t);
   let browser, watchdog, diskWatch, checkingDisk=false, diskExceeded=false;
   try {
@@ -43,7 +46,7 @@ export async function probe(task,limits={}) {
     const classified = classify(title, text, {description});
     classified.classification.observed_at = new Date().toISOString();
     classified.classification.reasons.push('仅首页；第三方资源及跨站跳转默认阻止');
-    return {status: 'verified', title, description, http_status: response.status(), final_url: page.url().slice(0,2048), ...classified,
+    return {status: 'verified', ...ownership, title, description, http_status: response.status(), final_url: page.url().slice(0,2048), ...classified,
       content_hash: createHash('sha256').update(title + '\n' + description + '\n' + text).digest('hex'), screenshot: screenshot.length <= 2*1024*1024 ? screenshot.toString('base64') : null};
-  } finally {clearTimeout(watchdog);clearInterval(diskWatch);if(browser)await browser.close().catch(()=>{});await proxy.close();}
+  } catch(error) {error.ownership=ownership;throw error;} finally {clearTimeout(watchdog);clearInterval(diskWatch);if(browser)await browser.close().catch(()=>{});await proxy.close();}
 }

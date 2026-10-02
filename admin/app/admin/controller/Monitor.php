@@ -20,7 +20,7 @@ class Monitor extends Backend
     private const TABLES = [
         'nodes' => ['name', 'id', 'enabled', 'cidrs', 'last_seen_at', 'health', 'agent_desired_version', 'agent_update_requested_at'],
         'ips' => ['ip', 'id', 'version', 'label', 'first_seen_at', 'last_seen_at'],
-        'websites' => ['id', 'ip_asset_id', 'host', 'port', 'scheme', 'status', 'title', 'description', 'category', 'manual_category', 'last_probed_at', 'last_seen_at'],
+        'websites' => ['id', 'ip_asset_id', 'host', 'port', 'scheme', 'status', 'ownership_status', 'title', 'description', 'category', 'manual_category', 'last_probed_at', 'last_seen_at'],
         'alerts' => ['id', 'node_id', 'ip_asset_id', 'title', 'kind', 'severity', 'status', 'occurrences', 'last_seen_at'],
         'rules' => ['id', 'name', 'kind', 'threshold', 'window_seconds', 'cooldown_seconds', 'severity', 'node_id', 'enabled'],
         'exclusions' => ['id', 'cidr', 'kind', 'reason', 'node_id', 'expires_at'],
@@ -72,7 +72,7 @@ class Monitor extends Backend
         $this->success('', [
             'nodes' => $db->table('nodes')->where('enabled', true)->where('last_seen_at', '>', gmdate('Y-m-d H:i:s', time() - 300))->count(),
             'ips' => $db->table('ip_assets')->count(),
-            'websites' => $db->table('websites')->count(),
+            'websites' => $db->table('websites')->whereIn('ownership_status', ['dns_match', 'manual', 'ip_only'])->count(),
             'alerts' => $db->table('monitor_events')->where('status', 'open')->count(),
             'batches' => $db->table('batches')->whereNull('processed_at')->count(),
         ]);
@@ -174,6 +174,19 @@ class Monitor extends Backend
         if ($severity !== '' && $resource === 'alerts') {
             $query->where('m.severity', $severity);
         }
+        if ($resource === 'websites') {
+            $ownership = (string) $this->request->get('ownership', 'assets');
+            $states = match ($ownership) {
+                'assets' => ['dns_match', 'manual', 'ip_only'],
+                'candidates' => ['unverified', 'dns_unknown'],
+                'foreign' => ['dns_mismatch'],
+                'all' => null,
+                default => ['dns_match', 'manual', 'ip_only'],
+            };
+            if ($states !== null) {
+                $query->whereIn('m.ownership_status', $states);
+            }
+        }
         if ($resource === 'websites' && $review === '1') {
             $query->whereIn('m.category', ['疑似博彩', '疑似成人内容', '疑似诈骗引流', '支付平台线索', '贷款平台线索', '影视授权待核实'])->whereNull('m.manual_category');
         }
@@ -246,6 +259,50 @@ class Monitor extends Backend
         $this->success(count($ids).' 条告警已更新');
     }
 
+    protected function behaviorWhitelistScope(array $evidence, string $severity, ?array $requestedTargets = null): string
+    {
+        $sample = $evidence['sample'] ?? $evidence;
+        $targets = $sample['targets'] ?? ($sample['egress_target_samples'] ?? []);
+        $ports = $sample['ports'] ?? [];
+        foreach ($sample['outbound_endpoints'] ?? [] as $endpoint) {
+            $targets[] = $endpoint['peer_ip'];
+            $ports[] = $endpoint['peer_port'];
+        }
+        foreach ($sample['target_endpoints'] ?? [] as $endpoint) {
+            if (preg_match('/^(?:\[([^]]+)\]|([^:]+)):(\d+)$/', $endpoint, $match)) {
+                $targets[] = $match[1] ?: $match[2];
+                $ports[] = (int) $match[3];
+            }
+        }
+        if (isset($sample['peer_ip'])) {
+            $targets[] = $sample['peer_ip'];
+            $ports[] = $sample['peer_port'];
+        }
+        $cidrs = $requestedTargets ?? $this->request->post('target_cidrs/a', []);
+        if (count($cidrs) > 256) {
+            $this->error('最多允许 256 个目标 IP/CIDR');
+        }
+        if (! $cidrs) {
+            $cidrs = array_map(fn ($ip) => $ip.(str_contains($ip, ':') ? '/128' : '/32'), array_values(array_unique($targets)));
+        }
+        foreach ($cidrs as &$cidr) {
+            if (! is_string($cidr)) {
+                $this->error('目标 IP/CIDR 格式无效');
+            }
+            if (filter_var($cidr, FILTER_VALIDATE_IP)) {
+                $cidr .= str_contains($cidr, ':') ? '/128' : '/32';
+            }
+            if (! $this->validCidr($cidr)) {
+                $this->error('目标 IP/CIDR 格式无效');
+            }
+        }
+        unset($cidr);
+
+        return json_encode(['version' => 1, 'target_cidrs' => array_slice(array_values(array_unique($cidrs)), 0, 256), 'ports' => array_slice(array_values(array_unique(array_map('intval', $ports))), 0, 64),
+            'max_value' => max(1, (float) ($evidence['value'] ?? 0) * 2), 'severity' => $severity, 'reviewed_at' => gmdate('c'),
+            'policy' => 'Complete destination evidence only; unknown targets, ports, intensity or stronger evidence require review']);
+    }
+
     public function whitelistAlert(): void
     {
         $this->writable();
@@ -278,17 +335,18 @@ class Monitor extends Backend
             $expires = gmdate('Y-m-d H:i:s', time() + 30 * 86400);
             $scope = ['node_id' => $alert['node_id'], 'cidr' => $cidr, 'kind' => $alert['kind']];
             $existing = $db->table('exclusions')->where($scope)->find();
+            $behaviorScope = $asset ? $this->behaviorWhitelistScope((array) $this->decode($alert['evidence'] ?? null), $alert['severity']) : null;
             if ($existing) {
-                $db->table('exclusions')->where('id', $existing['id'])->update(['expires_at' => $expires, 'updated_at' => $now]);
+                $db->table('exclusions')->where('id', $existing['id'])->update(['expires_at' => $expires, 'behavior_scope' => $behaviorScope, 'updated_at' => $now]);
             } else {
                 $db->table('exclusions')->insert($scope + [
                     'reason' => '管理员从告警 #'.$id.' 加入白名单，待业务复核',
-                    'expires_at' => $expires, 'created_at' => $now, 'updated_at' => $now,
+                    'expires_at' => $expires, 'behavior_scope' => $behaviorScope, 'created_at' => $now, 'updated_at' => $now,
                 ]);
             }
             $db->table('alerts')->where('node_id', $alert['node_id'])->where('ip_asset_id', $alert['ip_asset_id'])
                 ->where('kind', $alert['kind'])->where('status', 'open')
-                ->update(['status' => 'resolved', 'resolution' => '已按节点、'.($asset ? '公网 IP、' : '').'此告警类型加入 30 天白名单；待业务复核',
+                ->update(['status' => 'resolved', 'resolution' => '已建立 30 天定向业务例外；目标、端口、强度或证据变化时重新复核',
                     'updated_at' => $now]);
             $this->audit('alert_whitelisted', 'Alert:'.$id, ['node_id' => $alert['node_id'], 'ip' => $asset['ip'] ?? null, 'kind' => $alert['kind'], 'expires_at' => $expires]);
             $db->commit();
@@ -296,7 +354,7 @@ class Monitor extends Backend
             $db->rollback();
             throw $e;
         }
-        $this->success('该节点'.($asset ? '此公网 IP 的' : '的').'此类型告警已暂停 30 天');
+        $this->success($asset ? '已保存 30 天定向业务例外；目标、端口、强度或证据变化时继续告警，截断样本不自动放行' : '已暂停此节点上报中断告警 30 天');
     }
 
     public function save(): void
@@ -312,12 +370,34 @@ class Monitor extends Backend
         $allowed = match ($resource) {
             'ips' => ['label', 'notes'], 'websites' => ['manual_category'],
             'rules' => ['name', 'kind', 'enabled', 'severity', 'threshold', 'window_seconds', 'cooldown_seconds', 'node_id'],
-            'exclusions' => ['cidr', 'kind', 'reason', 'expires_at', 'node_id'],
+            'exclusions' => ['cidr', 'kind', 'reason', 'expires_at', 'node_id', 'target_cidrs', 'allowed_ports', 'max_value', 'allowed_severity'],
             'nodes' => ['name', 'enabled', 'cidrs', 'settings', 'notes'],
         };
         $data = array_intersect_key($data, array_flip($allowed));
         if (! $data) {
             $this->error('没有可保存的字段');
+        }
+        if ($resource === 'exclusions') {
+            $targets = $data['target_cidrs'] ?? [];
+            $ports = $data['allowed_ports'] ?? [];
+            $maxValue = $data['max_value'] ?? 0;
+            $severity = $data['allowed_severity'] ?? 'medium';
+            unset($data['target_cidrs'], $data['allowed_ports'], $data['max_value'], $data['allowed_severity']);
+            $existing = $id !== '' ? $this->db()->table('exclusions')->where('id', $id)->find() : [];
+            $source = $data['cidr'] ?? $existing['cidr'] ?? null;
+            if ($source) {
+                if (! is_array($targets) || ! $targets || ! is_array($ports) || ! $ports || count($ports) > 64 || ! is_numeric($maxValue) || $maxValue < 1 || $maxValue > 1e12 || ! in_array($severity, ['low', 'medium', 'high'], true)) {
+                    $this->error('IP 业务例外必须填写目标 IP/CIDR、允许端口、行为强度上限和证据级别；也可以从告警创建');
+                }
+                foreach ($ports as $port) {
+                    if (filter_var($port, FILTER_VALIDATE_INT) === false || $port < 1 || $port > 65535) {
+                        $this->error('允许端口无效');
+                    }
+                }
+                $scope = json_decode($this->behaviorWhitelistScope(['sample' => ['ports' => array_map('intval', $ports)]], $severity, $targets), true);
+                $scope['max_value'] = (float) $maxValue;
+                $data['behavior_scope'] = json_encode($scope, JSON_UNESCAPED_UNICODE);
+            }
         }
         $this->validateRecord($resource, $data, $id === '', $id);
         if (isset($data['cidrs'])) {
@@ -659,11 +739,12 @@ class Monitor extends Backend
             $now = gmdate('Y-m-d H:i:s');
             $id = $db->table('websites')->insertGetId([
                 'ip_asset_id' => $asset['id'], 'fingerprint' => $fingerprint, 'port' => $port,
-                'scheme' => $scheme, 'host' => $host, 'source' => 'manual', 'status' => 'observed',
+                'scheme' => $scheme, 'host' => $host, 'source' => 'manual', 'ownership_status' => 'manual', 'status' => 'observed',
                 'first_seen_at' => $now, 'last_seen_at' => $now, 'created_at' => $now, 'updated_at' => $now,
             ]);
         } else {
             $id = $site['id'];
+            $db->table('websites')->where('id', $id)->update(['source' => 'manual', 'ownership_status' => 'manual']);
         }
         $this->queueProbe((int) $id);
         $this->success('网站已加入验证队列', ['id' => $id]);
@@ -689,7 +770,7 @@ class Monitor extends Backend
         $resource = (string) $this->request->get('resource', '');
         $columns = match ($resource) {
             'ips' => ['ip' => '公网 IP', 'label' => '标签', 'first_seen_at' => '首次发现', 'last_seen_at' => '最后发现'],
-            'websites' => ['ip' => '公网 IP', 'host' => '域名线索', 'port' => '端口', 'scheme' => '协议', 'status' => '验证状态', 'title' => '标题', 'description' => '网站描述', 'category' => '自动分类', 'manual_category' => '人工分类', 'last_probed_at' => '最近验证'],
+            'websites' => ['ip' => '公网 IP', 'host' => '域名线索', 'port' => '端口', 'scheme' => '协议', 'status' => '验证状态', 'ownership_status' => '归属状态', 'title' => '标题', 'description' => '网站描述', 'category' => '自动分类', 'manual_category' => '人工分类', 'last_probed_at' => '最近验证'],
             'alerts' => ['ip' => '公网 IP', 'node_name' => '观察节点', 'kind' => '类型', 'severity' => '级别', 'status' => '状态', 'title' => '标题', 'last_seen_at' => '时间'],
             default => null,
         };

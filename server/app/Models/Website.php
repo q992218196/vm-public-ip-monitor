@@ -24,7 +24,7 @@ class Website extends Model
 
     protected function casts(): array
     {
-        return ['classification' => 'array', 'last_probed_at' => 'datetime', 'first_seen_at' => 'datetime', 'last_seen_at' => 'datetime'];
+        return ['ownership_evidence' => 'array', 'classification' => 'array', 'last_probed_at' => 'datetime', 'first_seen_at' => 'datetime', 'last_seen_at' => 'datetime'];
     }
 
     public function ipAsset()

@@ -10,7 +10,7 @@ class Exclusion extends Model
 
     protected function casts(): array
     {
-        return ['expires_at' => 'datetime'];
+        return ['expires_at' => 'datetime', 'behavior_scope' => 'array'];
     }
 
     public function node()

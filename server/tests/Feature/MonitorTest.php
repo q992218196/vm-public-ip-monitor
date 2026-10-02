@@ -248,7 +248,7 @@ class MonitorTest extends TestCase
         $this->assertSame(13, $alert->evidence['connection_analysis']['synack_replies']);
     }
 
-    public function test_scan_only_exclusion_preserves_other_alert_types_and_metrics(): void
+    public function test_legacy_ip_exclusion_requires_target_scope_and_preserves_metrics(): void
     {
         $this->seed(MonitorSeeder::class);
         $node = $this->node();
@@ -260,7 +260,7 @@ class MonitorTest extends TestCase
         $payload['metrics'][0]['max_ports_per_target'] = 50;
         $this->upload($node, $payload)->assertOk();
         ProcessBatch::dispatchSync(Batch::firstOrFail()->id);
-        $this->assertDatabaseMissing('alerts', ['kind' => 'horizontal_scan']);
+        $this->assertDatabaseHas('alerts', ['kind' => 'horizontal_scan']);
         $this->assertDatabaseHas('alerts', ['kind' => 'vertical_scan']);
         $this->assertDatabaseCount('traffic_metrics', 1);
     }
@@ -280,7 +280,7 @@ class MonitorTest extends TestCase
         $this->assertDatabaseCount('traffic_metrics', 2);
     }
 
-    public function test_all_ip_alert_types_can_be_excluded_without_losing_evidence(): void
+    public function test_legacy_ip_whitelists_do_not_disable_detection_or_lose_evidence(): void
     {
         $this->seed(MonitorSeeder::class);
         Rule::query()->update(['threshold' => 1]);
@@ -312,7 +312,7 @@ class MonitorTest extends TestCase
         $this->upload($node, $payload)->assertOk();
         ProcessBatch::dispatchSync(Batch::where('batch_id', $payload['batch_id'])->firstOrFail()->id);
         $this->assertDatabaseCount('alerts', 8);
-        $this->assertSame(8, (int) Alert::sum('occurrences'));
+        $this->assertSame(16, (int) Alert::sum('occurrences'));
         $this->assertDatabaseCount('traffic_metrics', 2);
         $this->assertDatabaseCount('protocol_observations', 4);
         $this->assertDatabaseCount('websites', 1);
@@ -573,5 +573,49 @@ class MonitorTest extends TestCase
         ProcessBatch::dispatchSync(Batch::firstOrFail()->id);
         $this->assertDatabaseCount('protocol_observations', 1);
         $this->assertDatabaseMissing('alerts', ['kind' => 'proxy_suspect']);
+    }
+
+    public function test_foreign_host_ownership_is_preserved_as_a_clue_without_verified_content(): void
+    {
+        config(['monitor.worker_token' => $this->token]);
+        $node = $this->node();
+        $this->upload($node, $this->payload())->assertOk();
+        ProcessBatch::dispatchSync(Batch::first()->id);
+        $site = Website::firstOrFail();
+        $this->assertSame('unverified', $site->ownership_status);
+        app(ProbeQueue::class)->enqueue($site);
+        $claim = $this->withToken($this->token)->postJson('/api/v1/worker/claim')->assertOk()->json('task');
+        $this->assertSame($site->source, $claim['source']);
+        $url = '/api/v1/worker/tasks/'.$claim['id'].'/complete';
+        $body = ['lease_token' => $claim['lease_token'], 'status' => 'verified', 'ownership_status' => 'dns_match', 'ownership_evidence' => ['host' => $site->host, 'checked_at' => now()->toIso8601String(), 'method' => 'dns_A_AAAA', 'addresses' => ['198.51.100.1']]];
+        $this->postJson($url, $body)->assertUnprocessable();
+        $body['ownership_status'] = 'manual';
+        $this->postJson($url, $body)->assertUnprocessable();
+        $body['ownership_status'] = 'dns_mismatch';
+        $this->postJson($url, $body)->assertUnprocessable();
+        $body['status'] = 'failed';
+        $body['error'] = 'Foreign client Host; no webpage requested';
+        $this->postJson($url, $body)->assertOk();
+        $site->refresh();
+        $this->assertSame('dns_mismatch', $site->ownership_status);
+        $this->assertNull($site->classification);
+        $this->assertNull($site->screenshot_path);
+        $this->assertSame(['198.51.100.1'], $site->ownership_evidence['addresses']);
+    }
+
+    public function test_ip_only_ownership_accepts_empty_dns_address_evidence(): void
+    {
+        config(['monitor.worker_token' => $this->token]);
+        $node = $this->node();
+        $payload = $this->payload();
+        $payload['sites'][0]['host'] = '';
+        $this->upload($node, $payload)->assertOk();
+        ProcessBatch::dispatchSync(Batch::first()->id);
+        $site = Website::firstOrFail();
+        $this->assertSame('ip_only', $site->ownership_status);
+        app(ProbeQueue::class)->enqueue($site);
+        $claim = $this->withToken($this->token)->postJson('/api/v1/worker/claim')->assertOk()->json('task');
+        $this->postJson('/api/v1/worker/tasks/'.$claim['id'].'/complete', ['lease_token' => $claim['lease_token'], 'status' => 'verified', 'ownership_status' => 'ip_only', 'ownership_evidence' => ['host' => $claim['ip'], 'checked_at' => now()->toIso8601String(), 'method' => 'literal_ip_comparison', 'addresses' => []]])->assertOk();
+        $this->assertSame('verified', $site->fresh()->status);
     }
 }

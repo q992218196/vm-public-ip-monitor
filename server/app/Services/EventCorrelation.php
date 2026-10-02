@@ -50,6 +50,7 @@ class EventCorrelation
                 $behavior['change_streak'] = $reason ? (($previous['change_reason'] ?? '') === $reason ? ($previous['change_streak'] ?? 0) + (int) $freshWindow : 1) : 0;
                 $behavior['change_reason'] = $reason;
                 $changed = $reason && $behavior['change_streak'] >= 2;
+                $exceptionChanged = ! empty($evidence['whitelist_review']['required']);
                 $data = ['kinds' => array_values(array_unique([...$event->kinds, $kind])), 'last_seen_at' => max($event->last_seen_at, $time), 'occurrences' => $event->occurrences + 1];
                 if ($currentObservation) {
                     $data['quality'] = $quality;
@@ -60,9 +61,9 @@ class EventCorrelation
                 if ($raised && $currentObservation) {
                     $data += ['severity' => $severity, 'title' => $title];
                 }
-                if ($currentObservation && ($newKind || $raised || $changed) && in_array($event->status, ['normal', 'resolved'], true)) {
+                if ($currentObservation && ($newKind || $raised || $changed || $exceptionChanged) && in_array($event->status, ['normal', 'resolved'], true)) {
                     $data['status'] = 'open';
-                    $data['reopen_reason'] = $newKind ? '命中新的检测类型：'.$kind : ($raised ? '证据级别上升' : $reason.'（连续两个新窗口）');
+                    $data['reopen_reason'] = $exceptionChanged ? '白名单范围不匹配：'.($evidence['whitelist_review']['deviations'][0]['reason'] ?? '需要重新复核') : ($newKind ? '命中新的检测类型：'.$kind : ($raised ? '证据级别上升' : $reason.'（连续两个新窗口）'));
                     AuditLog::create(['action' => 'event.reopened', 'subject' => (string) $event->id, 'details' => ['new_kind' => $newKind, 'severity_raised' => $raised, 'behavior_change' => $changed, 'reason' => $data['reopen_reason']], 'created_at' => now()]);
                 }
                 $event->update($data);
