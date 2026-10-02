@@ -4,19 +4,29 @@ namespace App\Services;
 
 class PcapSummary
 {
-    public function summarize(string $path, string $ip): array
+    public const PACKET_TEXT_LIMIT = 2097152;
+
+    public function summarize(string $path, string $ip, bool $includePackets = false): array
     {
         $packedIp = inet_pton($ip);
         if ($packedIp === false) {
             throw new \RuntimeException('Invalid capture IP');
         }
         $ip = inet_ntop($packedIp);
+        if (! is_file($path) || filesize($path) > 33554432) {
+            throw new \RuntimeException('PCAP missing or exceeds 32 MiB');
+        }
+        $size = filesize($path);
         $stream = fopen($path, 'rb');
-        if (! $stream || filesize($path) > 33554432) {
+        if (! $stream) {
             throw new \RuntimeException('PCAP missing or exceeds 32 MiB');
         }
         $summary = ['ip' => $ip, 'frames' => 0, 'matched_packets' => 0, 'skipped_frames' => 0, 'unrelated_frames' => 0, 'bytes_out' => 0, 'bytes_in' => 0, 'truncated_frames' => 0, 'summary_capped' => false];
         $flows = [];
+        $packetText = "frame\ttime_unix\tdirection\tprotocol\tsource\tdestination\tflags_hex\tseq\tack\twire_bytes\tcaptured_bytes\tpayload_bytes_advertised\tapplication_clue_json\n";
+        $textFrames = 0;
+        $textCapped = false;
+        $summary['pcap_fully_read'] = false;
         $started = microtime(true);
         try {
             $header = $this->read($stream, 24);
@@ -39,6 +49,19 @@ class PcapSummary
                 $summary['frames']++;
                 $summary['truncated_frames'] += (int) ($r['incl'] < $r['orig']);
                 $packet = $this->decode($data);
+                $timestamp = $r['sec'].'.'.str_pad((string) $r['usec'], 6, '0', STR_PAD_LEFT);
+                $observedAt = gmdate('Y-m-d\TH:i:s', $r['sec']).'.'.str_pad((string) $r['usec'], 6, '0', STR_PAD_LEFT).'Z';
+                $summary['first_frame_at'] ??= $observedAt;
+                $summary['last_frame_at'] = $observedAt;
+                if ($includePackets && ! $textCapped) {
+                    $line = $this->packetLine($summary['frames'], $timestamp, $r, $packet, $ip);
+                    if (strlen($packetText) + strlen($line) <= self::PACKET_TEXT_LIMIT) {
+                        $packetText .= $line;
+                        $textFrames++;
+                    } else {
+                        $textCapped = true;
+                    }
+                }
                 if (! $packet) {
                     $summary['skipped_frames']++;
                 } elseif ($packet['src'] !== $ip && $packet['dst'] !== $ip) {
@@ -65,7 +88,7 @@ class PcapSummary
                             $flow['synack_in'] = true;
                             $flow['peer_syn_seq'] = $packet['seq'];
                         }
-                        if ($out && ($flags & 0x12) === 0x10 && $flow['synack_in'] && ! ($flags & 0x04) && $packet['ack'] === (($flow['peer_syn_seq'] + 1) & 0xFFFFFFFF)) {
+                        if ($out && ($flags & 0x12) === 0x10 && $flow['synack_in'] && ! ($flags & 0x04) && $packet['ack'] === (($flow['peer_syn_seq'] + 1) & 0xFFFFFFFF) && $packet['seq'] === (($flow['local_syn_seq'] + 1) & 0xFFFFFFFF)) {
                             $flow['handshake_completed'] = true;
                         }
                         if (! $out && ($flags & 0x04)) {
@@ -75,9 +98,8 @@ class PcapSummary
                         if ($out && $packet['tls_sni']) {
                             $flow['tls_client_hello_sni'] = $packet['tls_sni'];
                         }
-                        if ($out && ! isset($flow['http']) && preg_match('/^(GET|POST|HEAD|PUT|DELETE|PATCH|OPTIONS) ([^\s]{1,2048}) HTTP\/1\.[01]\r\n/', $packet['payload'], $match)) {
-                            $host = preg_match('/\r\nHost: ([^\r\n]{1,253})/i', $packet['payload'], $hm) ? $hm[1] : null;
-                            $flow['http'] = ['method' => $match[1], 'host' => $host, 'path' => strtok($match[2], '?'), 'query_values' => 'not retained', 'source' => 'first captured plaintext request header; no TCP reassembly'];
+                        if ($out && ! isset($flow['http']) && ($http = $this->httpClue($packet['payload']))) {
+                            $flow['http'] = $http;
                         }
                         unset($flow);
                     } else {
@@ -89,6 +111,9 @@ class PcapSummary
                     break;
                 }
             }
+            $summary['pcap_fully_read'] = ftell($stream) === $size;
+            $summary['file_bytes_read'] = ftell($stream);
+            $summary['file_bytes'] = $size;
         } finally {
             fclose($stream);
         }
@@ -104,12 +129,72 @@ class PcapSummary
         }
         $summary['unique_outbound_targets'] = count($targets);
         $summary['max_ports_per_target'] = $targets ? max(array_map('count', $targets)) : 0;
+        $portGroups = [];
+        $portTargets = [];
+        foreach ($outbound as $flow) {
+            $groupKey = $flow['transport'].':'.$flow['peer_port'];
+            $portGroups[$groupKey] ??= ['transport' => $flow['transport'], 'port' => $flow['peer_port'], 'outbound_flows' => 0, 'syn_packets' => 0, 'synack_flows' => 0, 'completed_handshakes' => 0, 'rst_reply_flows' => 0, 'no_reply_observed_flows' => 0, 'payload_bytes_out' => 0, 'payload_bytes_in' => 0];
+            $group = &$portGroups[$groupKey];
+            $group['outbound_flows']++;
+            $group['syn_packets'] += $flow['syn_out'];
+            $group['synack_flows'] += (int) $flow['synack_in'];
+            $group['completed_handshakes'] += (int) $flow['handshake_completed'];
+            $group['rst_reply_flows'] += (int) $flow['rst_in'];
+            $group['no_reply_observed_flows'] += (int) (! $flow['synack_in'] && ! $flow['rst_in']);
+            $group['payload_bytes_out'] += $flow['payload_bytes_out'];
+            $group['payload_bytes_in'] += $flow['payload_bytes_in'];
+            $portTargets[$groupKey][$flow['peer_ip']] = true;
+            unset($group);
+        }
+        foreach ($portGroups as $key => &$group) {
+            $group['unique_targets'] = count($portTargets[$key]);
+        }
+        unset($group);
+        uasort($portGroups, fn ($a, $b) => $b['outbound_flows'] <=> $a['outbound_flows']);
+        $summary['port_groups'] = array_values(array_slice($portGroups, 0, 64));
+        $summary['port_groups_truncated'] = count($portGroups) > 64;
+        if ($includePackets) {
+            $summary['packet_text'] = ['format' => 'tab-separated; one row per stored PCAP frame, including unsupported/unrelated frames', 'frames' => $textFrames, 'bytes' => strlen($packetText), 'complete' => ! $textCapped && $summary['pcap_fully_read'] && $textFrames === $summary['frames'], 'text' => $packetText, 'omitted' => 'raw payload, ciphertext hex, HTTP query/fragment values, cookies, authorization and bodies; no TCP reassembly; unknown frames retain timestamp and lengths only'];
+        }
         uasort($flows, fn ($a, $b) => ($b['syn_out'] * 1024 + $b['payload_bytes_out'] + $b['payload_bytes_in']) <=> ($a['syn_out'] * 1024 + $a['payload_bytes_out'] + $a['payload_bytes_in']));
         $summary['flow_samples'] = array_values(array_slice($flows, 0, 32));
         $summary['flow_samples_truncated'] = count($flows) > 32;
         $summary['limitations'] = ['Only the requested future capture interval is available; it does not reconstruct or disprove the original alert interval.', 'Outbound target and handshake counts require an outbound SYN in this capture; existing sessions are not counted as newly initiated flows.', 'Missing replies do not prove connection failure: loss, sampling, asymmetry and capture boundaries matter.', 'Multiple capture interfaces may include duplicate packets; retransmissions and tuple reuse affect counts.', 'HTTPS/TLS/QUIC payloads are encrypted; URL, request body, login result and actual proxy protocol cannot be recovered without keys or service logs. Visible SNI is only a single complete ClientHello clue, not ownership proof; ECH inner names are unavailable.', 'Flow and frame limits are conservative samples. HTTP header extraction has no TCP reassembly; query values, cookies, authorization and request bodies are omitted.'];
 
+        $summary['limitations'][] = 'Port groups cover tracked outbound TCP flows, capped at 4096 tuples and 64 port groups. Advertised payload lengths are from IP headers and may exceed captured payload bytes when snaplen truncates a frame.';
+
         return $summary;
+    }
+
+    private function httpClue(string $payload): ?array
+    {
+        if (! preg_match('/^(GET|POST|HEAD|PUT|DELETE|PATCH|OPTIONS) ([^\s]{1,2048}) HTTP\/1\.[01]\r\n/', $payload, $match)) {
+            return null;
+        }
+        $host = preg_match('/\r\nHost: ([a-zA-Z0-9.\-_:\[\]]{1,253})\r\n/i', $payload, $hm) ? $hm[1] : null;
+        $path = parse_url($match[2], PHP_URL_PATH);
+
+        return ['method' => $match[1], 'host' => $host, 'path' => is_string($path) ? mb_substr($path, 0, 512) : null, 'path_truncated' => is_string($path) && mb_strlen($path) > 512, 'query_values' => 'not retained', 'source' => 'first captured plaintext request header; no TCP reassembly'];
+    }
+
+    private function packetLine(int $frame, string $timestamp, array $record, ?array $packet, string $ip): string
+    {
+        if (! $packet) {
+            return implode("\t", [$frame, $timestamp, 'unknown', 'unsupported', '-', '-', '-', '-', '-', $record['orig'], $record['incl'], '-', '{}'])."\n";
+        }
+        $direction = $packet['src'] === $ip ? 'out' : ($packet['dst'] === $ip ? 'in' : 'unrelated');
+        $endpoint = fn ($address, $port) => (str_contains($address, ':') ? '['.$address.']' : $address).':'.$port;
+        $clue = [];
+        if ($direction === 'out') {
+            if ($packet['tls_sni']) {
+                $clue['sni'] = $packet['tls_sni'];
+            }
+            if ($http = $this->httpClue($packet['payload'])) {
+                $clue['http'] = $http;
+            }
+        }
+
+        return implode("\t", [$frame, $timestamp, $direction, $packet['protocol'] === 6 ? 'tcp' : 'udp', $endpoint($packet['src'], $packet['sp']), $endpoint($packet['dst'], $packet['dp']), dechex($packet['flags']), $packet['seq'], $packet['ack'], $record['orig'], $record['incl'], $packet['payload_size'], json_encode($clue ?: new \stdClass, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE | JSON_THROW_ON_ERROR)])."\n";
     }
 
     private function read($stream, int $length): string

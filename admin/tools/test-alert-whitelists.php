@@ -1,7 +1,7 @@
 <?php
 
 // CI-only integration tests against disposable PostgreSQL and the local test API.
-if (getenv('MONITOR_DB_DATABASE') !== 'monitor_test' || !getenv('TEST_ADMIN_TOKEN')) {
+if (getenv('MONITOR_DB_DATABASE') !== 'monitor_test' || ! getenv('TEST_ADMIN_TOKEN')) {
     throw new RuntimeException('This test requires the isolated CI database and test admin token');
 }
 $db = new PDO('pgsql:host=127.0.0.1;dbname=monitor_test', getenv('MONITOR_DB_USERNAME'), getenv('MONITOR_DB_PASSWORD'), [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
@@ -13,10 +13,11 @@ $db->prepare('INSERT INTO ip_assets VALUES (?,?)')->execute([2, '2001:db8::1']);
 $request = function (string $method, array $payload): array {
     $context = stream_context_create(['http' => [
         'method' => 'POST', 'ignore_errors' => true, 'timeout' => 20,
-        'header' => ['Content-Type: application/json', 'server: true', 'batoken: ' . getenv('TEST_ADMIN_TOKEN')],
+        'header' => ['Content-Type: application/json', 'server: true', 'batoken: '.getenv('TEST_ADMIN_TOKEN')],
         'content' => json_encode($payload, JSON_THROW_ON_ERROR),
     ]]);
-    return json_decode(file_get_contents('http://127.0.0.1:8099/admin/Monitor/' . $method, false, $context), true, 512, JSON_THROW_ON_ERROR);
+
+    return json_decode(file_get_contents('http://127.0.0.1:8099/admin/Monitor/'.$method, false, $context), true, 512, JSON_THROW_ON_ERROR);
 };
 $kinds = ['horizontal_scan', 'vertical_scan', 'suspected_bruteforce', 'single_target_attempts', 'tcp_connection_burst', 'egress_mbps', 'vpn_protocol', 'proxy_suspect', 'capture_degraded', 'node_offline'];
 foreach ($kinds as $index => $kind) {
@@ -26,27 +27,42 @@ foreach ($kinds as $index => $kind) {
     foreach ([[$id, $node], [$id + 1, $node], [$id + 2, $otherNode]] as [$alertId, $observer]) {
         $insert->execute([$alertId, $observer, $asset, $kind, $kind, 'medium', 'open', 1, '2026-10-01 00:00:00']);
     }
+    if ($kind === 'capture_degraded') {
+        if (($request('whitelistAlert', ['id' => $id])['code'] ?? null) === 1 || $db->query("SELECT count(*) FROM exclusions WHERE kind='capture_degraded'")->fetchColumn() != 0 || $db->query('SELECT status FROM alerts WHERE id='.$id)->fetchColumn() !== 'open') {
+            throw new RuntimeException('Capture quality can be muted through alert whitelist');
+        }
+
+        continue;
+    }
     foreach ([$id, $id] as $whitelistId) {
         $result = $request('whitelistAlert', ['id' => $whitelistId]);
-        if (($result['code'] ?? null) !== 1) throw new RuntimeException('Whitelist failed for ' . $kind . ': ' . ($result['msg'] ?? 'unknown'));
+        if (($result['code'] ?? null) !== 1) {
+            throw new RuntimeException('Whitelist failed for '.$kind.': '.($result['msg'] ?? 'unknown'));
+        }
     }
     $scopes = $db->prepare('SELECT * FROM exclusions WHERE node_id=? AND kind=?');
     $scopes->execute([$node, $kind]);
     $entries = $scopes->fetchAll(PDO::FETCH_ASSOC);
     $expectedCidr = $asset === null ? null : ($asset === 2 ? '2001:db8::1/128' : '203.0.113.10/32');
-    if (count($entries) !== 1 || $entries[0]['cidr'] !== $expectedCidr || strtotime($entries[0]['expires_at'] . ' UTC') < time() + 29 * 86400) {
-        throw new RuntimeException('Incorrect whitelist scope or duplicate for ' . $kind);
+    if (count($entries) !== 1 || $entries[0]['cidr'] !== $expectedCidr || strtotime($entries[0]['expires_at'].' UTC') < time() + 29 * 86400) {
+        throw new RuntimeException('Incorrect whitelist scope or duplicate for '.$kind);
     }
     $statuses = $db->prepare('SELECT status FROM alerts WHERE id IN (?,?,?) ORDER BY id');
     $statuses->execute([$id, $id + 1, $id + 2]);
-    if ($statuses->fetchAll(PDO::FETCH_COLUMN) !== ['resolved', 'resolved', 'open']) throw new RuntimeException('Resolution escaped node scope for ' . $kind);
+    if ($statuses->fetchAll(PDO::FETCH_COLUMN) !== ['resolved', 'resolved', 'open']) {
+        throw new RuntimeException('Resolution escaped node scope for '.$kind);
+    }
     if ($asset === null) {
         $result = $request('save', ['resource' => 'exclusions', 'id' => $entries[0]['id'], 'data' => ['reason' => 'Maintenance reviewed', 'expires_at' => gmdate('Y-m-d H:i:s', time() + 86400)]]);
-        if (($result['code'] ?? null) !== 1) throw new RuntimeException('Partial node whitelist edit failed');
+        if (($result['code'] ?? null) !== 1) {
+            throw new RuntimeException('Partial node whitelist edit failed');
+        }
     }
 }
-foreach ([['kind' => 'node_offline', 'cidr' => '203.0.113.10/32'], ['kind' => 'vpn_protocol', 'cidr' => '']] as $invalid) {
+foreach ([['kind' => 'node_offline', 'cidr' => '203.0.113.10/32'], ['kind' => 'vpn_protocol', 'cidr' => ''], ['kind' => 'capture_degraded', 'cidr' => '']] as $invalid) {
     $result = $request('save', ['resource' => 'exclusions', 'data' => $invalid + ['node_id' => $node, 'reason' => 'Invalid scope', 'expires_at' => gmdate('Y-m-d H:i:s', time() + 86400)]]);
-    if (($result['code'] ?? null) === 1) throw new RuntimeException('Invalid whitelist scope was accepted');
+    if (($result['code'] ?? null) === 1) {
+        throw new RuntimeException('Invalid whitelist scope was accepted');
+    }
 }
-echo "All ten alert types passed: IPv4, IPv6, node health, repeat action, scoped resolution and partial edit.\n";
+echo "Nine whitelist types and capture-quality rejection passed: IPv4, IPv6, node health, repeat action, scoped resolution and partial edit.\n";

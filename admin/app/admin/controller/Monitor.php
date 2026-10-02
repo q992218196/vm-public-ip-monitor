@@ -260,6 +260,9 @@ class Monitor extends Backend
             if (! $alert) {
                 $this->error('告警不存在', [], 404);
             }
+            if ($alert['kind'] === 'capture_degraded') {
+                $this->error('采集覆盖下降属于采集质量问题，不支持加入白名单；请处理丢包或采集限额。');
+            }
             $asset = null;
             $cidr = null;
             if ($alert['ip_asset_id']) {
@@ -435,7 +438,10 @@ class Monitor extends Backend
                 $data['cidr'] = null;
             }
             $scope = $creating ? $data : array_replace($this->db()->table('exclusions')->where('id', $id)->find() ?: [], $data);
-            $nodeAlert = in_array($scope['kind'] ?? '', ['node_offline', 'capture_degraded'], true);
+            if (($scope['kind'] ?? '') === 'capture_degraded') {
+                $this->error('采集覆盖下降不支持加入白名单，请处理采集质量。');
+            }
+            $nodeAlert = ($scope['kind'] ?? '') === 'node_offline';
             if ($nodeAlert) {
                 if (empty($scope['node_id']) || ! empty($scope['cidr'])) {
                     $this->error('节点健康白名单必须指定节点，公网 IP/CIDR 留空');

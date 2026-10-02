@@ -167,6 +167,10 @@ jobs:
         working-directory: admin
       - run: npm ci --no-audit --no-fund && npm run typecheck && npm run lint && npm run build
         working-directory: admin/web
+      - run: npm ci --no-audit --no-fund && npx playwright install --with-deps chromium
+        working-directory: worker
+      - run: node ../tools/test-ai-report.mjs
+        working-directory: admin/web
   containers:
     runs-on: ubuntu-latest
     steps:

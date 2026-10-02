@@ -74,7 +74,13 @@
                 <el-table-column label="操作" fixed="right" min-width="160"
                     ><template #default="scope"
                         ><el-button link type="primary" @click="openDetail(scope.row.id)">详情与证据</el-button
-                        ><el-button v-if="isAdmin" link type="warning" @click="whitelist(scope.row.id)">加入白名单</el-button></template
+                        ><el-button
+                            v-if="isAdmin && !scope.row.kinds.includes('capture_degraded')"
+                            link
+                            type="warning"
+                            @click="whitelist(scope.row.id)"
+                            >加入白名单</el-button
+                        ></template
                     ></el-table-column
                 >
             </el-table>
@@ -112,7 +118,8 @@
                     <el-alert :title="qualityText" type="info" :closable="false" />
                     <div v-if="isAdmin" class="actions">
                         <el-button @click="openReview([detail.event.id])">人工审核</el-button
-                        ><el-button type="warning" @click="whitelist(detail.event.id)">加入白名单</el-button
+                        ><el-button v-if="!detail.event.kinds.includes('capture_degraded')" type="warning" @click="whitelist(detail.event.id)"
+                            >加入白名单</el-button
                         ><el-select v-model="snaplen" class="capture-length"
                             ><el-option :value="2048" label="每包前 2048 字节" /><el-option
                                 :value="65535"
@@ -192,17 +199,63 @@
                 ><el-button type="primary" :loading="reviewing" @click="review">保存审核结果</el-button></template
             ></el-dialog
         >
+        <el-dialog v-model="aiRequestOpen" title="手动申请 AI 分析" width="min(700px, 95vw)" :close-on-click-modal="false">
+            <p>接口：{{ detail?.ai?.endpoint }} · 模型：{{ detail?.ai?.model }}</p>
+            <el-radio-group v-model="aiMode" class="ai-mode">
+                <el-radio value="summary" border>统计摘要（推荐）</el-radio>
+                <el-radio value="full_packets" border>完整逐包文本</el-radio>
+            </el-radio-group>
+            <p v-if="aiMode === 'summary'">发送端口分组统计、32 条连接样本、可见请求头、规则与采集质量。文本上限 128 KiB。</p>
+            <p v-else>
+                逐帧转换整个已存储 PCAP，发送时间、方向、IP/端口、TCP 标志及序号、包长和可见请求线索。每帧一行，超出 2 MiB 发送上限、20 万帧或 8
+                秒解析上限时停止，不调用 AI，也不自动分批收费。
+            </p>
+            <el-alert
+                title="两种模式都不外发原始载荷、查询参数值、Cookie、Authorization 或请求正文；不解密 HTTPS。可见路径仍可能含业务信息。"
+                type="info"
+                :closable="false"
+            />
+            <p>
+                只有点击“提交分析”才会调用接口，可能产生费用；失败不会自动重试。完整模式用量通常较大，发送上限也不保证符合所选模型的实际上下文限制。
+            </p>
+            <template #footer>
+                <el-button @click="aiRequestOpen = false">取消</el-button>
+                <el-button type="primary" :loading="!!requestingAi" @click="submitAi">提交分析</el-button>
+            </template>
+        </el-dialog>
         <el-dialog v-model="reportOpen" title="AI 证据分析报告" width="min(950px, 95vw)"
             ><div v-loading="reportLoading">
                 <template v-if="report"
                     ><el-alert title="AI 报告是辅助意见；请结合原始证据人工判断。" type="info" :closable="false" />
                     <p>{{ label(report.status) }} {{ report.last_error }}</p>
                     <p>模型：{{ report.model }} · 申请人 ID：{{ report.requested_by }} · 用量：{{ report.usage?.total_tokens ?? '未返回' }} tokens</p>
-                    <pre>{{ report.report || '报告尚未生成' }}</pre>
-                    <details>
-                        <summary>发送给 AI 的解析证据</summary>
-                        <pre>{{ JSON.stringify(report.evidence, null, 2) }}</pre>
-                    </details></template
+                    <el-descriptions v-if="report.evidence?.coverage" :column="2" border class="report-coverage">
+                        <el-descriptions-item label="发送方式">{{
+                            report.evidence_mode === 'full_packets' ? '完整逐包文本' : '统计摘要'
+                        }}</el-descriptions-item>
+                        <el-descriptions-item label="PCAP 读取">{{
+                            report.evidence.coverage.pcap_fully_read ? '已读完整文件' : '未读完整文件'
+                        }}</el-descriptions-item>
+                        <el-descriptions-item label="帧数">{{ report.evidence.coverage.frames_read }} 帧</el-descriptions-item>
+                        <el-descriptions-item label="逐包文本"
+                            >{{ report.evidence.coverage.packet_text_frames }} 帧 ·
+                            {{ (report.evidence.coverage.packet_text_bytes / 1024).toFixed(1) }} KiB{{
+                                report.evidence_mode === 'full_packets'
+                                    ? report.evidence.coverage.packet_text_complete
+                                        ? ' · 全部帧'
+                                        : ' · 未完成，未调用 AI'
+                                    : ''
+                            }}</el-descriptions-item
+                        >
+                    </el-descriptions>
+                    <el-button v-if="report.report" @click="downloadAiReport">下载 Markdown 报告</el-button>
+                    <AiReport v-if="report.report" :content="report.report" />
+                    <el-empty v-else :description="report.last_error || '报告尚未生成'" />
+                    <el-collapse v-model="evidenceOpen">
+                        <el-collapse-item title="查看实际发送的解析证据" name="evidence">
+                            <pre v-if="evidenceOpen.length">{{ JSON.stringify(report.evidence, null, 2) }}</pre>
+                        </el-collapse-item>
+                    </el-collapse></template
                 >
             </div></el-dialog
         >
@@ -259,11 +312,16 @@
     </div>
 </template>
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import createAxios from '/@/utils/axios'
 import TrafficEvidence from './TrafficEvidence.vue'
 import EventReviewReport from './EventReviewReport.vue'
+const AiReport = defineAsyncComponent(() => import('./AiReport.vue'))
+const aiRequestOpen = ref(false)
+const aiCapture = ref<any>(null)
+const aiMode = ref<'summary' | 'full_packets'>('summary')
+const evidenceOpen = ref<string[]>([])
 const statuses: Record<string, string> = { open: '待处理', acknowledged: '观察中', normal: '已核查正常', resolved: '已处理' }
 const names: Record<string, string> = {
     ...statuses,
@@ -528,14 +586,17 @@ async function requestAi(item: any) {
         ElMessage.info('请先在 AI 分析设置中配置并启用 DeepSeek')
         return
     }
-    await ElMessageBox.confirm(
-        `将此 PCAP 的解析证据摘要（IP、端口、握手、流量、可见明文请求头）发送到 ${detail.value.ai.endpoint}，模型 ${detail.value.ai.model}。原始 PCAP 不上传，API 调用可能产生费用，失败不会自动重试。`,
-        '手动申请 AI 分析',
-        { type: 'warning', confirmButtonText: '提交分析' }
-    )
+    aiCapture.value = item
+    aiMode.value = 'summary'
+    aiRequestOpen.value = true
+}
+async function submitAi() {
+    const item = aiCapture.value
+    if (!item || requestingAi.value) return
     requestingAi.value = item.id
     try {
-        await api('requestAi', { capture_id: item.id }, 'post')
+        await api('requestAi', { capture_id: item.id, evidence_mode: aiMode.value }, 'post')
+        aiRequestOpen.value = false
         ElMessage.success('分析已排队')
         await refreshProgress()
     } finally {
@@ -544,6 +605,7 @@ async function requestAi(item: any) {
 }
 async function openReport(id: number) {
     report.value = null
+    evidenceOpen.value = []
     reportOpen.value = true
     reportLoading.value = true
     try {
@@ -552,6 +614,14 @@ async function openReport(id: number) {
     } finally {
         reportLoading.value = false
     }
+}
+function downloadAiReport() {
+    const url = URL.createObjectURL(new Blob([report.value?.report || ''], { type: 'text/markdown;charset=utf-8' }))
+    const a = document.createElement('a')
+    a.href = url
+    a.download = 'AI-流量分析-' + report.value.id + '.md'
+    a.click()
+    URL.revokeObjectURL(url)
 }
 async function openCaptureReport(id: string) {
     captureReport.value = null
@@ -604,6 +674,14 @@ onBeforeUnmount(() => {
 })
 </script>
 <style scoped>
+.ai-mode {
+    display: flex;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+.report-coverage {
+    margin: 16px 0;
+}
 .heading {
     display: flex;
     justify-content: space-between;

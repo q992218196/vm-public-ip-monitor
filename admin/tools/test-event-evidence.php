@@ -84,12 +84,15 @@ $settings['enabled'] = true;
 $settings['api_key'] = '';
 $ok($request('saveSettings', $settings, true));
 $db->prepare('UPDATE packet_captures SET status=?,sha256=?,metadata=?,summary=? WHERE id=?')->execute(['uploaded', str_repeat('a', 64), '{}', '{"matched_packets":3}', $task]);
-$id = $ok($request('requestAi', ['capture_id' => $task], true))['id'];
+if (($request('requestAi', ['capture_id' => $task, 'evidence_mode' => 'invalid'], true)['code'] ?? null) === 1) {
+    throw new RuntimeException('Unknown AI evidence mode accepted');
+}
+$id = $ok($request('requestAi', ['capture_id' => $task, 'evidence_mode' => 'full_packets'], true))['id'];
 if (($request('requestAi', ['capture_id' => $task], true)['code'] ?? null) === 1 || $db->query('SELECT count(*) FROM ai_analyses')->fetchColumn() != 1) {
     throw new RuntimeException('Duplicate manual AI request');
 }
 $analysis = $ok($request('analysis', ['id' => $id]))['record'];
-if ($analysis['status'] !== 'pending' || isset($analysis['config_snapshot'])) {
+if ($analysis['status'] !== 'pending' || $analysis['evidence_mode'] !== 'full_packets' || isset($analysis['config_snapshot'])) {
     throw new RuntimeException('AI credentials exposed or automatically executed');
 }
 if ($ok($request('captureSummary', ['id' => $task]))['record']['summary']['matched_packets'] !== 3) {
@@ -113,5 +116,10 @@ $ok($request('whitelist', ['id' => 100], true));
 $event = $db->query('SELECT status FROM monitor_events WHERE id=100')->fetchColumn();
 if ($event !== 'normal') {
     throw new RuntimeException('Whitelist review incorrect');
+}
+$db->exec("UPDATE monitor_events SET kinds='[\"capture_degraded\"]',status='open' WHERE id=100");
+$before = $db->query('SELECT count(*) FROM exclusions')->fetchColumn();
+if (($request('whitelist', ['id' => 100], true)['code'] ?? null) === 1 || $db->query('SELECT count(*) FROM exclusions')->fetchColumn() != $before || $db->query('SELECT status FROM monitor_events WHERE id=100')->fetchColumn() !== 'open') {
+    throw new RuntimeException('Capture quality can be muted through event whitelist');
 }
 echo "Event list/count/detail, local PCAP summary, manual AI, encrypted secrets, duplicate prevention and read-only permissions passed.\n";

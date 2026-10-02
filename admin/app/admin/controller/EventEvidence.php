@@ -143,6 +143,9 @@ class EventEvidence extends Monitor
             }
             $this->db()->table('nodes')->where('id', $event['node_id'])->lock(true)->find();
             $event = $this->db()->table('monitor_events')->where('id', $id)->lock(true)->find();
+            if (in_array('capture_degraded', $this->decode($event['kinds']), true)) {
+                $this->error('采集覆盖下降属于采集质量问题，不支持加入白名单；请处理丢包或采集限额。');
+            }
             $ip = $event['ip_asset_id'] ? $this->db()->table('ip_assets')->where('id', $event['ip_asset_id'])->value('ip') : null;
             if ($event['ip_asset_id'] && ! $ip) {
                 $this->error('IP 资产不存在');
@@ -284,8 +287,12 @@ class EventEvidence extends Monitor
     {
         $this->writable();
         $captureId = (string) $this->request->post('capture_id');
+        $mode = (string) $this->request->post('evidence_mode', 'summary');
+        if (! in_array($mode, ['summary', 'full_packets'], true)) {
+            $this->error('证据发送模式无效');
+        }
         $analysisId = 0;
-        $this->db()->transaction(function () use ($captureId, &$analysisId) {
+        $this->db()->transaction(function () use ($captureId, $mode, &$analysisId) {
             $capture = $this->db()->table('packet_captures')->where('id', $captureId)->lock(true)->find();
             if (! $capture || $capture['status'] !== 'uploaded') {
                 $this->error('请先完成抓包');
@@ -298,8 +305,8 @@ class EventEvidence extends Monitor
                 $this->error('此 PCAP 已有等待或执行中的分析');
             }
             $now = gmdate('Y-m-d H:i:s');
-            $analysisId = $this->db()->table('ai_analyses')->insertGetId(['event_id' => $capture['event_id'], 'capture_id' => $captureId, 'requested_by' => $this->auth->id, 'config_snapshot' => json_encode(array_intersect_key($settings, array_flip(['endpoint', 'model', 'api_key_cipher']))), 'created_at' => $now, 'updated_at' => $now]);
-            $this->audit('ai.manually_requested', 'AiAnalysis:'.$analysisId, ['capture_id' => $captureId, 'sha256' => $capture['sha256'], 'model' => $settings['model'], 'payload' => 'parsed text evidence only']);
+            $analysisId = $this->db()->table('ai_analyses')->insertGetId(['event_id' => $capture['event_id'], 'capture_id' => $captureId, 'requested_by' => $this->auth->id, 'config_snapshot' => json_encode(array_intersect_key($settings, array_flip(['endpoint', 'model', 'api_key_cipher'])) + ['evidence_mode' => $mode]), 'created_at' => $now, 'updated_at' => $now]);
+            $this->audit('ai.manually_requested', 'AiAnalysis:'.$analysisId, ['capture_id' => $captureId, 'sha256' => $capture['sha256'], 'model' => $settings['model'], 'payload' => 'parsed text evidence only', 'evidence_mode' => $mode]);
         });
         $this->success('已申请 AI 分析；不会自动重试或改变审核结果', ['id' => $analysisId]);
     }
@@ -314,6 +321,7 @@ class EventEvidence extends Monitor
         unset($row['config_snapshot']);
         $row['model'] = $config['model'] ?? null;
         $row['endpoint'] = $config['endpoint'] ?? null;
+        $row['evidence_mode'] = $config['evidence_mode'] ?? 'summary';
         $row['evidence'] = $this->decode($row['evidence']);
         $row['usage'] = $this->decode($row['usage']);
         $this->success('', ['record' => $row]);

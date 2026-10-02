@@ -151,7 +151,7 @@
                             >更新 Agent</el-button
                         >
                         <el-button
-                            v-if="isAdmin && resource === 'alerts'"
+                            v-if="isAdmin && resource === 'alerts' && scope.row.kind !== 'capture_degraded'"
                             link
                             type="warning"
                             :loading="actionId === scope.row.id"
@@ -182,7 +182,7 @@
             </el-result>
             <template v-else>
                 <el-button
-                    v-if="resource === 'alerts' && detail && isAdmin"
+                    v-if="resource === 'alerts' && detail && isAdmin && detail.kind !== 'capture_degraded'"
                     type="warning"
                     :loading="actionId === detail.id"
                     @click="whitelistAlert(detail)"
@@ -469,7 +469,6 @@ const definitions: Record<string, Definition> = {
                     vpn_protocol: 'VPN 双向握手',
                     proxy_suspect: '疑似加密代理',
                     node_offline: '节点上报中断（CIDR 留空）',
-                    capture_degraded: '采集覆盖下降（CIDR 留空）',
                 }),
             },
             col('reason', '原因'),

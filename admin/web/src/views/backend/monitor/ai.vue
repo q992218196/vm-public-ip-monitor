@@ -22,8 +22,9 @@
                 <el-form-item><el-button type="primary" :loading="saving" native-type="submit">保存配置</el-button></el-form-item>
             </el-form>
             <p>
-                DeepSeek 文件接口支持图片，不支持 PCAP。主控先解析抓包，再发送目标 IP、端口、握手、流量和可见 HTTP 请求头摘要。API Key
-                加密保存，页面不回显。
+                DeepSeek 文件接口支持图片，不支持
+                PCAP。主控先解析抓包，手动选择统计摘要或完整逐包文本后发送。完整模式只包含每帧头部与可见请求线索，超过发送或解析上限会停止，不自动分批调用。API
+                Key 加密保存，页面不回显。
             </p>
             <p>原始 PCAP 保存在主控私有目录。HTTPS 正文和实际加密代理协议无法直接恢复；AI 报告只辅助人工判断，不会自动处罚、处理告警或加入白名单。</p>
         </el-card>

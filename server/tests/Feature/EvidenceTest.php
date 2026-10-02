@@ -152,6 +152,111 @@ class EvidenceTest extends TestCase
         Http::assertSentCount(2);
     }
 
+    public function test_full_packet_text_covers_every_frame_without_exporting_payload_secrets(): void
+    {
+        $packets = [];
+        for ($i = 1; $i <= 40; $i++) {
+            $packets[] = $this->packet('203.0.113.10', '198.51.100.'.$i, 2, 20000, 21088);
+        }
+        $packets[] = $this->packet('203.0.113.10', '1.1.1.1', 2);
+        $packets[] = $this->packet('1.1.1.1', '203.0.113.10', 18, 443, 20000);
+        $packets[] = $this->packet('203.0.113.10', '1.1.1.1', 16, 20000, 443, "POST /node/instance?password=secret HTTP/1.1\r\nHost: api.example.test\r\nCookie: secret\r\nAuthorization: secret\r\n\r\nsecret-body");
+        $packets[] = $this->packet('192.0.2.1', '192.0.2.2', 2);
+        $packets[] = str_repeat("\0", 14);
+        $path = tempnam(sys_get_temp_dir(), 'full-text');
+        try {
+            $data = $this->pcap($packets);
+            file_put_contents($path, $data);
+            $summary = app(PcapSummary::class)->summarize($path, '203.0.113.10', true);
+            $this->assertTrue($summary['pcap_fully_read']);
+            $this->assertSame(strlen($data), $summary['file_bytes_read']);
+            $this->assertTrue($summary['packet_text']['complete']);
+            $this->assertSame(count($packets), $summary['packet_text']['frames']);
+            $this->assertCount(count($packets) + 1, explode("\n", trim($summary['packet_text']['text'])));
+            $this->assertTrue($summary['flow_samples_truncated']);
+            $this->assertStringContainsString('198.51.100.40:21088', $summary['packet_text']['text']);
+            $this->assertStringContainsString("unrelated\ttcp", $summary['packet_text']['text']);
+            $this->assertStringContainsString("unknown\tunsupported", $summary['packet_text']['text']);
+            $this->assertStringNotContainsString('secret', json_encode($summary));
+            $this->assertSame(21088, $summary['port_groups'][0]['port']);
+            $this->assertSame(40, $summary['port_groups'][0]['unique_targets']);
+            $this->assertSame(40, $summary['port_groups'][0]['no_reply_observed_flows']);
+            $this->assertSame(0, $summary['port_groups'][0]['completed_handshakes']);
+            $this->assertSame(1, $summary['port_groups'][1]['completed_handshakes']);
+        } finally {
+            unlink($path);
+        }
+    }
+
+    public function test_complete_packet_mode_sends_all_frames_once_and_retains_coverage(): void
+    {
+        Http::fake(['api.deepseek.com/*' => Http::response(['choices' => [['message' => ['content' => "# 报告\n\n## 观察事实\n\n仅证明当前窗口。"]]]])]);
+        $packets = array_fill(0, 45, $this->packet('203.0.113.10', '1.1.1.1', 2));
+        $analysis = $this->analysisForPackets($packets);
+        $job = new AnalyzeEvidence($analysis->id);
+        $job->handle();
+        $job->handle();
+        Http::assertSentCount(1);
+        Http::assertSent(function ($request) {
+            $evidence = json_decode($request['messages'][1]['content'], true);
+
+            return $evidence['packet_text']['complete'] && $evidence['packet_text']['frames'] === 45 && $evidence['coverage']['mode'] === 'full_packets' && isset($evidence['pcap_summary']['port_groups']) && str_contains($request['messages'][0]['content'], '真实换行');
+        });
+        $analysis->refresh();
+        $this->assertSame('completed', $analysis->status);
+        $this->assertSame('full_packets', $analysis->config_snapshot['evidence_mode']);
+        $this->assertArrayNotHasKey('api_key_cipher', $analysis->config_snapshot);
+        $this->assertTrue($analysis->evidence['coverage']['packet_text_complete']);
+    }
+
+    public function test_over_limit_full_text_fails_without_any_ai_call_or_automatic_fallback(): void
+    {
+        Http::preventStrayRequests();
+        $analysis = $this->analysisForPackets(array_fill(0, 40000, $this->packet('203.0.113.10', '1.1.1.1', 2)));
+        $job = new AnalyzeEvidence($analysis->id);
+        $job->handle();
+        $job->handle();
+        Http::assertNothingSent();
+        $analysis->refresh();
+        $this->assertSame('failed', $analysis->status);
+        $this->assertStringContainsString('未调用 AI', $analysis->last_error);
+        $this->assertSame('full_packets', $analysis->config_snapshot['evidence_mode']);
+        $this->assertFalse($analysis->evidence['coverage']['packet_text_complete']);
+        $this->assertArrayNotHasKey('packet_text', $analysis->evidence);
+        $this->assertArrayNotHasKey('api_key_cipher', $analysis->config_snapshot);
+    }
+
+    public function test_complete_text_that_exceeds_json_budget_is_not_sent(): void
+    {
+        Http::preventStrayRequests();
+        $analysis = $this->analysisForPackets(array_fill(0, 25000, $this->packet('203.0.113.10', '1.1.1.1', 2)));
+        (new AnalyzeEvidence($analysis->id))->handle();
+        Http::assertNothingSent();
+        $analysis->refresh();
+        $this->assertSame('failed', $analysis->status);
+        $this->assertStringContainsString('发送上限', $analysis->last_error);
+        $this->assertTrue($analysis->evidence['coverage']['packet_text_complete']);
+        $this->assertFalse($analysis->evidence['coverage']['ai_call_attempted']);
+        $this->assertArrayNotHasKey('packet_text', $analysis->evidence);
+    }
+
+    private function analysisForPackets(array $packets): AiAnalysis
+    {
+        Storage::fake('local');
+        $event = $this->event();
+        $data = $this->pcap($packets);
+        $path = 'packet-evidence/'.Str::uuid().'.pcap';
+        Storage::disk('local')->put($path, $data);
+        $capture = PacketCapture::create(['event_id' => $event->id, 'node_id' => $event->node_id, 'ip' => '203.0.113.10', 'status' => 'uploaded', 'path' => $path, 'sha256' => hash('sha256', $data)]);
+        config(['app.key' => 'base64:'.base64_encode(str_repeat('k', 32))]);
+        DB::table('ai_settings')->insert(['id' => 1, 'enabled' => true]);
+        $nonce = random_bytes(12);
+        $tag = '';
+        $cipher = openssl_encrypt('test-only-api-key-123456789', 'aes-256-gcm', hash('sha256', str_repeat('k', 32), true), OPENSSL_RAW_DATA, $nonce, $tag, 'vm-monitor-ai-v1');
+
+        return AiAnalysis::create(['event_id' => $event->id, 'capture_id' => $capture->id, 'requested_by' => 1, 'config_snapshot' => ['endpoint' => 'https://api.deepseek.com/chat/completions', 'model' => 'deepseek-flash', 'api_key_cipher' => base64_encode($nonce.$tag.$cipher), 'evidence_mode' => 'full_packets']]);
+    }
+
     public function test_parser_exposes_only_complete_visible_client_hello_sni(): void
     {
         $name = 'cdn.example.test';
