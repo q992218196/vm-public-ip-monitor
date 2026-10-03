@@ -124,7 +124,7 @@ if (($request('whitelist', ['id' => 100], true)['code'] ?? null) === 1 || $db->q
 }
 echo "Event list/count/detail, local PCAP summary, manual AI, encrypted secrets, duplicate prevention and read-only permissions passed.\n";
 
-$db->exec('CREATE TABLE websites (id bigserial primary key,ip_asset_id bigint,host text,port integer,scheme text,status text,ownership_status text,title text,description text,category text,manual_category text,last_probed_at timestamp,last_seen_at timestamp)');
+$db->exec('CREATE TABLE websites (id bigserial primary key,ip_asset_id bigint,host text,port integer,scheme text,status text,ownership_status text,title text,description text,category text,manual_category text,last_probed_at timestamp,last_seen_at timestamp,source text default \'http_host\',ownership_evidence jsonb,updated_at timestamp)');
 $db->exec("INSERT INTO websites(ip_asset_id,host,port,scheme,status,ownership_status,last_seen_at) VALUES(1,'owned.example',443,'https','verified','dns_match',now()),(1,'foreign.example',80,'http','failed','dns_mismatch',now()),(1,'unknown.example',80,'http','observed','unverified',now())");
 foreach (['assets' => 1, 'foreign' => 1, 'candidates' => 1, 'all' => 3] as $ownership => $count) {
     $query = ['resource' => 'websites', 'ownership' => $ownership];
@@ -136,3 +136,25 @@ if ($ok($request('index', ['resource' => 'websites'], false, false, 'Monitor'))[
     throw new RuntimeException('Default website list exposes unrelated client Host');
 }
 echo "Website default/list/count ownership separation passed.\n";
+
+$db->exec('CREATE TABLE probe_tasks (id bigserial primary key,website_id bigint unique,status text,attempts integer,available_at timestamp,lease_token text,leased_until timestamp,created_at timestamp,updated_at timestamp)');
+$foreignId = $db->query("SELECT id FROM websites WHERE host='foreign.example'")->fetchColumn();
+$db->exec("UPDATE websites SET ownership_evidence='{\"host\":\"foreign.example\",\"addresses\":[\"198.51.100.1\"],\"checked_at\":\"2026-10-03T00:00:00Z\",\"method\":\"dns_A_AAAA\"}' WHERE id=".$foreignId);
+foreach ([['', false], ['not authorized', true]] as [$reason, $viewer]) {
+    if (($request('confirmOrigin', ['id' => $foreignId, 'reason' => $reason], true, $viewer, 'Monitor')['code'] ?? null) === 1) {
+        throw new RuntimeException('Origin registration accepted missing basis or viewer');
+    }
+}
+$ok($request('confirmOrigin', ['id' => $foreignId, 'reason' => 'Customer CDN origin configuration verified'], true, false, 'Monitor'));
+$site = $db->query('SELECT source,ownership_status,ownership_evidence FROM websites WHERE id='.$foreignId)->fetch(PDO::FETCH_ASSOC);
+$proof = json_decode($site['ownership_evidence'], true);
+if ($site['source'] !== 'manual' || $site['ownership_status'] !== 'manual' || $proof['registration']['type'] !== 'cdn_origin' || $proof['previous_dns']['evidence']['addresses'] !== ['198.51.100.1'] || $db->query('SELECT count(*) FROM probe_tasks')->fetchColumn() != 1) {
+    throw new RuntimeException('Origin registration or original DNS evidence not preserved');
+}
+$db->exec("UPDATE probe_tasks SET status='leased',lease_token='old-task',leased_until=now()+INTERVAL '3 minute'");
+$ok($request('confirmOrigin', ['id' => $foreignId, 'reason' => 'Rechecked configuration'], true, false, 'Monitor'));
+$task = $db->query('SELECT status,lease_token FROM probe_tasks')->fetch(PDO::FETCH_ASSOC);
+if ($task['status'] !== 'pending' || $task['lease_token'] !== null || $db->query('SELECT count(*) FROM probe_tasks')->fetchColumn() != 1) {
+    throw new RuntimeException('Stale passive probe lease was not fenced');
+}
+echo "CDN origin registration permissions, explicit basis, DNS provenance and stale lease fencing passed.\n";

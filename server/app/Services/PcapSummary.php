@@ -4,7 +4,7 @@ namespace App\Services;
 
 class PcapSummary
 {
-    public const ANALYSIS_VERSION = 3;
+    public const ANALYSIS_VERSION = 4;
 
     public const PACKET_TEXT_LIMIT = 2097152;
 
@@ -25,6 +25,7 @@ class PcapSummary
         }
         $summary = ['ip' => $ip, 'frames' => 0, 'matched_packets' => 0, 'skipped_frames' => 0, 'unrelated_frames' => 0, 'bytes_out' => 0, 'bytes_in' => 0, 'truncated_frames' => 0, 'summary_capped' => false];
         $flows = [];
+        $authentication = new AuthenticationEvidence;
         $activeSequences = [];
         $summary['analysis_version'] = self::ANALYSIS_VERSION;
         $packetText = "frame\ttime_unix\tdirection\tprotocol\tsource\tdestination\tflags_hex\tseq\tack\twire_bytes\tcaptured_bytes\tpayload_bytes_advertised\tapplication_clue_json\n";
@@ -113,6 +114,7 @@ class PcapSummary
                         if ($out && ! isset($flow['http']) && ($http = $this->httpClue($packet['payload']))) {
                             $flow['http'] = $http;
                         }
+                        $authentication->consume($flow, $packet, $out, $summary['frames']);
                         unset($flow);
                     } else {
                         $summary['summary_capped'] = true;
@@ -129,6 +131,28 @@ class PcapSummary
         } finally {
             fclose($stream);
         }
+        $authenticationGroups = [];
+        foreach ($flows as &$flow) {
+            $auth = $authentication->finish($flow);
+            if (! $auth) {
+                continue;
+            }
+            $groupKey = $auth['protocol'].'|'.$flow['peer_ip'].'|'.$flow['peer_port'];
+            $authenticationGroups[$groupKey] ??= ['protocol' => $auth['protocol'], 'peer_ip' => $flow['peer_ip'], 'peer_port' => $flow['peer_port'], 'requests_observed' => 0, 'paired_failures' => 0, 'paired_successes' => 0, 'challenges' => 0, 'analysis_capped' => false, 'encrypted_observed' => false, 'stream_gaps' => 0, 'failure_samples' => []];
+            $group = &$authenticationGroups[$groupKey];
+            foreach (['requests_observed', 'paired_failures', 'paired_successes', 'challenges', 'stream_gaps'] as $field) {
+                $group[$field] += $auth[$field];
+            }
+            $group['analysis_capped'] = $group['analysis_capped'] || $auth['analysis_capped'];
+            $group['encrypted_observed'] = $group['encrypted_observed'] || $auth['encrypted_observed'];
+            $group['failure_samples'] = array_slice([...$group['failure_samples'], ...$auth['failure_samples']], 0, 8);
+            unset($group);
+        }
+        unset($flow, $group);
+        uasort($authenticationGroups, fn ($a, $b) => $b['paired_failures'] <=> $a['paired_failures']);
+        $summary['authentication_groups'] = array_values(array_slice($authenticationGroups, 0, 32));
+        $summary['authentication_groups_truncated'] = count($authenticationGroups) > 32;
+        $summary['authentication_limitations'] = 'Only paired visible FTP authentication replies and plaintext SMB2 SESSION_SETUP responses are counted. SSH and RDP/NLA login results, FTPS and encrypted SMB are unavailable; zero observed failures does not prove no failed logins or no attack.';
         $outbound = array_filter($flows, fn ($flow) => $flow['syn_out'] > 0);
         $summary['observed_outbound_flows'] = count($outbound);
         $summary['syn_packets_out'] = array_sum(array_column($outbound, 'syn_out'));
@@ -327,7 +351,7 @@ class PcapSummary
         $payload = substr($data, $offset + $header, max(0, min($end, strlen($data)) - $offset - $header));
         $sequence = $protocol === 6 ? unpack('Nseq/Nack', substr($data, $offset + 4, 8)) : ['seq' => 0, 'ack' => 0];
 
-        return ['src' => $src, 'dst' => $dst, 'protocol' => $protocol, 'flags' => $protocol === 6 ? ord($data[$offset + 13]) : 0, 'payload_size' => max(0, $end - $offset - $header), 'tls_sni' => $protocol === 6 ? $this->tlsSni($payload) : null, 'payload' => mb_convert_encoding(substr($payload, 0, 2048), 'UTF-8', 'UTF-8')] + $ports + $sequence;
+        return ['src' => $src, 'dst' => $dst, 'protocol' => $protocol, 'flags' => $protocol === 6 ? ord($data[$offset + 13]) : 0, 'payload_size' => max(0, $end - $offset - $header), 'tls_sni' => $protocol === 6 ? $this->tlsSni($payload) : null, 'raw_payload' => substr($payload, 0, 8192), 'payload' => mb_convert_encoding(substr($payload, 0, 2048), 'UTF-8', 'UTF-8')] + $ports + $sequence;
     }
 
     private function tlsSni(string $payload): ?string

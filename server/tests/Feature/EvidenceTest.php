@@ -120,6 +120,30 @@ class EvidenceTest extends TestCase
         }
     }
 
+    public function test_pcap_authentication_summary_pairs_ftp_replies_without_exporting_credentials(): void
+    {
+        $local = '203.0.113.10';
+        $peer = '198.51.100.1';
+        $banner = "220 ready\r\n";
+        $command = "USER secret-user\r\n";
+        $reply = "530 rejected\r\n";
+        $packet = fn ($out, $payload, $seq) => substr_replace($this->packet($out ? $local : $peer, $out ? $peer : $local, 16, $out ? 20000 : 21, $out ? 21 : 20000, $payload), pack('N', $seq), 38, 4);
+        $data = $this->pcap([$packet(false, $banner, 500), $packet(true, $command, 100), $packet(false, $reply, 500 + strlen($banner))]);
+        $path = tempnam(sys_get_temp_dir(), 'auth-pcap');
+        try {
+            file_put_contents($path, $data);
+            $summary = app(PcapSummary::class)->summarize($path, $local, true);
+            $this->assertSame('FTP', $summary['authentication_groups'][0]['protocol']);
+            $this->assertSame(1, $summary['authentication_groups'][0]['paired_failures']);
+            $this->assertSame($peer, $summary['authentication_groups'][0]['peer_ip']);
+            $this->assertStringNotContainsString('secret-user', json_encode($summary));
+            $this->assertStringNotContainsString('_auth', json_encode($summary));
+            $this->assertTrue($summary['packet_text']['complete']);
+        } finally {
+            unlink($path);
+        }
+    }
+
     public function test_ai_only_processes_manual_records_once_and_never_sends_pcap_binary(): void
     {
         Storage::fake('local');
@@ -140,6 +164,7 @@ class EvidenceTest extends TestCase
         $job->handle();
         Http::assertSentCount(1);
         Http::assertSent(fn ($request) => $request['messages'][1]['content'] && str_contains($request['messages'][1]['content'], 'pcap_summary') && ! str_contains($request->body(), base64_encode($data)));
+        Http::assertSent(fn ($request) => str_contains($request['messages'][0]['content'], '第一节必须是“对外攻击结论”') && str_contains($request['messages'][0]['content'], 'authentication_groups') && json_decode($request['messages'][1]['content'], true)['analysis_question']['source_ip'] === '203.0.113.10');
         $this->assertSame('completed', $analysis->fresh()->status);
         $this->assertSame('open', $event->fresh()->status);
         $this->assertArrayNotHasKey('api_key_cipher', $analysis->fresh()->config_snapshot);

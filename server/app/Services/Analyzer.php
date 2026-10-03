@@ -149,7 +149,9 @@ class Analyzer
         foreach ($this->rules as $rule) {
             $cutoff = $batch->window_end->copy()->subSeconds($rule->window_seconds);
             $rows = $history->filter(fn ($row) => $row->window_end->gt($cutoff));
-            $value = match ($rule->kind) {
+            $serviceSamples = isset(ServiceConnectionRules::RULES[$rule->kind]) ? $rows->map(fn ($row) => ['row' => $row, 'sample' => app(ServiceConnectionRules::class)->sample($rule->kind, $row->evidence)])->filter(fn ($entry) => $entry['sample'] !== null)->sortByDesc(fn ($entry) => $entry['sample']['tcp_attempts']) : collect();
+            $serviceSample = $serviceSamples->first();
+            $value = $serviceSample ? $serviceSample['sample']['tcp_attempts'] : match ($rule->kind) {
                 'horizontal_scan' => (int) $rows->max(fn ($m) => $m->evidence['unique_targets'] ?? 0),
                 'vertical_scan' => (int) $rows->max(fn ($m) => $m->evidence['max_ports_per_target'] ?? 0),
                 'suspected_bruteforce' => (int) $rows->max(fn ($m) => $m->evidence['auth_attempts'] ?? 0),
@@ -179,7 +181,10 @@ class Analyzer
                 'single_target_attempts' => $rows->sortByDesc(fn ($row) => $row->evidence['max_attempts_per_target'] ?? 0)->first(),
                 default => $rows->last(),
             };
-            $sampleEvidence = $sample?->evidence ?? [];
+            if ($serviceSample) {
+                $sample = $serviceSample['row'];
+            }
+            $sampleEvidence = $serviceSample ? $serviceSample['sample'] : ($sample?->evidence ?? []);
             $severity = $rule->severity;
             $confidence = 'behavioral';
             $analysis = [];

@@ -135,6 +135,18 @@
                             >验证／截图</el-button
                         >
                         <el-button
+                            v-if="
+                                isAdmin &&
+                                resource === 'websites' &&
+                                ['dns_mismatch', 'dns_unknown', 'unverified'].includes(scope.row.ownership_status)
+                            "
+                            link
+                            type="warning"
+                            :loading="actionId === scope.row.id"
+                            @click="confirmOrigin(scope.row)"
+                            >登记 CDN 源站</el-button
+                        >
+                        <el-button
                             v-if="isAdmin && resource === 'nodes'"
                             link
                             type="warning"
@@ -434,6 +446,10 @@ const definitions: Record<string, Definition> = {
                     horizontal_scan: '横向扫描',
                     vertical_scan: '端口扫描',
                     suspected_bruteforce: '认证端口重复连接',
+                    ssh_connections: 'SSH 服务高频连接',
+                    smb_connections: 'SMB 服务高频连接',
+                    rdp_connections: 'RDP 服务高频连接',
+                    ftp_connections: 'FTP 服务高频连接',
                     single_target_attempts: '单目标高频连接',
                     tcp_connection_burst: 'TCP 连接突增',
                     egress_mbps: '出站 Mbps',
@@ -456,10 +472,6 @@ const definitions: Record<string, Definition> = {
         create: true,
         columns: [
             col('cidr', '源公网 IP/CIDR'),
-            { ...col('target_cidrs', '已核实的目标 IP/CIDR（逗号分隔）'), type: 'textarea' },
-            col('allowed_ports', '允许的目标端口（逗号分隔）'),
-            { ...col('max_value', '规则行为值上限'), type: 'number' },
-            { ...col('allowed_severity', '允许的证据级别'), type: 'select', options: options({ low: '低', medium: '中', high: '高' }) },
             col('kind', '告警类型'),
             col('reason', '原因'),
             col('node_id', '适用节点'),
@@ -467,6 +479,11 @@ const definitions: Record<string, Definition> = {
         ],
         edit: [
             col('cidr', '源公网 IP/CIDR'),
+            { ...col('target_cidrs', '已核实的目标 IP/CIDR（逗号分隔）'), type: 'textarea' },
+            col('allowed_ports', '允许的目标端口（逗号分隔）'),
+            { ...col('max_value', '规则行为值上限'), type: 'number' },
+            { ...col('allowed_severity', '允许的证据级别'), type: 'select', options: options({ low: '低', medium: '中', high: '高' }) },
+
             {
                 ...col('kind', '仅对此类型应用业务例外'),
                 type: 'select',
@@ -474,6 +491,10 @@ const definitions: Record<string, Definition> = {
                     horizontal_scan: '横向扫描',
                     vertical_scan: '端口扫描',
                     suspected_bruteforce: '认证端口重复连接',
+                    ssh_connections: 'SSH 服务高频连接',
+                    smb_connections: 'SMB 服务高频连接',
+                    rdp_connections: 'RDP 服务高频连接',
+                    ftp_connections: 'FTP 服务高频连接',
                     single_target_attempts: '单目标高频连接',
                     tcp_connection_burst: 'TCP 连接突增',
                     egress_mbps: '出站 Mbps',
@@ -898,6 +919,32 @@ async function whitelistAlert(row: any) {
     }
 }
 
+async function confirmOrigin(row: Record<string, any>) {
+    let reason: string
+    try {
+        const result = await ElMessageBox.prompt(
+            '请先核实 CDN 配置、客户申报或源站日志，再填写依据。登记后将使用当前域名、端口访问此公网 IP；DNS 不匹配本身不能证明源站归属。',
+            '登记 CDN 源站',
+            {
+                confirmButtonText: '登记并验证',
+                cancelButtonText: '取消',
+                inputType: 'textarea',
+                inputValidator: (value: string) => (!!value?.trim() && value.trim().length <= 1000) || '请填写核实依据（最多 1000 字）',
+            }
+        )
+        reason = result.value.trim()
+    } catch {
+        return
+    }
+    actionId.value = row.id
+    try {
+        await request('confirmOrigin', 'post', { id: row.id, reason })
+        ElMessage.success('已登记源站并加入验证队列')
+        await load()
+    } finally {
+        actionId.value = null
+    }
+}
 async function probe(row: any) {
     actionId.value = row.id
     try {

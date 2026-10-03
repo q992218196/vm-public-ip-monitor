@@ -4,7 +4,7 @@ namespace App\Services;
 
 class ConnectionAssessment
 {
-    public const KINDS = ['horizontal_scan', 'vertical_scan', 'suspected_bruteforce', 'single_target_attempts', 'tcp_connection_burst', 'egress_mbps'];
+    public const KINDS = ['horizontal_scan', 'vertical_scan', 'suspected_bruteforce', 'single_target_attempts', 'tcp_connection_burst', 'egress_mbps', 'ssh_connections', 'smb_connections', 'rdp_connections', 'ftp_connections'];
 
     public function assess(string $kind, array $sample, int $threshold = 0, string $ceiling = 'high', array $windows = []): array
     {
@@ -17,10 +17,17 @@ class ConnectionAssessment
             && min($completed, $resets, $mature, $missing) >= 0 && max($completed, $resets, $mature) <= $attempts && $missing <= $mature;
         $qualityGood = $this->qualityGood($sample);
         $titles = ['horizontal_scan' => '多目标连接（待复核）', 'vertical_scan' => '多端口连接（待复核）', 'suspected_bruteforce' => '认证服务重复连接（待复核）', 'single_target_attempts' => '单目标高频连接提醒', 'tcp_connection_burst' => 'TCP 连接数量提醒', 'egress_mbps' => '出站带宽提醒'];
+        foreach (ServiceConnectionRules::RULES as $serviceKind => $definition) {
+            $titles[$serviceKind] = $definition['name'].'（待复核）';
+        }
+        $service = isset(ServiceConnectionRules::RULES[$kind]);
         $scan = in_array($kind, ['horizontal_scan', 'vertical_scan'], true);
-        $severity = $scan || $kind === 'suspected_bruteforce' ? 'medium' : 'low';
+        $severity = $scan || $service || $kind === 'suspected_bruteforce' ? 'medium' : 'low';
         $category = $severity === 'low' ? 'behavior_notice' : 'needs_review';
         $reasons = [$scan ? '目标或端口数量达到规则阈值，仍需区分业务连接与探测行为' : '连接数量或带宽阈值只能证明活跃程度，不能证明攻击'];
+        if ($service) {
+            $reasons[] = '仅统计有界目标样本中最活跃目标的连接下界，跨窗口取最大值；常见端口只提示服务类型，不代表已观察登录失败或爆破';
+        }
         $sustained = count(array_filter($windows, fn ($window) => $this->rejectionPattern($window, $kind, $threshold)));
         if ($scan && $paired && $qualityGood && $sustained >= 2 && $this->rejectionPattern($sample, $kind, $threshold)) {
             $severity = 'high';

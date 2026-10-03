@@ -495,7 +495,7 @@ class Monitor extends Backend
             if (isset($data['name']) && (trim((string) $data['name']) === '' || mb_strlen((string) $data['name']) > 255)) {
                 $this->error('规则名称无效');
             }
-            if (isset($data['kind']) && ! in_array($data['kind'], ['horizontal_scan', 'vertical_scan', 'suspected_bruteforce', 'single_target_attempts', 'tcp_connection_burst', 'egress_mbps', 'vpn_protocol', 'proxy_suspect'], true)) {
+            if (isset($data['kind']) && ! in_array($data['kind'], ['horizontal_scan', 'vertical_scan', 'suspected_bruteforce', 'ssh_connections', 'smb_connections', 'rdp_connections', 'ftp_connections', 'single_target_attempts', 'tcp_connection_burst', 'egress_mbps', 'vpn_protocol', 'proxy_suspect'], true)) {
                 $this->error('规则类型无效');
             }
             if (isset($data['severity']) && ! in_array($data['severity'], ['low', 'medium', 'high'], true)) {
@@ -532,7 +532,7 @@ class Monitor extends Backend
             if (isset($data['reason']) && (trim((string) $data['reason']) === '' || mb_strlen((string) $data['reason']) > 255)) {
                 $this->error('原因无效');
             }
-            if (isset($data['kind']) && $data['kind'] !== '' && ! in_array($data['kind'], ['horizontal_scan', 'vertical_scan', 'suspected_bruteforce', 'single_target_attempts', 'tcp_connection_burst', 'egress_mbps', 'vpn_protocol', 'proxy_suspect', 'node_offline', 'capture_degraded'], true)) {
+            if (isset($data['kind']) && $data['kind'] !== '' && ! in_array($data['kind'], ['horizontal_scan', 'vertical_scan', 'suspected_bruteforce', 'ssh_connections', 'smb_connections', 'rdp_connections', 'ftp_connections', 'single_target_attempts', 'tcp_connection_burst', 'egress_mbps', 'vpn_protocol', 'proxy_suspect', 'node_offline', 'capture_degraded'], true)) {
                 $this->error('白名单类型无效');
             }
             if (isset($data['kind']) && $data['kind'] === '') {
@@ -715,6 +715,38 @@ class Monitor extends Backend
             $this->db()->table('probe_tasks')->where('website_id', $id)->update(['status' => 'pending', 'attempts' => 0, 'available_at' => $now, 'lease_token' => null, 'leased_until' => null, 'updated_at' => $now]);
         }
         $this->audit('probe_queued', 'Website:'.$id);
+    }
+
+    public function confirmOrigin(): void
+    {
+        $this->writable();
+        $id = (int) $this->request->post('id', 0);
+        $reason = trim((string) $this->request->post('reason', ''));
+        if ($reason === '' || mb_strlen($reason) > 1000) {
+            $this->error('请填写源站归属核实依据，最多 1000 字');
+        }
+        $db = $this->db();
+        $db->transaction(function () use ($db, $id, $reason) {
+            $site = $db->table('websites')->where('id', $id)->lock(true)->find();
+            if (! $site || ! filter_var($site['host'], FILTER_VALIDATE_DOMAIN, FILTER_FLAG_HOSTNAME) || filter_var($site['host'], FILTER_VALIDATE_IP)) {
+                $this->error('请选择有效域名的网站线索');
+            }
+            if (! $db->table('ip_assets')->where('id', $site['ip_asset_id'])->find()) {
+                $this->error('公网 IP 尚未登记');
+            }
+            $old = $this->decode($site['ownership_evidence'] ?? null) ?: [];
+            $now = gmdate('Y-m-d\TH:i:s\Z');
+            $evidence = [
+                'host' => $site['host'], 'checked_at' => $now, 'method' => 'administrator_registered',
+                'registration' => ['type' => 'cdn_origin', 'reason' => $reason, 'confirmed_by' => $this->auth->id, 'confirmed_at' => $now],
+                'previous_dns' => $old['previous_dns'] ?? ['status' => $site['ownership_status'], 'evidence' => array_diff_key($old, array_flip(['registration', 'previous_dns']))],
+            ];
+            $db->table('websites')->where('id', $id)->update(['source' => 'manual', 'ownership_status' => 'manual', 'ownership_evidence' => json_encode($evidence, JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR), 'updated_at' => gmdate('Y-m-d H:i:s')]);
+            $db->table('probe_tasks')->where('website_id', $id)->where('status', 'leased')->update(['status' => 'pending', 'attempts' => 0, 'available_at' => gmdate('Y-m-d H:i:s'), 'lease_token' => null, 'leased_until' => null, 'updated_at' => gmdate('Y-m-d H:i:s')]);
+            $this->audit('website.origin_registered', 'Website:'.$id, ['reason' => $reason, 'host' => $site['host'], 'ip_asset_id' => $site['ip_asset_id']]);
+        });
+        $this->queueProbe($id);
+        $this->success('已登记源站并加入验证队列；人工登记不等于已确认站点部署');
     }
 
     public function manualWebsite(): void

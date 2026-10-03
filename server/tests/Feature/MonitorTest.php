@@ -603,6 +603,52 @@ class MonitorTest extends TestCase
         $this->assertSame(['198.51.100.1'], $site->ownership_evidence['addresses']);
     }
 
+    public function test_service_connection_rules_use_destination_samples_and_keep_login_outcomes_unknown(): void
+    {
+        $this->seed(MonitorSeeder::class);
+        $node = $this->node();
+        $payload = $this->payload();
+        $payload['metrics'][0]['outbound_endpoints'] = array_map(fn ($port) => [
+            'peer_ip' => '198.51.100.1', 'peer_port' => $port, 'attempts' => 70,
+            'synack_replies' => 65, 'completed_handshakes' => 65, 'rst_replies' => 1,
+            'payload_out' => 100, 'payload_in' => 200,
+        ], [21, 22, 445, 3389]);
+        $this->upload($node, $payload)->assertOk();
+        ProcessBatch::dispatchSync(Batch::first()->id);
+        foreach (['ssh_connections', 'smb_connections', 'rdp_connections', 'ftp_connections'] as $kind) {
+            $alert = Alert::where('kind', $kind)->firstOrFail();
+            $this->assertSame('medium', $alert->severity);
+            $this->assertSame(70, $alert->evidence['value']);
+            $this->assertSame('not visible in aggregate traffic', $alert->evidence['sample']['login_result']);
+            $this->assertNull($alert->evidence['connection_analysis']['completion_ratio']);
+        }
+        $this->assertDatabaseCount('monitor_events', 1);
+    }
+
+    public function test_worker_completion_preserves_administrator_origin_registration_and_previous_dns(): void
+    {
+        config(['monitor.worker_token' => $this->token]);
+        $node = $this->node();
+        $this->upload($node, $this->payload())->assertOk();
+        ProcessBatch::dispatchSync(Batch::first()->id);
+        $site = Website::firstOrFail();
+        $registration = ['type' => 'cdn_origin', 'reason' => 'Customer CDN configuration verified', 'confirmed_by' => 1];
+        $previous = ['status' => 'dns_mismatch', 'evidence' => ['addresses' => ['198.51.100.1']]];
+        $site->update(['source' => 'manual', 'ownership_status' => 'manual', 'ownership_evidence' => ['registration' => $registration, 'previous_dns' => $previous]]);
+        app(ProbeQueue::class)->enqueue($site);
+        $claim = $this->withToken($this->token)->postJson('/api/v1/worker/claim')->assertOk()->json('task');
+        $this->assertSame('manual', $claim['source']);
+        $this->postJson('/api/v1/worker/tasks/'.$claim['id'].'/complete', [
+            'lease_token' => $claim['lease_token'], 'status' => 'failed', 'error' => 'Origin access restricted',
+            'ownership_status' => 'manual', 'ownership_evidence' => [
+                'host' => $site->host, 'checked_at' => now()->toIso8601String(), 'method' => 'administrator_registered', 'addresses' => [],
+                'registration' => ['reason' => 'untrusted worker overwrite'],
+            ],
+        ])->assertOk();
+        $this->assertSame($registration, $site->fresh()->ownership_evidence['registration']);
+        $this->assertSame($previous, $site->fresh()->ownership_evidence['previous_dns']);
+    }
+
     public function test_ip_only_ownership_accepts_empty_dns_address_evidence(): void
     {
         config(['monitor.worker_token' => $this->token]);

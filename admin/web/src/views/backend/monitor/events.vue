@@ -312,6 +312,31 @@
                         <el-table-column prop="no_reply_observed_flows" label="未观察回复" width="110" />
                         <el-table-column prop="unique_targets" label="目标 IP 数" width="110" />
                     </el-table>
+                    <h3>可见认证结果（仅明文、已配对响应）</h3>
+                    <el-alert
+                        type="info"
+                        :closable="false"
+                        title="这里只统计可见 FTP／SMB2 认证请求与拒绝响应，不等于确认爆破。SSH、RDP/NLA、FTPS 和加密 SMB 的登录结果不可见；无记录不代表没有失败或攻击。"
+                    />
+                    <el-table :data="captureReport.summary.authentication_groups || []" border>
+                        <el-table-column prop="peer_ip" label="目标 IP" min-width="140" />
+                        <el-table-column prop="peer_port" label="目标端口" width="95" />
+                        <el-table-column prop="protocol" label="解析协议" width="100" />
+                        <el-table-column prop="requests_observed" label="可见认证请求" width="115" />
+                        <el-table-column prop="paired_failures" label="配对拒绝" width="100" />
+                        <el-table-column prop="paired_successes" label="配对成功" width="100" />
+                        <el-table-column prop="challenges" label="继续认证" width="100" />
+                        <el-table-column prop="stream_gaps" label="流缺口" width="90" />
+                        <el-table-column label="证据样本" min-width="200"
+                            ><template #default="scope"
+                                >{{
+                                    scope.row.failure_samples
+                                        .map((s: any) => '帧 ' + s.frame + ' ' + s.command + ' ' + (s.status || s.reply_code))
+                                        .join('；') || '—'
+                                }}{{ scope.row.analysis_capped ? '（解析达到限额）' : '' }}</template
+                            ></el-table-column
+                        >
+                    </el-table>
                     <h3>分组连接样本</h3>
                     <el-table :data="captureReport.summary.flow_samples" border>
                         <el-table-column label="目标" min-width="150"

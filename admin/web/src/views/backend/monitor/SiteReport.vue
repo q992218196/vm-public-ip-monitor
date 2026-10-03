@@ -11,7 +11,20 @@
             :closable="false"
             title="此条仅为客户端请求的域名线索，尚未确认站点归属；历史分类不能作为本 VM 部署该网站的证据。"
         />
+        <el-alert
+            v-if="record.ownership_evidence?.registration?.type === 'cdn_origin'"
+            type="info"
+            :closable="false"
+            title="此域名已人工登记为 CDN 源站；登记依据与原 DNS 结果保留。验证可能受源站访问限制或证书影响，人工登记不等于确认违规或部署。"
+        />
         <el-descriptions :column="1" border>
+            <el-descriptions-item v-if="record.ownership_evidence?.registration" label="源站登记依据">{{
+                record.ownership_evidence.registration.reason
+            }}</el-descriptions-item>
+            <el-descriptions-item v-if="record.ownership_evidence?.previous_dns" label="登记前 DNS 证据"
+                >{{ record.ownership_evidence.previous_dns.evidence?.addresses?.join(', ') || '未取得解析地址' }} ·
+                {{ record.ownership_evidence.previous_dns.evidence?.checked_at || '—' }}</el-descriptions-item
+            >
             <el-descriptions-item label="归属核实">{{ ownershipLabel }}；DNS 匹配也不等于已确认站点部署。</el-descriptions-item>
             <el-descriptions-item v-if="record.ownership_evidence" label="归属证据"
                 >{{ record.ownership_evidence.addresses?.join(', ') || '人工登记／IP 对比' }} · {{ record.ownership_evidence.checked_at }} ·

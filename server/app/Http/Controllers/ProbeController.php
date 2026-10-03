@@ -78,6 +78,13 @@ class ProbeController extends Controller
                 $path = $screenshots->store($v['screenshot'] ?? null);
             }
             $data = array_intersect_key($v, array_flip(['ownership_status', 'ownership_evidence'])) + ['status' => $v['status'], 'last_error' => $v['error'] ?? null, 'last_probed_at' => now()];
+            if ($site->source === 'manual' && isset($v['ownership_evidence'])) {
+                foreach (['registration', 'previous_dns'] as $field) {
+                    if (isset($site->ownership_evidence[$field])) {
+                        $data['ownership_evidence'][$field] = $site->ownership_evidence[$field];
+                    }
+                }
+            }
             if ($v['status'] === 'verified') {
                 $data += ['title' => $v['title'] ?? null, 'description' => $v['description'] ?? null, 'http_status' => $v['http_status'] ?? null, 'final_url' => $v['final_url'] ?? null, 'category' => $v['category'] ?? 'unknown', 'classification' => $v['classification'] ?? null, 'content_hash' => $v['content_hash'] ?? null, 'screenshot_path' => $path];
             }
