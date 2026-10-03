@@ -53,13 +53,14 @@
                     show-overflow-tooltip
                 >
                     <template #default="scope">
-                        <el-button
-                            v-if="['title', 'ip'].includes(column.key)"
-                            link
-                            type="primary"
-                            @click="filterBy(column.key, scope.row[column.key])"
-                            >{{ scope.row[column.key] || '—' }}</el-button
-                        >
+                        <template v-if="['title', 'ip'].includes(column.key)">
+                            <el-button link type="primary" @click="filterBy(column.key, scope.row[column.key])">{{
+                                scope.row[column.key] || '—'
+                            }}</el-button>
+                            <el-button v-if="column.key === 'title' && scope.row.kinds.length > 1" link @click="openDetail(scope.row.id)"
+                                >共 {{ scope.row.kinds.length }} 类命中，查看全部</el-button
+                            >
+                        </template>
                         <el-tag
                             v-else-if="['severity', 'status', 'assessment_category'].includes(column.key)"
                             :type="color(scope.row[column.key])"
@@ -135,7 +136,7 @@
                             :closable="false"
                         />
                     </div>
-                    <h3>规则证据</h3>
+                    <h3>规则证据（主要告警优先）</h3>
                     <el-collapse
                         ><el-collapse-item v-for="alert in detail.alerts" :key="alert.id" :name="alert.id" :title="alert.title"
                             ><TrafficEvidence :record="{ ...alert, ip: detail.event.ip }" />
@@ -464,7 +465,7 @@ const names: Record<string, string> = {
     failed: '失败',
 }
 const columns = [
-    { key: 'title', label: '告警', sort: true, width: 200 },
+    { key: 'title', label: '主要告警', sort: true, width: 240 },
     { key: 'ip', label: '公网 IP', sort: true, width: 150 },
     { key: 'node_name', label: '观察节点' },
     { key: 'severity', label: '级别', sort: true },

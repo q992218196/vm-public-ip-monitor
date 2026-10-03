@@ -44,6 +44,21 @@ if ($empty['category'] !== 'needs_review' || $empty['timeline'] || ! str_contain
 }
 echo "Event review report bounds, mixed versions and review priorities passed\n";
 
+$serviceAlerts = [
+    ['title' => '多目标连接', 'kind' => 'horizontal_scan', 'severity' => 'medium', 'status' => 'open', 'evidence' => ['connection_analysis' => ['category' => 'needs_review', 'reasons' => ['目标较多']]]],
+    ['title' => 'SMB 服务高频连接', 'kind' => 'smb_connections', 'severity' => 'medium', 'status' => 'open', 'evidence' => ['value' => 100, 'window_seconds' => 60, 'sample' => ['target_endpoints' => ['192.0.2.1:445']], 'connection_analysis' => ['category' => 'needs_review']]],
+    ['title' => '旧强异常', 'kind' => 'vertical_scan', 'severity' => 'high', 'status' => 'resolved', 'evidence' => []],
+];
+$serviceEvent = $event + ['title' => 'SMB 服务高频连接'];
+$ordered = EventReviewReport::prioritize($serviceAlerts, $serviceEvent['title']);
+$serviceReport = EventReviewReport::build($serviceEvent, $serviceAlerts, [$row]);
+if ($ordered[0]['kind'] !== 'smb_connections' || $ordered[2]['status'] !== 'resolved'
+    || ! str_contains($serviceReport['reasons'][0], '192.0.2.1:445')
+    || ! str_contains($serviceReport['reasons'][0], '100 次') || $serviceReport['category'] !== 'needs_review') {
+    throw new RuntimeException('Specific service evidence must be first without treating connections as confirmed attacks');
+}
+echo "Service headline and review evidence priority passed.\n";
+
 $udpRow = $row;
 $udpRow['evidence'] = ['udp_stats_version' => 1, 'udp_flows_out' => 2, 'udp_packets_out' => 20, 'udp_packets_in' => 3, 'udp_bytes_out' => 2000, 'udp_bytes_in' => 300, 'udp_flows_capped' => true, 'udp_endpoints' => [['peer_ip' => '192.0.2.1', 'peer_port' => 53, 'flows' => 2, 'packets_out' => 20, 'packets_in' => 3, 'bytes_out' => 2000, 'bytes_in' => 300]]];
 $udp = EventReviewReport::build($event, $alerts, [$udpRow, $udpRow, $old]);

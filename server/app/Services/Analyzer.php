@@ -261,7 +261,8 @@ class Analyzer
             if ($freshEvidence) {
                 $data['evidence'] = $evidence;
             }
-            if ($event->status === 'open' && $freshEvidence) {
+            if ($freshEvidence && in_array($event->status, ['open', 'acknowledged'], true)
+                && ($event->status === 'open' || $alert->status !== 'resolved')) {
                 $data += ['severity' => $severity, 'title' => $title, 'assessment_category' => $category];
                 if ($alert->status === 'resolved') {
                     $data['status'] = 'open';
@@ -270,9 +271,9 @@ class Analyzer
             $alert->update($data);
         }
 
-        if ($event->status === 'open') {
-            $ranked = Alert::where('event_id', $event->id)->whereIn('status', ['open', 'acknowledged'])->get(['severity', 'title', 'assessment_category'])
-                ->sortByDesc(fn ($row) => 10 * (['low' => 1, 'medium' => 2, 'high' => 3][$row->severity] ?? 0) + (['behavior_notice' => 1, 'needs_review' => 2, 'strong_anomaly' => 3][$row->assessment_category] ?? 2))->first();
+        if (in_array($event->status, ['open', 'acknowledged'], true)) {
+            $ranked = Alert::where('event_id', $event->id)->whereIn('status', ['open', 'acknowledged'])->orderBy('id')->get(['kind', 'severity', 'title', 'assessment_category'])
+                ->sortByDesc(fn ($row) => EventPriority::rank($row->severity, $row->assessment_category, $row->kind))->first();
             if ($ranked) {
                 $event->update(['severity' => $ranked->severity, 'title' => $ranked->title, 'assessment_category' => $ranked->assessment_category]);
             }

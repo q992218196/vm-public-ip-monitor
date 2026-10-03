@@ -166,7 +166,7 @@ try {
       "默认站点或反向代理也可能响应",
     ),
   );
-  const eventFixture = {id: 933, title: "多端口连接（待复核）", ip: "103.123.132.239", node_name: "TW 2", severity: "medium", status: "open", kinds: ["vertical_scan"], quality: {}, first_seen_at: "2026-10-03 07:01:48", last_seen_at: "2026-10-03 07:02:48"};
+  const eventFixture = {id: 933, title: "SMB 服务高频连接（待复核）", ip: "103.123.132.239", node_name: "TW 2", severity: "medium", status: "open", kinds: ["horizontal_scan", "smb_connections"], quality: {}, first_seen_at: "2026-10-03 07:01:48", last_seen_at: "2026-10-03 07:02:48"};
   const captureFixture = {id: "test-pcap", status: "uploaded", bytes: 4, metadata: {}, created_at: "2026-10-03 07:01:48"};
   let requestedMode = null;
   await page.route("**/admin/**", async route => {
@@ -192,7 +192,9 @@ try {
   await page.getByText("112.121.183.102", {exact: true}).waitFor();
   assert.ok((await page.locator(".el-dialog").textContent()).includes("11000, 11001, 11002"));
   await page.getByRole("button", {name: "取消", exact: true}).click();
-  await page.getByRole("button", {name: "详情与证据", exact: true}).first().click();
+  assert.ok((await page.locator(".el-table__header").first().textContent()).includes("主要告警"));
+  await page.getByRole("button", {name: "共 2 类命中，查看全部", exact: true}).click();
+  await page.getByRole("heading", {name: "SMB 服务高频连接（待复核） · 103.123.132.239", exact: true}).waitFor();
   await page.getByRole("button", {name: "AI 分析", exact: true}).click();
   await page.getByText("逐包文本前 2 MiB", {exact: true}).click();
   await page.getByRole("button", {name: "提交分析", exact: true}).click();

@@ -4,6 +4,20 @@ namespace app\common\service;
 
 class EventReviewReport
 {
+    public static function prioritize(array $alerts, string $title): array
+    {
+        usort($alerts, function ($a, $b) use ($title) {
+            $score = fn ($row) => 10000 * (int) in_array($row['status'] ?? 'open', ['open', 'acknowledged'], true)
+                + 1000 * (['low' => 1, 'medium' => 2, 'high' => 3][$row['severity'] ?? ''] ?? 0)
+                + 100 * (['behavior_notice' => 1, 'needs_review' => 2, 'strong_anomaly' => 3][$row['assessment_category'] ?? ''] ?? 2)
+                + (int) (($row['title'] ?? '') === $title);
+
+            return $score($b) <=> $score($a);
+        });
+
+        return $alerts;
+    }
+
     private static function decode(mixed $value): array
     {
         return is_array($value) ? $value : (json_decode((string) $value, true) ?: []);
@@ -31,8 +45,13 @@ class EventReviewReport
         }
         $category = $alerts ? 'behavior_notice' : 'needs_review';
         $rank = ['behavior_notice' => 1, 'needs_review' => 2, 'strong_anomaly' => 3];
-        foreach ($alerts as $alert) {
+        foreach (self::prioritize($alerts, $event['title'] ?? '') as $alert) {
             $e = self::decode($alert['evidence']);
+            if (in_array($alert['kind'], ['smb_connections', 'ssh_connections', 'rdp_connections', 'ftp_connections'], true)) {
+                $sample = $e['sample'] ?? [];
+                $target = implode(', ', array_slice($sample['target_endpoints'] ?? [], 0, 4));
+                $reasons[] = $alert['title'].'：'.$target.'；规则窗口 '.($e['window_seconds'] ?? '未知').' 秒，最活跃目标连接下界 '.($e['value'] ?? '未知').' 次。握手成功不排除认证或应用层异常，需结合配对认证结果和业务授权核实';
+            }
             $a = $e['connection_analysis'] ?? [];
             $current = $a['category'] ?? 'needs_review';
             if (($rank[$current] ?? 2) > $rank[$category]) {

@@ -58,10 +58,12 @@ class EventEvidence extends Monitor
         }
         unset($event['active_key']);
         $ids = $this->db()->table('alerts')->where('event_id', $id)->group('kind')->column('MAX(id) AS id');
-        $alerts = $ids ? $this->db()->table('alerts')->whereIn('id', $ids)->field('id,title,kind,severity,status,evidence,first_seen_at,last_seen_at')->select()->toArray() : [];
+        $alerts = $ids ? $this->db()->table('alerts')->whereIn('id', $ids)->field('id,title,kind,severity,assessment_category,status,evidence,first_seen_at,last_seen_at')->select()->toArray() : [];
         foreach ($alerts as &$alert) {
             $alert['evidence'] = $this->decode($alert['evidence']);
         }
+        unset($alert);
+        $alerts = EventReviewReport::prioritize($alerts, $event['title']);
         $progress = $this->progressData($id);
         $settings = $this->db()->table('ai_settings')->where('id', 1)->field('endpoint,model,enabled')->find();
         $this->success('', ['event' => $event, 'alerts' => $alerts, 'ai' => $settings] + $progress);
@@ -95,7 +97,7 @@ class EventEvidence extends Monitor
             $this->error('事件不存在', [], 404);
         }
         $ids = $this->db()->table('alerts')->where('event_id', $id)->group('kind')->column('MAX(id) AS id');
-        $alerts = $ids ? $this->db()->table('alerts')->whereIn('id', $ids)->field('kind,title,severity,status,evidence,last_seen_at')->limit(20)->select()->toArray() : [];
+        $alerts = $ids ? $this->db()->table('alerts')->whereIn('id', $ids)->field('kind,title,severity,assessment_category,status,evidence,last_seen_at')->limit(20)->select()->toArray() : [];
         $metrics = [];
         if ($event['ip_asset_id']) {
             $cutoff = max(strtotime($event['first_seen_at'].' UTC'), strtotime($event['last_seen_at'].' UTC') - 3600);

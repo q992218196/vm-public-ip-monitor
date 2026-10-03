@@ -134,6 +134,53 @@ class EvidenceTest extends TestCase
         $this->withHeaders(['X-Node-ID' => $other->id])->postJson($url)->assertNotFound();
     }
 
+    public function test_specific_service_titles_win_ties_without_hiding_stronger_evidence(): void
+    {
+        $event = $this->event();
+        $node = Node::find($event->node_id);
+        $ip = IpAsset::find($event->ip_asset_id);
+        $analyzer = app(Analyzer::class);
+        $at = now();
+        $review = ['connection_analysis' => ['category' => 'needs_review']];
+        $analyzer->alert($node, $ip, 'horizontal_scan', 'medium', '多目标连接（待复核）', $review, $at);
+        $event->refresh()->update(['status' => 'acknowledged']);
+        $analyzer->alert($node, $ip, 'smb_connections', 'medium', 'SMB 服务高频连接（待复核）', $review, $at);
+        $analyzer->alert($node, $ip, 'horizontal_scan', 'medium', '多目标连接（待复核）', $review, $at->copy()->addSeconds(30));
+        $this->assertSame('SMB 服务高频连接（待复核）', $event->fresh()->title);
+        $this->assertSame('medium', $event->fresh()->severity);
+        $this->assertSame('acknowledged', $event->fresh()->status);
+        $this->assertCount(2, $event->fresh()->kinds);
+        $this->assertDatabaseCount('alerts', 2);
+        $strong = ['connection_analysis' => ['category' => 'strong_anomaly']];
+        $analyzer->alert($node, $ip, 'vertical_scan', 'medium', '配对强异常', $strong, $at->copy()->addSeconds(30));
+        $this->assertSame('配对强异常', $event->fresh()->title);
+        $analyzer->alert($node, $ip, 'horizontal_scan', 'high', '高等级扫描', $review, $at->copy()->addSeconds(30));
+        $this->assertSame('高等级扫描', $event->fresh()->title);
+        $this->assertSame('high', $event->fresh()->severity);
+    }
+
+    public function test_title_backfill_preserves_reviews_and_excludes_resolved_subalerts(): void
+    {
+        $event = $this->event();
+        $node = Node::find($event->node_id);
+        $ip = IpAsset::find($event->ip_asset_id);
+        $analyzer = app(Analyzer::class);
+        $at = now();
+        $analyzer->alert($node, $ip, 'horizontal_scan', 'medium', '多目标连接（待复核）', [], $at);
+        $analyzer->alert($node, $ip, 'smb_connections', 'medium', 'SMB 服务高频连接（待复核）', [], $at);
+        $archived = $analyzer->alert($node, $ip, 'vertical_scan', 'high', '已处理的强异常', [], $at);
+        $archived->update(['status' => 'resolved']);
+        $event->refresh()->update(['title' => '多目标连接（待复核）', 'severity' => 'medium', 'status' => 'acknowledged', 'review_notes' => '人工核实中']);
+        $migration = require database_path('migrations/2026_10_03_120028_prioritize_existing_event_titles.php');
+        $migration->up();
+        $this->assertSame('SMB 服务高频连接（待复核）', $event->fresh()->title);
+        $this->assertSame('acknowledged', $event->fresh()->status);
+        $this->assertSame('人工核实中', $event->fresh()->review_notes);
+        $this->assertSame('medium', $event->fresh()->severity);
+        $this->assertSame('resolved', $archived->fresh()->status);
+        $this->assertDatabaseCount('alerts', 3);
+    }
+
     public function test_parser_distinguishes_replies_from_completed_handshakes_and_redacts_query_values(): void
     {
         $path = tempnam(sys_get_temp_dir(), 'pcap-test');
