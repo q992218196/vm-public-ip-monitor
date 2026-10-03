@@ -12,7 +12,7 @@ let server, browser;
 try {
   await writeFile(
     fixturePath,
-    '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><style>body{margin:0;padding:24px;background:#f4f6fa;font:14px system-ui;--el-text-color-primary:#303133;--el-border-color:#ddd;--el-fill-color-light:#f5f7fa;--el-fill-color-lighter:#fafafa;--el-color-primary:#409eff}#app{max-width:900px;margin:auto;background:white;padding:20px;box-sizing:border-box}</style></head><body><div id="app"></div><script type="module">import {createApp, reactive, h} from "vue";import ElementPlus from "element-plus";import "element-plus/dist/index.css";import {createPinia} from "pinia";import Events from "/src/views/backend/monitor/events.vue";import AiReport from "/src/views/backend/monitor/AiReport.vue";import TrafficEvidence from "/src/views/backend/monitor/TrafficEvidence.vue";import SiteReport from "/src/views/backend/monitor/SiteReport.vue";const state=reactive({content:"",record:{},view:"ai"});createApp({setup:()=>()=>state.view==="events"?h(Events):state.view==="udp"?h(TrafficEvidence,{record:state.record}):state.view==="site"?h(SiteReport,{record:state.record}):h(AiReport,{content:state.content})}).use(createPinia()).use(ElementPlus).mount("#app");window.showReport=(text)=>{state.view="ai";state.content=text};window.showEvidence=(view,record)=>{state.view=view;state.record=record};window.ready=true;</script></body></html>',
+    '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><style>body{margin:0;padding:24px;background:#f4f6fa;font:14px system-ui;--el-text-color-primary:#303133;--el-border-color:#ddd;--el-fill-color-light:#f5f7fa;--el-fill-color-lighter:#fafafa;--el-color-primary:#409eff}#app{max-width:900px;margin:auto;background:white;padding:20px;box-sizing:border-box}</style></head><body><div id="app"></div><script type="module">import {createApp, reactive, h} from "vue";import ElementPlus from "element-plus";import "element-plus/dist/index.css";import {createPinia} from "pinia";import {createRouter,createMemoryHistory} from "vue-router";import Monitor from "/src/views/backend/monitor/index.vue";const router=createRouter({history:createMemoryHistory(),routes:[{path:"/rules",component:{render:()=>null}}]});await router.push("/rules");import Events from "/src/views/backend/monitor/events.vue";import AiReport from "/src/views/backend/monitor/AiReport.vue";import TrafficEvidence from "/src/views/backend/monitor/TrafficEvidence.vue";import SiteReport from "/src/views/backend/monitor/SiteReport.vue";const state=reactive({content:"",record:{},view:"ai"});createApp({setup:()=>()=>state.view==="rules"?h(Monitor):state.view==="events"?h(Events):state.view==="udp"?h(TrafficEvidence,{record:state.record}):state.view==="site"?h(SiteReport,{record:state.record}):h(AiReport,{content:state.content})}).use(createPinia()).use(router).use(ElementPlus).mount("#app");window.showReport=(text)=>{state.view="ai";state.content=text};window.showEvidence=(view,record)=>{state.view=view;state.record=record};window.ready=true;</script></body></html>',
   );
   server = await createServer({
     root: webRoot,
@@ -138,6 +138,19 @@ try {
     await page.getByText("198.51.100.1", { exact: true }).count(),
     1,
   );
+  await page.evaluate(() => window.showEvidence("udp", {
+    title: "TCP 连接数量提醒", kind: "tcp_connection_burst",
+    evidence: {value: 3226, threshold: 2000, window_seconds: 60, rule_observed_span_seconds: 61, rule_window_count: 2,
+      rule_observed_start: "2026-10-03T00:00:00Z", rule_observed_end: "2026-10-03T00:01:01Z",
+      sample_window_start: "2026-10-03T00:00:31Z", sample_window_end: "2026-10-03T00:01:01Z",
+      sample: {tcp_attempts: 2226, synack_replies: 1650, unique_targets: 256, cardinality_capped: true},
+      connection_analysis: {completion_ratio: 0.216}}
+  }));
+  await page.getByText("样本 TCP 发起", {exact: true}).waitFor();
+  const tcpText = await page.locator(".el-descriptions").textContent();
+  assert.ok(tcpText.includes("3226 / 2000") && tcpText.includes("2226"));
+  assert.ok(tcpText.includes("61 秒跨度 / 2 个采集窗口") && tcpText.includes("30 秒；"));
+  assert.ok(tcpText.includes("74.1%") && tcpText.includes("计数可能截断"));
   await page.evaluate(() =>
     window.showEvidence("site", {
       status: "verified",
@@ -173,7 +186,12 @@ try {
     const url = new URL(route.request().url());
     const action = url.pathname.split("/").at(-1);
     let data = {};
-    if (action === "index") data = {list: [eventFixture], super: true};
+    if (action === "index" && url.pathname.includes("/Monitor/")) data = {list: [
+      {id: 1, name: "高规则", kind: "horizontal_scan", threshold: 100, window_seconds: 60, severity: "high", enabled: true},
+      {id: 2, name: "中规则", kind: "smb_connections", threshold: 60, window_seconds: 60, severity: "medium", enabled: false},
+      {id: 3, name: "低规则", kind: "tcp_connection_burst", threshold: 2000, window_seconds: 60, severity: "low", enabled: "f"}
+    ], super: true};
+    else if (action === "index") data = {list: [eventFixture], super: true};
     else if (action === "nodes") data = {list: [], super: true};
     else if (action === "count") data = {total: 1};
     else if (action === "detail" || action === "progress") data = {event: eventFixture, alerts: [], captures: [captureFixture], analyses: [], ai: {enabled: true, endpoint: "https://api.deepseek.com/chat/completions", model: "deepseek-flash"}};
@@ -186,6 +204,16 @@ try {
     }
     return route.fulfill({json: {code: 1, msg: "", data}});
   });
+  await page.evaluate(() => window.showEvidence("rules", {}));
+  await page.getByText("高规则", {exact: true}).waitFor();
+  const ruleRows = page.locator(".el-table tbody tr");
+  assert.ok((await page.locator(".el-table").textContent()).includes("级别"));
+  assert.equal(await ruleRows.nth(0).locator(".el-tag--danger").textContent(), "高");
+  assert.ok((await ruleRows.nth(0).locator(".el-tag--success").textContent()).includes("启用"));
+  assert.equal(await ruleRows.nth(1).locator(".el-tag--warning").textContent(), "中");
+  assert.equal(await ruleRows.nth(1).locator(".el-tag--info").textContent(), "停用");
+  assert.equal(await ruleRows.nth(2).locator(".el-tag--success").textContent(), "低");
+  assert.equal(await ruleRows.nth(2).locator(".el-tag--info").textContent(), "停用");
   await page.evaluate(() => window.showEvidence("events", {}));
   await page.getByRole("button", {name: "加入白名单", exact: true}).first().waitFor();
   await page.getByRole("button", {name: "加入白名单", exact: true}).first().click();

@@ -35,6 +35,21 @@ class ConnectionAssessmentTest extends TestCase
         $this->assertSame('medium', $service->assess('horizontal_scan', $sample, 100, 'high', [$sample, $sample])['severity']);
     }
 
+    public function test_reply_ratio_requires_valid_paired_synack_counts(): void
+    {
+        $sample = $this->sample();
+        $sample['synack_replies'] = 90;
+        $assessment = app(ConnectionAssessment::class);
+        $this->assertSame(0.75, $assessment->assess('tcp_connection_burst', $sample)['connection_analysis']['reply_ratio']);
+        $sample['synack_replies'] = 121;
+        $this->assertNull($assessment->assess('tcp_connection_burst', $sample)['connection_analysis']['reply_ratio']);
+        unset($sample['synack_replies']);
+        $this->assertNull($assessment->assess('tcp_connection_burst', $sample)['connection_analysis']['reply_ratio']);
+        $sample['synack_replies'] = 90;
+        unset($sample['connection_stats_version']);
+        $this->assertNull($assessment->assess('tcp_connection_burst', $sample)['connection_analysis']['reply_ratio']);
+    }
+
     public function test_strong_scan_needs_sustained_rejection_and_quality_and_respects_rule_ceiling(): void
     {
         $s = $this->sample();

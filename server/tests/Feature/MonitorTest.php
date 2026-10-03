@@ -144,6 +144,31 @@ class MonitorTest extends TestCase
         $this->assertSame('needs_review', $alert->assessment_category);
     }
 
+    public function test_tcp_rule_total_is_distinct_from_its_last_sample_window(): void
+    {
+        $this->seed(MonitorSeeder::class);
+        Rule::where('kind', 'tcp_connection_burst')->update(['threshold' => 2000, 'window_seconds' => 60]);
+        $node = $this->node();
+        $end = now()->startOfSecond();
+        $this->travelTo($end);
+        foreach ([-30 => 1000, 0 => 2226] as $offset => $attempts) {
+            $payload = $this->payload();
+            $payload['window_end'] = $end->copy()->addSeconds($offset)->toIso8601String();
+            $payload['window_start'] = $end->copy()->addSeconds($offset - ($offset === -30 ? 31 : 30))->toIso8601String();
+            $payload['metrics'][0]['tcp_attempts'] = $attempts;
+            $this->upload($node, $payload)->assertOk();
+            ProcessBatch::dispatchSync(Batch::where('batch_id', $payload['batch_id'])->firstOrFail()->id);
+        }
+        $evidence = Alert::where('kind', 'tcp_connection_burst')->firstOrFail()->evidence;
+        $this->assertSame(3226, $evidence['value']);
+        $this->assertSame(2226, $evidence['sample']['tcp_attempts']);
+        $this->assertSame(60, $evidence['window_seconds']);
+        $this->assertSame(61, $evidence['rule_observed_span_seconds']);
+        $this->assertSame(2, $evidence['rule_window_count']);
+        $this->assertSame($end->copy()->subSeconds(61)->toIso8601String(), $evidence['rule_observed_start']);
+        $this->assertSame($end->copy()->subSeconds(30)->toIso8601String(), $evidence['sample_window_start']);
+    }
+
     public function test_horizontal_scan_with_many_replied_bidirectional_connections_is_review_level(): void
     {
         $this->seed(MonitorSeeder::class);

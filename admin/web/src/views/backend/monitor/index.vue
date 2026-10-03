@@ -97,6 +97,9 @@
                             @click="filterAlert(column.key, scope.row)"
                             >{{ display(scope.row[column.key]) }}</el-tag
                         >
+                        <el-tag v-else-if="column.key === 'enabled'" :type="enabledState(scope.row.enabled) ? 'success' : 'info'">{{
+                            enabledState(scope.row.enabled) ? '启用' : '停用'
+                        }}</el-tag>
                         <el-tag
                             v-else-if="column.key === 'agent_update_status'"
                             :type="agentUpdateTag(scope.row)"
@@ -444,7 +447,14 @@ const definitions: Record<string, Definition> = {
         search: '规则名称',
         node: true,
         create: true,
-        columns: [col('name', '规则'), col('kind', '类型'), col('threshold', '阈值'), col('window_seconds', '窗口秒'), col('enabled', '启用')],
+        columns: [
+            col('name', '规则'),
+            col('kind', '类型'),
+            col('severity', '级别'),
+            col('threshold', '阈值'),
+            col('window_seconds', '窗口秒'),
+            col('enabled', '启用'),
+        ],
         edit: [
             col('name', '规则名称'),
             {
@@ -750,6 +760,9 @@ function display(value: any): string {
     }
     if (labels[String(value)]) return labels[String(value)]
     return String(value)
+}
+function enabledState(value: unknown): boolean {
+    return [true, 1, '1', 't', 'true'].includes(value as string | number | boolean)
 }
 const timeColumns = ['last_seen_at', 'first_seen_at', 'last_probed_at', 'window_start', 'window_end', 'created_at', 'updated_at', 'expires_at']
 function isTimeColumn(key: string): boolean {

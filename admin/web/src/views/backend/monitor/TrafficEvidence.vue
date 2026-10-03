@@ -34,8 +34,16 @@
         <template v-else>
             <el-descriptions :column="2" border>
                 <el-descriptions-item label="公网 IP">{{ record.ip || sample.ip || '—' }}</el-descriptions-item>
-                <el-descriptions-item label="目标数">{{ sample.unique_targets ?? '—' }}</el-descriptions-item>
-                <el-descriptions-item label="TCP 发起">{{ sample.tcp_attempts ?? '—' }}</el-descriptions-item>
+                <el-descriptions-item label="规则命中／阈值"
+                    >{{ evidence.value ?? '未保存' }} / {{ evidence.threshold ?? '未保存' }}</el-descriptions-item
+                >
+                <el-descriptions-item label="规则配置窗口">{{ evidence.window_seconds ?? '未保存' }} 秒</el-descriptions-item>
+                <el-descriptions-item label="实际规则覆盖范围">{{ ruleCoverage }}</el-descriptions-item>
+                <el-descriptions-item label="样本采集窗口">{{ sampleDuration }}</el-descriptions-item>
+                <el-descriptions-item label="样本目标数"
+                    >{{ sample.unique_targets ?? '—' }}{{ sample.cardinality_capped ? '（计数可能截断）' : '' }}</el-descriptions-item
+                >
+                <el-descriptions-item label="样本 TCP 发起">{{ sample.tcp_attempts ?? '—' }}</el-descriptions-item>
                 <el-descriptions-item label="SYN-ACK 回复">{{ sample.synack_replies ?? '未采集' }}</el-descriptions-item>
                 <el-descriptions-item label="握手回复比例">{{ replyRatio }}</el-descriptions-item>
                 <el-descriptions-item label="完整握手">{{ sample.completed_handshakes ?? '未采集' }} · {{ completionRatio }}</el-descriptions-item>
@@ -43,6 +51,11 @@
                 <el-descriptions-item label="等待至少 3 秒仍无回复">{{ sample.mature_no_reply ?? '未采集' }}（不等于失败）</el-descriptions-item>
                 <el-descriptions-item label="目标端口">{{ (sample.ports || []).join('、') || '—' }}</el-descriptions-item>
             </el-descriptions>
+            <p v-if="record.kind === 'tcp_connection_burst'">
+                规则命中值累加评估范围内的 TCP
+                发起数；下面的握手、目标和端口来自单个样本窗口。按完整采集窗口统计，边界可能超过配置秒数，范围内也可能有采集间断。TCP 发起不是 HTTP
+                请求、登录次数或已成功连接数。
+            </p>
             <p>{{ evidence.note }}</p>
             <h4 v-if="endpoints.length">目标连接样本</h4>
             <el-table v-if="endpoints.length" :data="endpoints" border size="small">
@@ -85,8 +98,36 @@ const evidence = computed(() => props.record.evidence || {})
 const sample = computed(() => evidence.value.sample || evidence.value)
 const analysis = computed(() => evidence.value.connection_analysis || {})
 const endpoints = computed<any[]>(() => sample.value.outbound_endpoints || [])
+const ruleCoverage = computed(() => {
+    const e = evidence.value
+    if (typeof e.rule_observed_span_seconds !== 'number') return '旧记录未保存实际范围'
+    return `${e.rule_observed_span_seconds} 秒跨度 / ${e.rule_window_count} 个采集窗口；${timeText(e.rule_observed_start)} 至 ${timeText(e.rule_observed_end)}`
+})
+const sampleDuration = computed(() => {
+    const e = evidence.value
+    const start = Date.parse(e.sample_window_start || '')
+    const end = Date.parse(e.sample_window_end || '')
+    if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return '未保存'
+    return `${((end - start) / 1000).toFixed(3).replace(/\.?0+$/, '')} 秒；${timeText(e.sample_window_start)} 至 ${timeText(e.sample_window_end)}`
+})
+function timeText(value: string) {
+    const date = new Date(value)
+    return Number.isFinite(date.getTime()) ? date.toLocaleString() : '未知'
+}
 const replyRatio = computed(() => {
-    const ratio = analysis.value.reply_ratio
+    let ratio = analysis.value.reply_ratio
+    const attempts = sample.value.tcp_attempts
+    const replies = sample.value.synack_replies
+    if (
+        ratio === undefined &&
+        typeof analysis.value.completion_ratio === 'number' &&
+        Number.isInteger(attempts) &&
+        attempts > 0 &&
+        Number.isInteger(replies) &&
+        replies >= 0 &&
+        replies <= attempts
+    )
+        ratio = replies / attempts
     return typeof ratio === 'number' ? (ratio * 100).toFixed(1) + '%' : '不可计算'
 })
 const completionRatio = computed(() =>

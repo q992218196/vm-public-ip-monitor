@@ -79,6 +79,7 @@ class ConnectionAssessment
             'note' => implode('。', $reasons).'。'.implode('。', $gaps),
             'connection_analysis' => ['assessment_version' => 2, 'category' => $category, 'conclusion' => $reasons[0], 'reasons' => $reasons, 'evidence_gaps' => $gaps,
                 'tcp_attempts' => $attempts, 'synack_replies' => $sample['synack_replies'] ?? null, 'completed_handshakes' => $paired ? $completed : null,
+                'reply_ratio' => $paired && is_int($sample['synack_replies'] ?? null) && $sample['synack_replies'] >= 0 && $sample['synack_replies'] <= $attempts ? round($sample['synack_replies'] / $attempts, 4) : null,
                 'completion_ratio' => $paired ? round($completed / $attempts, 4) : null, 'rst_replies' => $paired ? $resets : null,
                 'mature_attempts' => $paired ? $mature : null, 'mature_no_reply' => $paired ? $missing : null,
                 'quality_good' => $qualityGood, 'sustained_rejection_windows' => $sustained,

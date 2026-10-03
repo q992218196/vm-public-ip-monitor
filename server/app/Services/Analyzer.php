@@ -149,6 +149,8 @@ class Analyzer
         foreach ($this->rules as $rule) {
             $cutoff = $batch->window_end->copy()->subSeconds($rule->window_seconds);
             $rows = $history->filter(fn ($row) => $row->window_end->gt($cutoff));
+            $observedStart = $rows->min('window_start');
+            $observedEnd = $rows->max('window_end');
             $serviceSamples = isset(ServiceConnectionRules::RULES[$rule->kind]) ? $rows->map(fn ($row) => ['row' => $row, 'sample' => app(ServiceConnectionRules::class)->sample($rule->kind, $row->evidence)])->filter(fn ($entry) => $entry['sample'] !== null)->sortByDesc(fn ($entry) => $entry['sample']['tcp_attempts']) : collect();
             $serviceSample = $serviceSamples->first();
             $value = $serviceSample ? $serviceSample['sample']['tcp_attempts'] : match ($rule->kind) {
@@ -217,7 +219,11 @@ class Analyzer
                 $note = $assessment['note'];
                 $analysis = ['connection_analysis' => $assessment['connection_analysis']];
             }
-            $this->alert($node, $asset, $rule->kind, $severity, $title, ['rule_id' => $rule->id, 'value' => $value, 'threshold' => $rule->threshold, 'window_seconds' => $rule->window_seconds, 'sample_window_start' => $sample?->window_start?->toIso8601String(), 'sample_window_end' => $sample?->window_end?->toIso8601String(), 'sample' => $sampleEvidence, 'confidence' => $confidence, 'note' => $note] + $analysis, $batch->window_end, $rule->cooldown_seconds, (string) $rule->id);
+            $this->alert($node, $asset, $rule->kind, $severity, $title, ['rule_id' => $rule->id, 'value' => $value, 'threshold' => $rule->threshold, 'window_seconds' => $rule->window_seconds,
+                'rule_observed_start' => $observedStart?->toIso8601String(), 'rule_observed_end' => $observedEnd?->toIso8601String(),
+                'rule_observed_span_seconds' => $observedStart && $observedEnd ? round($observedStart->diffInSeconds($observedEnd), 3) : null,
+                'rule_window_count' => $rows->count(),
+                'sample_window_start' => $sample?->window_start?->toIso8601String(), 'sample_window_end' => $sample?->window_end?->toIso8601String(), 'sample' => $sampleEvidence, 'confidence' => $confidence, 'note' => $note] + $analysis, $batch->window_end, $rule->cooldown_seconds, (string) $rule->id);
         }
     }
 
