@@ -216,6 +216,10 @@ jobs:
           docker compose -f compose.yml -f compose.buildadmin.yml run --rm --no-deps app php artisan migrate --force
           printf 'test-pcap-password-2026\ntest-pcap-password-2026\n' | docker compose -f compose.yml -f compose.buildadmin.yml exec -T buildadmin-app php tools/init-admin.php pcap@example.test
           docker compose -f compose.yml -f compose.buildadmin.yml exec -T buildadmin-app sh -c "sed -i \"s/'admin_login_captcha'   => true/'admin_login_captcha'   => false/\" config/buildadmin.php"
+          docker compose -f compose.yml -f compose.buildadmin.yml restart buildadmin-app
+          sleep 2
+          curl -fsS -H 'server: true' http://127.0.0.1:8081/admin/Index/login >/tmp/pcap-login-options.json
+          python3 -c 'import json; assert json.load(open("/tmp/pcap-login-options.json"))["data"]["captcha"] is False'
           curl -fsS -H 'server: true' -d 'username=pcap@example.test&password=test-pcap-password-2026' http://127.0.0.1:8081/admin/Index/login >/tmp/pcap-login.json
           pcap_token=$(python3 -c 'import json; print(json.load(open("/tmp/pcap-login.json"))["data"]["userInfo"]["token"])')
           docker compose -f compose.yml -f compose.buildadmin.yml exec -T postgres psql -U monitor -d monitor <<'SQL'
