@@ -33,6 +33,29 @@
                 </ul>
             </article>
         </div>
+        <template v-if="report.udp_totals?.windows">
+            <h4>UDP 证据（观察窗口累计）</h4>
+            <p>
+                窗口 {{ report.udp_totals.windows }} · 出站流 {{ report.udp_totals.flows }} · 包数 出／入 {{ report.udp_totals.packets_out }} /
+                {{ report.udp_totals.packets_in }} · 字节 出／入 {{ report.udp_totals.bytes_out }} / {{ report.udp_totals.bytes_in }} B
+            </p>
+            <p>
+                不同窗口的同一五元组会重复计入累计流数；UDP 无握手，服务回复也可能计入，不等于新建连接或攻击。{{
+                    report.udp_totals.capped ? '目标样本截断或状态达到限额。' : ''
+                }}
+            </p>
+            <el-table :data="report.udp_targets || []" border size="small" max-height="420">
+                <el-table-column prop="peer_ip" label="目标 IP" min-width="150" />
+                <el-table-column prop="peer_port" label="端口" width="90" />
+                <el-table-column prop="flows" label="出站流数" width="100" />
+                <el-table-column label="包数 出／入" min-width="130"
+                    ><template #default="scope">{{ scope.row.packets_out }} / {{ scope.row.packets_in }}</template></el-table-column
+                >
+                <el-table-column label="字节 出／入" min-width="160"
+                    ><template #default="scope">{{ scope.row.bytes_out }} / {{ scope.row.bytes_in }} B</template></el-table-column
+                >
+            </el-table>
+        </template>
         <h4>TCP 发起数量趋势</h4>
         <svg v-if="report.timeline.length" viewBox="0 0 800 130" class="trend" role="img" aria-label="事件内 TCP 发起次数趋势，按实际时间定位">
             <line x1="20" y1="110" x2="780" y2="110" stroke="currentColor" opacity="0.2" />

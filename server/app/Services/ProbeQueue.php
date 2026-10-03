@@ -19,7 +19,7 @@ class ProbeQueue
             if (! $force && $task->updated_at->gt(now()->subDay())) {
                 return $task;
             }
-            $task->update(['status' => 'pending', 'attempts' => 0, 'available_at' => now(), 'lease_token' => null, 'leased_until' => null]);
+            $task->update(['mode' => 'normal', 'status' => 'pending', 'attempts' => 0, 'available_at' => now(), 'lease_token' => null, 'leased_until' => null]);
 
             return $task;
         });

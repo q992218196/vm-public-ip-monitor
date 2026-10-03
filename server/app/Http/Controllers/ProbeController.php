@@ -20,7 +20,7 @@ class ProbeController extends Controller
             $task->update(['status' => 'leased', 'attempts' => $task->attempts + 1, 'lease_token' => hash('sha256', $token), 'leased_until' => now()->addMinutes(3)]);
             $site = $task->website;
 
-            return response()->json(['task' => ['id' => $task->id, 'lease_token' => $token, 'ip' => $site->ipAsset->ip, 'host' => $site->host, 'port' => $site->port, 'scheme' => $site->scheme, 'source' => $site->source]]);
+            return response()->json(['task' => ['id' => $task->id, 'lease_token' => $token, 'ip' => $site->ipAsset->ip, 'host' => $site->host, 'port' => $site->port, 'scheme' => $site->scheme, 'source' => $site->source, 'mode' => $task->mode]]);
         });
     }
 
@@ -46,11 +46,17 @@ class ProbeController extends Controller
             'classification.evidence.*.source' => 'required|in:title,description,body',
             'classification.evidence.*.keyword' => 'required|string|max:64',
             'classification.evidence.*.excerpt' => 'required|string|max:255',
-            'ownership_status' => 'sometimes|in:manual,ip_only,dns_match,dns_mismatch,dns_unknown',
+            'ownership_status' => 'sometimes|in:manual,ip_only,dns_match,dns_mismatch,dns_unknown,origin_response',
             'ownership_evidence' => 'sometimes|array', 'ownership_evidence.host' => 'required_with:ownership_evidence|string|max:253',
             'ownership_evidence.checked_at' => 'required_with:ownership_evidence|date', 'ownership_evidence.method' => 'required_with:ownership_evidence|in:administrator_registered,literal_ip_comparison,dns_A_AAAA',
             'ownership_evidence.addresses' => 'present_with:ownership_evidence|array|max:16', 'ownership_evidence.addresses.*' => 'ip',
             'ownership_evidence.addresses_truncated' => 'sometimes|boolean', 'ownership_evidence.limitations' => 'sometimes|string|max:255',
+            'ownership_evidence.origin_test' => 'sometimes|array:target_ip,checked_at,method,dns_status,limitations',
+            'ownership_evidence.origin_test.target_ip' => 'required_with:ownership_evidence.origin_test|ip',
+            'ownership_evidence.origin_test.checked_at' => 'required_with:ownership_evidence.origin_test|date',
+            'ownership_evidence.origin_test.method' => 'required_with:ownership_evidence.origin_test|in:fixed_ip_host_sni',
+            'ownership_evidence.origin_test.dns_status' => 'required_with:ownership_evidence.origin_test|in:dns_match,dns_mismatch,dns_unknown,manual,ip_only',
+            'ownership_evidence.origin_test.limitations' => 'sometimes|string|max:255',
             'screenshot' => 'nullable|string|max:2800000', 'error' => 'nullable|string|max:1000']);
 
         return DB::transaction(function () use ($v, $task, $screenshots) {
@@ -61,6 +67,12 @@ class ProbeController extends Controller
                 abort_unless(isset($v['ownership_evidence']), 422, '缺少归属证据');
                 $expectedHost = strtolower(rtrim($site->host ?: $site->ipAsset->ip, '.'));
                 abort_unless(strtolower(rtrim($v['ownership_evidence']['host'], '.')) === $expectedHost, 422, '域名归属证据不匹配');
+                if (isset($v['ownership_evidence']['origin_test'])) {
+                    abort_unless($task->mode === 'origin_test' && inet_pton($v['ownership_evidence']['origin_test']['target_ip']) === inet_pton($site->ipAsset->ip), 422, '源站测试任务或目标不匹配');
+                }
+                if ($v['ownership_status'] === 'origin_response') {
+                    abort_unless($task->mode === 'origin_test' && isset($v['ownership_evidence']['origin_test']) && $v['status'] === 'verified', 422, '指定 IP 响应必须来自人工测试任务');
+                }
                 if ($v['ownership_status'] === 'dns_match') {
                     abort_unless(collect($v['ownership_evidence']['addresses'])->contains(fn ($ip) => inet_pton($ip) === inet_pton($site->ipAsset->ip)), 422, 'DNS 证据未包含目标 IP');
                 }
@@ -85,11 +97,14 @@ class ProbeController extends Controller
                     }
                 }
             }
+            if (isset($v['ownership_evidence']) && ! isset($v['ownership_evidence']['origin_test']) && isset($site->ownership_evidence['origin_test'])) {
+                $data['ownership_evidence']['origin_test'] = $site->ownership_evidence['origin_test'];
+            }
             if ($v['status'] === 'verified') {
                 $data += ['title' => $v['title'] ?? null, 'description' => $v['description'] ?? null, 'http_status' => $v['http_status'] ?? null, 'final_url' => $v['final_url'] ?? null, 'category' => $v['category'] ?? 'unknown', 'classification' => $v['classification'] ?? null, 'content_hash' => $v['content_hash'] ?? null, 'screenshot_path' => $path];
             }
             $site->update($data);
-            $task->update(['status' => $v['status'] === 'verified' ? 'complete' : 'failed', 'last_error' => $v['error'] ?? null, 'lease_token' => null, 'leased_until' => null]);
+            $task->update(['mode' => 'normal', 'status' => $v['status'] === 'verified' ? 'complete' : 'failed', 'last_error' => $v['error'] ?? null, 'lease_token' => null, 'leased_until' => null]);
 
             return response()->json(['accepted' => true, 'screenshot_stored' => $path !== null]);
         });

@@ -4,7 +4,7 @@ namespace App\Services;
 
 class PcapSummary
 {
-    public const ANALYSIS_VERSION = 4;
+    public const ANALYSIS_VERSION = 5;
 
     public const PACKET_TEXT_LIMIT = 2097152;
 
@@ -88,7 +88,7 @@ class PcapSummary
                     }
                     $key = $tuple.'|'.$initialSequence;
                     if (! isset($flows[$key]) && count($flows) < 4096) {
-                        $flows[$key] = ['peer_ip' => $peer, 'peer_port' => $remote, 'local_port' => $local, 'transport' => $packet['protocol'] === 6 ? 'tcp' : 'udp', 'syn_out' => 0, 'synack_in' => false, 'handshake_completed' => false, 'rst_in' => false, 'payload_bytes_out' => 0, 'payload_bytes_in' => 0, 'local_syn_seq' => null, 'peer_syn_seq' => null];
+                        $flows[$key] = ['peer_ip' => $peer, 'peer_port' => $remote, 'local_port' => $local, 'transport' => $packet['protocol'] === 6 ? 'tcp' : 'udp', 'syn_out' => 0, 'synack_in' => false, 'handshake_completed' => false, 'rst_in' => false, 'packets_out' => 0, 'packets_in' => 0, 'wire_bytes_out' => 0, 'wire_bytes_in' => 0, 'payload_bytes_out' => 0, 'payload_bytes_in' => 0, 'local_syn_seq' => null, 'peer_syn_seq' => null];
                     }
                     if (isset($flows[$key])) {
                         $flow = &$flows[$key];
@@ -107,6 +107,8 @@ class PcapSummary
                         if (! $out && ($flags & 0x04) && ($flow['handshake_completed'] || (($flags & 0x10) && $flow['local_syn_seq'] !== null && $packet['ack'] === (($flow['local_syn_seq'] + 1) & 0xFFFFFFFF)))) {
                             $flow['rst_in'] = true;
                         }
+                        $flow[$out ? 'packets_out' : 'packets_in']++;
+                        $flow[$out ? 'wire_bytes_out' : 'wire_bytes_in'] += $r['orig'];
                         $flow[$out ? 'payload_bytes_out' : 'payload_bytes_in'] += $packet['payload_size'];
                         if ($out && $packet['tls_sni']) {
                             $flow['tls_client_hello_sni'] = $packet['tls_sni'];
@@ -153,6 +155,24 @@ class PcapSummary
         $summary['authentication_groups'] = array_values(array_slice($authenticationGroups, 0, 32));
         $summary['authentication_groups_truncated'] = count($authenticationGroups) > 32;
         $summary['authentication_limitations'] = 'Only paired visible FTP authentication replies and plaintext SMB2 SESSION_SETUP responses are counted. SSH and RDP/NLA login results, FTPS and encrypted SMB are unavailable; zero observed failures does not prove no failed logins or no attack.';
+        $udpGroups = [];
+        foreach ($flows as $flow) {
+            if ($flow['transport'] !== 'udp' || $flow['packets_out'] === 0) {
+                continue;
+            }
+            $key = $flow['peer_ip'].'|'.$flow['peer_port'];
+            $udpGroups[$key] ??= ['peer_ip' => $flow['peer_ip'], 'peer_port' => $flow['peer_port'], 'flows' => 0, 'packets_out' => 0, 'packets_in' => 0, 'bytes_out' => 0, 'bytes_in' => 0];
+            $udpGroups[$key]['flows']++;
+            foreach (['packets_out', 'packets_in'] as $field) {
+                $udpGroups[$key][$field] += $flow[$field];
+            }
+            $udpGroups[$key]['bytes_out'] += $flow['wire_bytes_out'];
+            $udpGroups[$key]['bytes_in'] += $flow['wire_bytes_in'];
+        }
+        uasort($udpGroups, fn ($a, $b) => $b['packets_out'] <=> $a['packets_out']);
+        $summary['udp_groups'] = array_values(array_slice($udpGroups, 0, 32));
+        $summary['udp_groups_truncated'] = count($udpGroups) > 32;
+        $summary['udp_limitations'] = 'Tracked outgoing UDP tuples only, including server replies; no handshake or authentication success can be inferred. Packet counts include retransmissions and possible multi-interface copies, byte counts use recorded wire length. Normal DNS/QUIC/games may have similar rates.';
         $outbound = array_filter($flows, fn ($flow) => $flow['syn_out'] > 0);
         $summary['observed_outbound_flows'] = count($outbound);
         $summary['syn_packets_out'] = array_sum(array_column($outbound, 'syn_out'));

@@ -19,7 +19,7 @@ $request = function (string $method, array $payload): array {
 
     return json_decode(file_get_contents('http://127.0.0.1:8099/admin/Monitor/'.$method, false, $context), true, 512, JSON_THROW_ON_ERROR);
 };
-$kinds = ['horizontal_scan', 'vertical_scan', 'suspected_bruteforce', 'single_target_attempts', 'tcp_connection_burst', 'egress_mbps', 'vpn_protocol', 'proxy_suspect', 'capture_degraded', 'node_offline'];
+$kinds = ['horizontal_scan', 'vertical_scan', 'suspected_bruteforce', 'single_target_attempts', 'tcp_connection_burst', 'udp_flow_burst', 'udp_packet_rate', 'egress_mbps', 'vpn_protocol', 'proxy_suspect', 'capture_degraded', 'node_offline'];
 foreach ($kinds as $index => $kind) {
     $id = 10 + 3 * $index;
     $asset = in_array($kind, ['capture_degraded', 'node_offline'], true) ? null : ($kind === 'proxy_suspect' ? 2 : 1);

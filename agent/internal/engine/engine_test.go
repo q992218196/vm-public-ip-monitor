@@ -56,6 +56,21 @@ func TestProxySuspicionNeedsBidirectionalPeersAndEgressFanout(t *testing.T) {
 func cfg() config.Config {
 	return config.Config{CIDRs: []string{"203.0.113.0/24", "2001:db8::/48"}, MaxIPs: 10, MaxFlows: 1000, MaxReassembly: 10, MaxSites: 20}
 }
+func TestUDPEndpointStateAndUploadSamplesStayBounded(t *testing.T) {
+	now := time.Now()
+	e := New(cfg(), now)
+	for i := 1; i <= 100; i++ {
+		p := udpFrame("203.0.113.1", fmt.Sprintf("192.0.2.%d", i), 40000, 53, nil)
+		e.Process(p, len(p), "a", now)
+	}
+	if len(e.ips[netip.MustParseAddr("203.0.113.1")].udpEndpoints) != 64 {
+		t.Fatal("UDP endpoint state exceeded bound")
+	}
+	m := e.Snapshot(now.Add(30 * time.Second)).Metrics[0]
+	if m.UDPFlowsOut != 100 || m.UDPPacketsOut != 100 || len(m.UDPEndpoints) != 8 || !m.UDPEndpointsTruncated || m.UDPFlowsCapped {
+		t.Fatalf("unexpected bounded UDP evidence: %+v", m)
+	}
+}
 func TestPairedHandshakeResetsAndMatureNoReplyAreWindowBounded(t *testing.T) {
 	for _, addresses := range [][2]string{{"203.0.113.1", "192.0.2.1"}, {"2001:db8::1", "2001:db9::1"}} {
 		now := time.Now()
@@ -206,18 +221,75 @@ func frame(src, dst string, sp, dp uint16, seq uint32, flags byte, payload strin
 }
 func udpFrame(src, dst string, sp, dp uint16, payload []byte) []byte {
 	a, b := netip.MustParseAddr(src), netip.MustParseAddr(dst)
-	p := make([]byte, 14+20+8+len(payload))
-	binary.BigEndian.PutUint16(p[12:14], 0x0800)
-	p[14] = 0x45
-	binary.BigEndian.PutUint16(p[16:18], uint16(20+8+len(payload)))
-	p[23] = 17
-	copy(p[26:30], a.AsSlice())
-	copy(p[30:34], b.AsSlice())
-	binary.BigEndian.PutUint16(p[34:36], sp)
-	binary.BigEndian.PutUint16(p[36:38], dp)
-	binary.BigEndian.PutUint16(p[38:40], uint16(8+len(payload)))
-	copy(p[42:], payload)
+	ipLength := 20
+	if a.Is6() {
+		ipLength = 40
+	}
+	p := make([]byte, 14+ipLength+8+len(payload))
+	if a.Is6() {
+		binary.BigEndian.PutUint16(p[12:14], 0x86dd)
+		p[14] = 0x60
+		binary.BigEndian.PutUint16(p[18:20], uint16(8+len(payload)))
+		p[20] = 17
+		copy(p[22:38], a.AsSlice())
+		copy(p[38:54], b.AsSlice())
+	} else {
+		binary.BigEndian.PutUint16(p[12:14], 0x0800)
+		p[14] = 0x45
+		binary.BigEndian.PutUint16(p[16:18], uint16(20+8+len(payload)))
+		p[23] = 17
+		copy(p[26:30], a.AsSlice())
+		copy(p[30:34], b.AsSlice())
+	}
+	offset := 14 + ipLength
+	binary.BigEndian.PutUint16(p[offset:offset+2], sp)
+	binary.BigEndian.PutUint16(p[offset+2:offset+4], dp)
+	binary.BigEndian.PutUint16(p[offset+4:offset+6], uint16(8+len(payload)))
+	copy(p[offset+8:], payload)
 	return p
+}
+func TestUDPCountsTuplesPacketsDirectionsAndWindowReset(t *testing.T) {
+	for _, addresses := range [][2]string{{"203.0.113.1", "192.0.2.1"}, {"2001:db8::1", "2001:db9::1"}} {
+		now := time.Now()
+		e := New(cfg(), now)
+		vm, peer := addresses[0], addresses[1]
+		send := func(src, dst string, sp, dp uint16, iface string) {
+			p := udpFrame(src, dst, sp, dp, []byte("test"))
+			e.Process(p, len(p), iface, now)
+		}
+		send(vm, peer, 40000, 53, "a")
+		send(vm, peer, 40000, 53, "b")
+		send(vm, peer, 40000, 53, "a")
+		send(vm, peer, 40001, 53, "a")
+		send(peer, vm, 53, 40000, "a")
+		result := e.Snapshot(now.Add(30 * time.Second))
+		m := result.Metrics[0]
+		if m.UDPStatsVersion != 1 || m.UDPFlowsOut != 2 || m.UDPPacketsOut != 3 || m.UDPPacketsIn != 1 || len(m.UDPEndpoints) != 1 || m.UDPEndpoints[0].Flows != 2 || result.Health.DuplicatePackets != 1 || m.TCPAttempts != 0 {
+			t.Fatalf("UDP evidence: %+v, health %+v", m, result.Health)
+		}
+		now = now.Add(31 * time.Second)
+		send(vm, peer, 40000, 53, "a")
+		m = e.Snapshot(now.Add(30 * time.Second)).Metrics[0]
+		if m.UDPFlowsOut != 1 || m.UDPPacketsOut != 1 || m.UDPPacketsIn != 0 {
+			t.Fatalf("window not reset: %+v", m)
+		}
+	}
+}
+func TestUDPStateCapDoesNotStopPacketCountingOrConsumeTCPStates(t *testing.T) {
+	now := time.Now()
+	c := cfg()
+	c.MaxFlows = 2
+	e := New(c, now)
+	for i := 0; i < 4; i++ {
+		p := udpFrame("203.0.113.1", "192.0.2.1", uint16(40000+i), 53, nil)
+		e.Process(p, len(p), "a", now)
+	}
+	tcp := frame("203.0.113.1", "192.0.2.1", 50000, 22, 100, 2, "")
+	e.Process(tcp, len(tcp), "a", now)
+	m := e.Snapshot(now.Add(30 * time.Second)).Metrics[0]
+	if m.UDPFlowsOut != 2 || !m.UDPFlowsCapped || m.UDPPacketsOut != 4 || m.TCPAttempts != 1 {
+		t.Fatalf("UDP cap interferes with counting/TCP: %+v", m)
+	}
 }
 func TestVPNRequiresMatchingBidirectionalHandshake(t *testing.T) {
 	now := time.Now()

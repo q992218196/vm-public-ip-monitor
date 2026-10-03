@@ -4,10 +4,23 @@ namespace App\Services;
 
 class ConnectionAssessment
 {
-    public const KINDS = ['horizontal_scan', 'vertical_scan', 'suspected_bruteforce', 'single_target_attempts', 'tcp_connection_burst', 'egress_mbps', 'ssh_connections', 'smb_connections', 'rdp_connections', 'ftp_connections'];
+    public const KINDS = ['horizontal_scan', 'vertical_scan', 'suspected_bruteforce', 'single_target_attempts', 'tcp_connection_burst', 'egress_mbps', 'ssh_connections', 'smb_connections', 'rdp_connections', 'ftp_connections', 'udp_flow_burst', 'udp_packet_rate'];
 
     public function assess(string $kind, array $sample, int $threshold = 0, string $ceiling = 'high', array $windows = []): array
     {
+        if (in_array($kind, ['udp_flow_burst', 'udp_packet_rate'], true)) {
+            $reasons = ['UDP 流数量或包速率达到阈值，只证明流量活跃，不能直接判断攻击', 'UDP 流按单采集窗口内不同五元组计数，重复包不增加流数，服务回复也可能计入出站流；不是连接握手或应用请求数'];
+            $gaps = ['DNS、QUIC、游戏、音视频和业务突发都可能符合；无 TCP 握手，不能计算握手成功率或把双向包视为认证成功', '目标样本最多 8 条，包速率按实际覆盖窗口时长计算，不代表未采集时间的速率'];
+            if (($sample['udp_flows_capped'] ?? false) || ($sample['udp_endpoints_truncated'] ?? false)) {
+                $gaps[] = 'UDP 状态触及限额或目标样本截断，计数是观察下界，业务例外不自动放行';
+            }
+
+            return ['severity' => 'low', 'title' => $kind === 'udp_flow_burst' ? 'UDP 出站流数量提醒' : 'UDP 出站包速率提醒', 'confidence' => 'limited_behavior', 'note' => implode('。', [...$reasons, ...$gaps]), 'connection_analysis' => [
+                'assessment_version' => 3, 'category' => 'behavior_notice', 'conclusion' => $reasons[0], 'reasons' => $reasons, 'evidence_gaps' => $gaps,
+                'udp_flows_out' => $sample['udp_flows_out'] ?? null, 'udp_packets_out' => $sample['udp_packets_out'] ?? null, 'completion_ratio' => null,
+                'normal_explanations' => ['DNS、QUIC、游戏、音视频、业务突发或服务回复'], 'next_steps' => ['核对主要目标与端口、客户业务和历史趋势', '无法判断时申请定向抓包，不凭数量直接认定 UDP 攻击'],
+            ]];
+        }
         $attempts = (int) ($sample['tcp_attempts'] ?? 0);
         $completed = $sample['completed_handshakes'] ?? null;
         $resets = $sample['rst_replies'] ?? null;

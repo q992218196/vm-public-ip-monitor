@@ -14,6 +14,8 @@ class EventReviewReport
         $capped = count($metrics) > 120;
         $metrics = array_reverse(array_slice($metrics, 0, 120));
         $timeline = [];
+        $udpTargets = [];
+        $udpTotals = ['windows' => 0, 'flows' => 0, 'packets_out' => 0, 'packets_in' => 0, 'bytes_out' => 0, 'bytes_in' => 0, 'capped' => false];
         $targets = [];
         $portTargets = [];
         $hints = [];
@@ -51,6 +53,25 @@ class EventReviewReport
         $totals = ['attempts' => 0, 'completed' => 0, 'rst' => 0, 'bytes_out' => 0, 'bytes_in' => 0, 'paired_attempts' => 0, 'paired_windows' => 0];
         foreach ($metrics as $row) {
             $e = self::decode($row['evidence']);
+            if (($e['udp_stats_version'] ?? 0) === 1) {
+                $udpTotals['windows']++;
+                foreach (['udp_flows_out' => 'flows', 'udp_packets_out' => 'packets_out', 'udp_packets_in' => 'packets_in', 'udp_bytes_out' => 'bytes_out', 'udp_bytes_in' => 'bytes_in'] as $from => $to) {
+                    $udpTotals[$to] += $e[$from] ?? 0;
+                }
+                $udpTotals['capped'] = $udpTotals['capped'] || ($e['udp_flows_capped'] ?? false) || ($e['udp_endpoints_truncated'] ?? false);
+                foreach ($e['udp_endpoints'] ?? [] as $ep) {
+                    $key = $ep['peer_ip'].'|'.$ep['peer_port'];
+                    if (! isset($udpTargets[$key]) && count($udpTargets) >= 256) {
+                        $udpTotals['capped'] = true;
+
+                        continue;
+                    }
+                    $udpTargets[$key] ??= ['peer_ip' => $ep['peer_ip'], 'peer_port' => $ep['peer_port'], 'flows' => 0, 'packets_out' => 0, 'packets_in' => 0, 'bytes_out' => 0, 'bytes_in' => 0];
+                    foreach (['flows', 'packets_out', 'packets_in', 'bytes_out', 'bytes_in'] as $field) {
+                        $udpTargets[$key][$field] += $ep[$field] ?? 0;
+                    }
+                }
+            }
             $n = (int) $row['tcp_attempts'];
             $paired = ($e['connection_stats_version'] ?? 0) === 1 && isset($e['completed_handshakes'], $e['rst_replies']) && max($e['completed_handshakes'], $e['rst_replies']) <= $n;
             $totals['attempts'] += $n;
@@ -106,6 +127,8 @@ class EventReviewReport
             }
             $capped = $capped || ($e['outbound_samples_truncated'] ?? false) || ($e['cardinality_capped'] ?? false);
         }
+        uasort($udpTargets, fn ($a, $b) => $b['packets_out'] <=> $a['packets_out']);
+        $udpTotals['capped'] = $udpTotals['capped'] || count($udpTargets) > 32;
         uasort($targets, fn ($a, $b) => $b['attempts'] <=> $a['attempts']);
         uasort($portTargets, fn ($a, $b) => $b['port_count'] <=> $a['port_count']);
         if (! $metrics) {
@@ -124,6 +147,7 @@ class EventReviewReport
             'category' => $category, 'conclusion' => $labels[$category] ?? $labels['needs_review'], 'reasons' => array_map(fn ($v) => mb_substr($v, 0, 512), array_slice(array_values(array_unique($reasons)), 0, 16)),
             'normal_explanations' => array_map(fn ($v) => mb_substr($v, 0, 512), array_slice(array_values(array_unique($explanations)), 0, 8)), 'evidence_gaps' => array_map(fn ($v) => mb_substr($v, 0, 512), array_slice(array_values(array_unique($gaps)), 0, 16)),
             'next_steps' => ['核对目标与域名是否符合客户申报业务', '根据时间趋势核查是否持续扩散；证据不足可继续观察或定向抓包', '认证失败及应用攻击需要服务日志；需要时手动提交 AI 辅助分析'],
+            'udp_totals' => $udpTotals, 'udp_targets' => array_values(array_slice($udpTargets, 0, 32)),
             'totals' => $totals, 'timeline' => $timeline, 'targets' => array_values(array_slice($targets, 0, 32)), 'port_targets' => array_values(array_slice($portTargets, 0, 16)),
             'request_hints' => array_values($hints), 'quality' => self::decode($event['quality']), 'scope' => '事件内最后一小时、最多 120 个流量窗口；目标汇总最多 32 项，端口汇总最多 16 个目标。无需 AI，无外部调用'];
     }

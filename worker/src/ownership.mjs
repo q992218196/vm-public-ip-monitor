@@ -36,3 +36,18 @@ export function createOwnershipChecker({resolve=systemResolve, clock=Date.now, m
   };
 }
 export const verifyOwnership=createOwnershipChecker();
+
+export function canRequestWebsite(task, ownership) {
+  return ['manual', 'ip_only', 'dns_match'].includes(ownership.ownership_status) || task.mode === 'origin_test';
+}
+export function originTestResult(task, ownership) {
+  if (task.mode !== 'origin_test') return ownership;
+  return {
+    ...ownership,
+    ownership_status: ['dns_mismatch', 'dns_unknown'].includes(ownership.ownership_status) ? 'origin_response' : ownership.ownership_status,
+    ownership_evidence: {...ownership.ownership_evidence, origin_test: {
+      target_ip: task.ip, checked_at: new Date().toISOString(), method: 'fixed_ip_host_sni', dns_status: ownership.ownership_status,
+      limitations: '指定 IP 响应此 Host/SNI；默认站点、反向代理或域名通配也可能响应，不等于确认源站部署或归属。'
+    }}
+  };
+}

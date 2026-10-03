@@ -85,7 +85,7 @@
                     :key="column.key"
                     :prop="column.key"
                     :label="column.label"
-                    :sortable="resource === 'alerts' && alertSortKeys.includes(column.key) ? 'custom' : false"
+                    :sortable="sortKeys.includes(column.key) ? 'custom' : false"
                     min-width="130"
                     show-overflow-tooltip
                 >
@@ -138,13 +138,21 @@
                             v-if="
                                 isAdmin &&
                                 resource === 'websites' &&
-                                ['dns_mismatch', 'dns_unknown', 'unverified'].includes(scope.row.ownership_status)
+                                ['dns_mismatch', 'dns_unknown', 'unverified', 'origin_response'].includes(scope.row.ownership_status)
                             "
                             link
                             type="warning"
                             :loading="actionId === scope.row.id"
                             @click="confirmOrigin(scope.row)"
                             >登记 CDN 源站</el-button
+                        >
+                        <el-button
+                            v-if="isAdmin && resource === 'websites' && scope.row.host"
+                            link
+                            type="primary"
+                            :loading="actionId === scope.row.id"
+                            @click="testOrigin(scope.row)"
+                            >测试源站</el-button
                         >
                         <el-button
                             v-if="isAdmin && resource === 'nodes'"
@@ -450,6 +458,8 @@ const definitions: Record<string, Definition> = {
                     smb_connections: 'SMB 服务高频连接',
                     rdp_connections: 'RDP 服务高频连接',
                     ftp_connections: 'FTP 服务高频连接',
+                    udp_flow_burst: 'UDP 出站流数量',
+                    udp_packet_rate: 'UDP 出站包速率 PPS',
                     single_target_attempts: '单目标高频连接',
                     tcp_connection_burst: 'TCP 连接突增',
                     egress_mbps: '出站 Mbps',
@@ -495,6 +505,8 @@ const definitions: Record<string, Definition> = {
                     smb_connections: 'SMB 服务高频连接',
                     rdp_connections: 'RDP 服务高频连接',
                     ftp_connections: 'FTP 服务高频连接',
+                    udp_flow_burst: 'UDP 出站流数量',
+                    udp_packet_rate: 'UDP 出站包速率 PPS',
                     single_target_attempts: '单目标高频连接',
                     tcp_connection_burst: 'TCP 连接突增',
                     egress_mbps: '出站 Mbps',
@@ -630,9 +642,10 @@ async function loadAgentRelease() {
         agentReleaseVersion.value = ''
     }
 }
+const sortKeys = computed(() => (resource.value === 'nodes' ? ['name', 'agent_version'] : resource.value === 'alerts' ? alertSortKeys : []))
 function onSortChange({ prop, order }: { prop: string; order: string | null }) {
-    if (resource.value !== 'alerts') return
-    sortField.value = alertSortKeys.includes(prop) && order ? prop : 'last_seen_at'
+    if (!['nodes', 'alerts'].includes(resource.value)) return
+    sortField.value = sortKeys.value.includes(prop) && order ? prop : 'last_seen_at'
     sortDirection.value = order === 'ascending' ? 'asc' : 'desc'
     page.value = 1
     load()
@@ -730,6 +743,7 @@ function display(value: any): string {
         dns_mismatch: '解析不匹配',
         dns_unknown: 'DNS 暂不可确认',
         unverified: '归属待验证',
+        origin_response: '指定 IP 响应，归属待核实',
         high: '高',
         medium: '中',
         low: '低',
@@ -919,6 +933,15 @@ async function whitelistAlert(row: any) {
     }
 }
 
+async function testOrigin(row: Record<string, any>) {
+    actionId.value = row.id
+    try {
+        await request('testOrigin', 'post', { id: row.id })
+        ElMessage.success('已加入指定 IP 测试队列，结果在详情中查看')
+    } finally {
+        actionId.value = null
+    }
+}
 async function confirmOrigin(row: Record<string, any>) {
     let reason: string
     try {

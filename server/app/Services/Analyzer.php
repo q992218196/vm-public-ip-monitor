@@ -152,6 +152,8 @@ class Analyzer
             $serviceSamples = isset(ServiceConnectionRules::RULES[$rule->kind]) ? $rows->map(fn ($row) => ['row' => $row, 'sample' => app(ServiceConnectionRules::class)->sample($rule->kind, $row->evidence)])->filter(fn ($entry) => $entry['sample'] !== null)->sortByDesc(fn ($entry) => $entry['sample']['tcp_attempts']) : collect();
             $serviceSample = $serviceSamples->first();
             $value = $serviceSample ? $serviceSample['sample']['tcp_attempts'] : match ($rule->kind) {
+                'udp_flow_burst' => (int) $rows->max(fn ($m) => ($m->evidence['udp_stats_version'] ?? 0) === 1 ? ($m->evidence['udp_flows_out'] ?? 0) : 0),
+                'udp_packet_rate' => (int) ($rows->sum(fn ($m) => ($m->evidence['udp_stats_version'] ?? 0) === 1 ? ($m->evidence['udp_packets_out'] ?? 0) : 0) / max(1, $rows->filter(fn ($m) => ($m->evidence['udp_stats_version'] ?? 0) === 1)->sum(fn ($m) => $m->window_start->diffInSeconds($m->window_end)))),
                 'horizontal_scan' => (int) $rows->max(fn ($m) => $m->evidence['unique_targets'] ?? 0),
                 'vertical_scan' => (int) $rows->max(fn ($m) => $m->evidence['max_ports_per_target'] ?? 0),
                 'suspected_bruteforce' => (int) $rows->max(fn ($m) => $m->evidence['auth_attempts'] ?? 0),
@@ -175,6 +177,8 @@ class Analyzer
                 default => '按当前观察节点估算的出站速率',
             };
             $sample = match ($rule->kind) {
+                'udp_flow_burst' => $rows->filter(fn ($row) => ($row->evidence['udp_stats_version'] ?? 0) === 1)->sortByDesc(fn ($row) => $row->evidence['udp_flows_out'] ?? 0)->first(),
+                'udp_packet_rate' => $rows->filter(fn ($row) => ($row->evidence['udp_stats_version'] ?? 0) === 1)->sortByDesc(fn ($row) => ($row->evidence['udp_packets_out'] ?? 0) / max(1, $row->window_start->diffInSeconds($row->window_end)))->first(),
                 'horizontal_scan' => $rows->sortByDesc(fn ($row) => $row->evidence['unique_targets'] ?? 0)->first(),
                 'vertical_scan' => $rows->sortByDesc(fn ($row) => $row->evidence['max_ports_per_target'] ?? 0)->first(),
                 'suspected_bruteforce' => $rows->sortByDesc(fn ($row) => $row->evidence['auth_attempts'] ?? 0)->first(),
@@ -185,6 +189,23 @@ class Analyzer
                 $sample = $serviceSample['row'];
             }
             $sampleEvidence = $serviceSample ? $serviceSample['sample'] : ($sample?->evidence ?? []);
+            if (str_starts_with($rule->kind, 'udp_')) {
+                $udp = $sampleEvidence['udp_endpoints'] ?? [];
+                $sampleEvidence['targets'] = array_values(array_unique(array_column($udp, 'peer_ip')));
+                $sampleEvidence['ports'] = array_values(array_unique(array_column($udp, 'peer_port')));
+                $sampleEvidence['target_endpoints'] = [];
+                $sampleEvidence['outbound_endpoints'] = [];
+                $sampleEvidence['egress_target_samples'] = [];
+                $sampleEvidence['port_scan_targets'] = [];
+                unset($sampleEvidence['egress_target_count']);
+                $sampleEvidence['unique_targets'] = count($sampleEvidence['targets']);
+                $sampleEvidence['cardinality_capped'] = $sampleEvidence['udp_flows_capped'] ?? false;
+                $sampleEvidence['outbound_samples_truncated'] = $sampleEvidence['udp_endpoints_truncated'] ?? true;
+                $sampleEvidence['endpoint_samples_truncated'] = $sampleEvidence['outbound_samples_truncated'];
+                $sampleEvidence['port_samples_truncated'] = $sampleEvidence['outbound_samples_truncated'];
+                $sampleEvidence['transport'] = 'UDP';
+                $sampleEvidence['observed_seconds'] = $sample->window_start->diffInSeconds($sample->window_end);
+            }
             $severity = $rule->severity;
             $confidence = 'behavioral';
             $analysis = [];

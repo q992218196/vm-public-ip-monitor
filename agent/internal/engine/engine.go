@@ -20,6 +20,7 @@ type flowKey struct {
 	SP, DP   uint16
 }
 type ipState struct {
+	udpEndpoints  map[netip.AddrPort]*wire.UDPEndpoint
 	m             wire.Metric
 	targets       map[netip.Addr]int
 	auth          map[netip.Addr]int
@@ -76,6 +77,7 @@ type proxyService struct {
 const maxProxyFlows = 16384
 
 type Engine struct {
+	udpFlows   map[flowKey]bool
 	mu         sync.Mutex
 	c          config.Config
 	prefixes   []netip.Prefix
@@ -91,7 +93,7 @@ type Engine struct {
 }
 
 func New(c config.Config, now time.Time) *Engine {
-	e := &Engine{c: c, ips: map[netip.Addr]*ipState{}, syns: map[flowKey]synState{}, streams: map[flowKey]*stream{}, sites: map[string]wire.Site{}, vpn: map[vpnKey]*vpnState{}, proxyFlows: map[flowKey]*proxyFlow{}, duplicates: map[uint64]seen{}, start: now}
+	e := &Engine{udpFlows: map[flowKey]bool{}, c: c, ips: map[netip.Addr]*ipState{}, syns: map[flowKey]synState{}, streams: map[flowKey]*stream{}, sites: map[string]wire.Site{}, vpn: map[vpnKey]*vpnState{}, proxyFlows: map[flowKey]*proxyFlow{}, duplicates: map[uint64]seen{}, start: now}
 	for _, s := range c.CIDRs {
 		p, err := netip.ParsePrefix(s)
 		if err == nil {
@@ -116,7 +118,7 @@ func (e *Engine) state(a netip.Addr) *ipState {
 		e.health.StateDropped++
 		return nil
 	}
-	s := &ipState{m: wire.Metric{IP: a.String()}, targets: map[netip.Addr]int{}, auth: map[netip.Addr]int{}, edges: map[netip.AddrPort]bool{}, ports: map[netip.Addr]int{}, endpoints: map[netip.AddrPort]*wire.EndpointEvidence{}}
+	s := &ipState{udpEndpoints: map[netip.AddrPort]*wire.UDPEndpoint{}, m: wire.Metric{IP: a.String()}, targets: map[netip.Addr]int{}, auth: map[netip.Addr]int{}, edges: map[netip.AddrPort]bool{}, ports: map[netip.Addr]int{}, endpoints: map[netip.AddrPort]*wire.EndpointEvidence{}}
 	e.ips[a] = s
 	return s
 }
@@ -166,6 +168,14 @@ func (e *Engine) Process(b []byte, wireLen int, iface string, now time.Time) {
 		}
 	} else {
 		e.observeProxy(p, src, dst, now)
+	}
+	if p.Protocol == 17 {
+		if src {
+			e.observeUDP(p, true)
+		}
+		if dst {
+			e.observeUDP(p, false)
+		}
 	}
 	if p.Protocol != 6 {
 		return
@@ -336,6 +346,56 @@ func (e *Engine) Process(b []byte, wireLen int, iface string, now time.Time) {
 		return
 	}
 	e.sites[key] = site
+}
+
+// UDP has no handshake: count each distinct outgoing tuple once per window,
+// including service replies; packet counts never imply new connections or attack.
+func (e *Engine) observeUDP(p packet.Packet, out bool) {
+	vm, peer, localPort, peerPort := p.Src, p.Dst, p.SrcPort, p.DstPort
+	if !out {
+		vm, peer, localPort, peerPort = p.Dst, p.Src, p.DstPort, p.SrcPort
+	}
+	s := e.state(vm)
+	if s == nil {
+		return
+	}
+	if out {
+		s.m.UDPPacketsOut++
+		s.m.UDPBytesOut += uint64(p.Size)
+	} else {
+		s.m.UDPPacketsIn++
+		s.m.UDPBytesIn += uint64(p.Size)
+	}
+	key := netip.AddrPortFrom(peer, peerPort)
+	endpoint := s.udpEndpoints[key]
+	if endpoint == nil && len(s.udpEndpoints) < 64 {
+		endpoint = &wire.UDPEndpoint{PeerIP: peer.String(), PeerPort: peerPort}
+		s.udpEndpoints[key] = endpoint
+	}
+	if endpoint == nil {
+		s.m.UDPEndpointsTruncated = true
+	}
+	if out {
+		flow := flowKey{vm, peer, localPort, peerPort}
+		if !e.udpFlows[flow] {
+			if len(e.udpFlows) < min(e.c.MaxFlows, 16384) {
+				e.udpFlows[flow] = true
+				s.m.UDPFlowsOut++
+				if endpoint != nil {
+					endpoint.Flows++
+				}
+			} else {
+				s.m.UDPFlowsCapped = true
+			}
+		}
+		if endpoint != nil {
+			endpoint.PacketsOut++
+			endpoint.BytesOut += uint64(p.Size)
+		}
+	} else if endpoint != nil {
+		endpoint.PacketsIn++
+		endpoint.BytesIn += uint64(p.Size)
+	}
 }
 func (e *Engine) endpoint(s *ipState, peer netip.Addr, port uint16) *wire.EndpointEvidence {
 	key := netip.AddrPortFrom(peer, port)
@@ -516,6 +576,22 @@ func (e *Engine) Snapshot(now time.Time) wire.Batch {
 		}
 	}
 	for _, s := range e.ips {
+		s.m.UDPStatsVersion = 1
+		udpEndpoints := make([]wire.UDPEndpoint, 0, len(s.udpEndpoints))
+		for _, endpoint := range s.udpEndpoints {
+			udpEndpoints = append(udpEndpoints, *endpoint)
+		}
+		sort.Slice(udpEndpoints, func(i, j int) bool {
+			if udpEndpoints[i].PacketsOut != udpEndpoints[j].PacketsOut {
+				return udpEndpoints[i].PacketsOut > udpEndpoints[j].PacketsOut
+			}
+			if udpEndpoints[i].PeerIP != udpEndpoints[j].PeerIP {
+				return udpEndpoints[i].PeerIP < udpEndpoints[j].PeerIP
+			}
+			return udpEndpoints[i].PeerPort < udpEndpoints[j].PeerPort
+		})
+		s.m.UDPEndpointsTruncated = s.m.UDPEndpointsTruncated || len(udpEndpoints) > 8
+		s.m.UDPEndpoints = udpEndpoints[:min(len(udpEndpoints), 8)]
 		s.m.ConnectionStatsVersion = 1
 		s.m.UniqueTargets = len(s.targets)
 		ts := make([]string, 0, len(s.targets))
@@ -592,6 +668,7 @@ func (e *Engine) Snapshot(now time.Time) wire.Batch {
 		return b.VPN[i].IP < b.VPN[j].IP
 	})
 	sort.Slice(b.Metrics, func(i, j int) bool { return b.Metrics[i].IP < b.Metrics[j].IP })
+	e.udpFlows = map[flowKey]bool{}
 	e.ips = map[netip.Addr]*ipState{}
 	e.sites = map[string]wire.Site{}
 	e.vpn = map[vpnKey]*vpnState{}

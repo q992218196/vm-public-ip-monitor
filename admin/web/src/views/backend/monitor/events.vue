@@ -312,6 +312,22 @@
                         <el-table-column prop="no_reply_observed_flows" label="未观察回复" width="110" />
                         <el-table-column prop="unique_targets" label="目标 IP 数" width="110" />
                     </el-table>
+                    <h3>UDP 目标分组</h3>
+                    <p>
+                        仅统计观察到出站 UDP 包的五元组，包括服务回复；无握手，双向包不代表业务成功。最多 32
+                        个目标分组，原始包和字节可能包含重传或多接口副本。
+                    </p>
+                    <el-table :data="captureReport.summary.udp_groups || []" border>
+                        <el-table-column prop="peer_ip" label="目标 IP" min-width="150" />
+                        <el-table-column prop="peer_port" label="端口" width="90" />
+                        <el-table-column prop="flows" label="出站流数" width="100" />
+                        <el-table-column label="包数 出／入" min-width="130"
+                            ><template #default="scope">{{ scope.row.packets_out }} / {{ scope.row.packets_in }}</template></el-table-column
+                        >
+                        <el-table-column label="字节 出／入" min-width="160"
+                            ><template #default="scope">{{ scope.row.bytes_out }} / {{ scope.row.bytes_in }}</template></el-table-column
+                        >
+                    </el-table>
                     <h3>可见认证结果（仅明文、已配对响应）</h3>
                     <el-alert
                         type="info"

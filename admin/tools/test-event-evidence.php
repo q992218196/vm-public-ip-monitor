@@ -125,8 +125,8 @@ if (($request('whitelist', ['id' => 100], true)['code'] ?? null) === 1 || $db->q
 echo "Event list/count/detail, local PCAP summary, manual AI, encrypted secrets, duplicate prevention and read-only permissions passed.\n";
 
 $db->exec('CREATE TABLE websites (id bigserial primary key,ip_asset_id bigint,host text,port integer,scheme text,status text,ownership_status text,title text,description text,category text,manual_category text,last_probed_at timestamp,last_seen_at timestamp,source text default \'http_host\',ownership_evidence jsonb,updated_at timestamp)');
-$db->exec("INSERT INTO websites(ip_asset_id,host,port,scheme,status,ownership_status,last_seen_at) VALUES(1,'owned.example',443,'https','verified','dns_match',now()),(1,'foreign.example',80,'http','failed','dns_mismatch',now()),(1,'unknown.example',80,'http','observed','unverified',now())");
-foreach (['assets' => 1, 'foreign' => 1, 'candidates' => 1, 'all' => 3] as $ownership => $count) {
+$db->exec("INSERT INTO websites(ip_asset_id,host,port,scheme,status,ownership_status,last_seen_at) VALUES(1,'owned.example',443,'https','verified','dns_match',now()),(1,'foreign.example',80,'http','failed','dns_mismatch',now()),(1,'unknown.example',80,'http','observed','unverified',now()),(1,'tested.example',443,'https','verified','origin_response',now())");
+foreach (['assets' => 1, 'foreign' => 1, 'candidates' => 2, 'all' => 4] as $ownership => $count) {
     $query = ['resource' => 'websites', 'ownership' => $ownership];
     if ($ok($request('count', $query, false, false, 'Monitor'))['total'] !== $count || count($ok($request('index', $query, false, true, 'Monitor'))['list']) !== $count) {
         throw new RuntimeException('Website ownership filter incorrect: '.$ownership);
@@ -137,9 +137,23 @@ if ($ok($request('index', ['resource' => 'websites'], false, false, 'Monitor'))[
 }
 echo "Website default/list/count ownership separation passed.\n";
 
-$db->exec('CREATE TABLE probe_tasks (id bigserial primary key,website_id bigint unique,status text,attempts integer,available_at timestamp,lease_token text,leased_until timestamp,created_at timestamp,updated_at timestamp)');
+$db->exec('CREATE TABLE probe_tasks (id bigserial primary key,website_id bigint unique,mode text default \'normal\',status text,attempts integer,available_at timestamp,lease_token text,leased_until timestamp,created_at timestamp,updated_at timestamp)');
 $foreignId = $db->query("SELECT id FROM websites WHERE host='foreign.example'")->fetchColumn();
 $db->exec("UPDATE websites SET ownership_evidence='{\"host\":\"foreign.example\",\"addresses\":[\"198.51.100.1\"],\"checked_at\":\"2026-10-03T00:00:00Z\",\"method\":\"dns_A_AAAA\"}' WHERE id=".$foreignId);
+if (($request('testOrigin', ['id' => $foreignId], true, true, 'Monitor')['code'] ?? null) !== 403) {
+    throw new RuntimeException('Viewer can queue an origin test');
+}
+$ok($request('testOrigin', ['id' => $foreignId], true, false, 'Monitor'));
+$site = $db->query('SELECT source,ownership_status FROM websites WHERE id='.$foreignId)->fetch(PDO::FETCH_ASSOC);
+$task = $db->query('SELECT status,mode FROM probe_tasks')->fetch(PDO::FETCH_ASSOC);
+if ($site['source'] !== 'http_host' || $site['ownership_status'] !== 'dns_mismatch' || $task['mode'] !== 'origin_test' || $task['status'] !== 'pending') {
+    throw new RuntimeException('Origin test silently registers ownership');
+}
+$db->exec("UPDATE probe_tasks SET status='leased',lease_token='old-origin-task',leased_until=now()+INTERVAL '3 minute'");
+$ok($request('testOrigin', ['id' => $foreignId], true, false, 'Monitor'));
+if ($db->query('SELECT lease_token FROM probe_tasks')->fetchColumn() !== null || $db->query('SELECT count(*) FROM probe_tasks')->fetchColumn() != 1) {
+    throw new RuntimeException('Origin test does not fence or deduplicate tasks');
+}
 foreach ([['', false], ['not authorized', true]] as [$reason, $viewer]) {
     if (($request('confirmOrigin', ['id' => $foreignId, 'reason' => $reason], true, $viewer, 'Monitor')['code'] ?? null) === 1) {
         throw new RuntimeException('Origin registration accepted missing basis or viewer');
@@ -153,8 +167,19 @@ if ($site['source'] !== 'manual' || $site['ownership_status'] !== 'manual' || $p
 }
 $db->exec("UPDATE probe_tasks SET status='leased',lease_token='old-task',leased_until=now()+INTERVAL '3 minute'");
 $ok($request('confirmOrigin', ['id' => $foreignId, 'reason' => 'Rechecked configuration'], true, false, 'Monitor'));
-$task = $db->query('SELECT status,lease_token FROM probe_tasks')->fetch(PDO::FETCH_ASSOC);
-if ($task['status'] !== 'pending' || $task['lease_token'] !== null || $db->query('SELECT count(*) FROM probe_tasks')->fetchColumn() != 1) {
+$task = $db->query('SELECT status,lease_token,mode FROM probe_tasks')->fetch(PDO::FETCH_ASSOC);
+if ($task['mode'] !== 'normal' || $task['status'] !== 'pending' || $task['lease_token'] !== null || $db->query('SELECT count(*) FROM probe_tasks')->fetchColumn() != 1) {
     throw new RuntimeException('Stale passive probe lease was not fenced');
 }
 echo "CDN origin registration permissions, explicit basis, DNS provenance and stale lease fencing passed.\n";
+
+foreach ([['00000000-0000-4000-8000-000000000081', 'Sort C', '1.9.0'], ['00000000-0000-4000-8000-000000000082', 'Sort A', '1.10.0'], ['00000000-0000-4000-8000-000000000083', 'Sort B', null]] as [$id,$name,$version]) {
+    $db->prepare('INSERT INTO nodes(id,name,enabled,cidrs,health) VALUES(?,?,true,?,?)')->execute([$id, $name, '[]', json_encode(['version' => $version])]);
+}
+foreach ([['name', 'asc', ['Sort A', 'Sort B', 'Sort C']], ['name', 'desc', ['Sort C', 'Sort B', 'Sort A']], ['agent_version', 'asc', ['Sort C', 'Sort A', 'Sort B']], ['agent_version', 'desc', ['Sort A', 'Sort C', 'Sort B']]] as [$sort,$direction,$names]) {
+    $rows = $ok($request('index', ['resource' => 'nodes', 'search' => 'Sort', 'sort' => $sort, 'direction' => $direction], false, true, 'Monitor'))['list'];
+    if (array_column($rows, 'name') !== $names) {
+        throw new RuntimeException('Node numeric version/name sorting failed: '.$sort.' '.$direction);
+    }
+}
+echo "Node names and numeric versions sort across server results; unknown versions remain last.\n";

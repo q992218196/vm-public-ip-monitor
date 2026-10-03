@@ -117,6 +117,17 @@ class Monitor extends Backend
             };
             $direction = $this->request->get('direction', 'desc') === 'asc' ? 'asc' : 'desc';
         }
+        if ($resource === 'nodes') {
+            $direction = $this->request->get('direction', 'desc') === 'asc' ? 'asc' : 'desc';
+            $requestedSort = (string) $this->request->get('sort', 'last_seen_at');
+            if ($requestedSort === 'agent_version') {
+                $version = "m.health->>'version'";
+                $query->orderRaw('CASE WHEN '.$version." ~ '^[0-9]{1,9}[.][0-9]{1,9}[.][0-9]{1,9}$' THEN string_to_array(".$version.", '.')::bigint[] END ".$direction.' NULLS LAST, '.$version.' '.$direction.' NULLS LAST');
+                $sort = 'm.name';
+            } else {
+                $sort = $requestedSort === 'name' ? 'm.name' : 'm.last_seen_at';
+            }
+        }
         $rows = $query->field($fields)->order($sort, $direction)->order('m.id', 'desc')->page($page, $limit)->select()->toArray();
         foreach ($rows as &$row) {
             if ($resource === 'nodes') {
@@ -178,7 +189,7 @@ class Monitor extends Backend
             $ownership = (string) $this->request->get('ownership', 'assets');
             $states = match ($ownership) {
                 'assets' => ['dns_match', 'manual', 'ip_only'],
-                'candidates' => ['unverified', 'dns_unknown'],
+                'candidates' => ['unverified', 'dns_unknown', 'origin_response'],
                 'foreign' => ['dns_mismatch'],
                 'all' => null,
                 default => ['dns_match', 'manual', 'ip_only'],
@@ -495,7 +506,7 @@ class Monitor extends Backend
             if (isset($data['name']) && (trim((string) $data['name']) === '' || mb_strlen((string) $data['name']) > 255)) {
                 $this->error('规则名称无效');
             }
-            if (isset($data['kind']) && ! in_array($data['kind'], ['horizontal_scan', 'vertical_scan', 'suspected_bruteforce', 'ssh_connections', 'smb_connections', 'rdp_connections', 'ftp_connections', 'single_target_attempts', 'tcp_connection_burst', 'egress_mbps', 'vpn_protocol', 'proxy_suspect'], true)) {
+            if (isset($data['kind']) && ! in_array($data['kind'], ['horizontal_scan', 'vertical_scan', 'suspected_bruteforce', 'ssh_connections', 'smb_connections', 'rdp_connections', 'ftp_connections', 'udp_flow_burst', 'udp_packet_rate', 'single_target_attempts', 'tcp_connection_burst', 'egress_mbps', 'vpn_protocol', 'proxy_suspect'], true)) {
                 $this->error('规则类型无效');
             }
             if (isset($data['severity']) && ! in_array($data['severity'], ['low', 'medium', 'high'], true)) {
@@ -532,7 +543,7 @@ class Monitor extends Backend
             if (isset($data['reason']) && (trim((string) $data['reason']) === '' || mb_strlen((string) $data['reason']) > 255)) {
                 $this->error('原因无效');
             }
-            if (isset($data['kind']) && $data['kind'] !== '' && ! in_array($data['kind'], ['horizontal_scan', 'vertical_scan', 'suspected_bruteforce', 'ssh_connections', 'smb_connections', 'rdp_connections', 'ftp_connections', 'single_target_attempts', 'tcp_connection_burst', 'egress_mbps', 'vpn_protocol', 'proxy_suspect', 'node_offline', 'capture_degraded'], true)) {
+            if (isset($data['kind']) && $data['kind'] !== '' && ! in_array($data['kind'], ['horizontal_scan', 'vertical_scan', 'suspected_bruteforce', 'ssh_connections', 'smb_connections', 'rdp_connections', 'ftp_connections', 'udp_flow_burst', 'udp_packet_rate', 'single_target_attempts', 'tcp_connection_burst', 'egress_mbps', 'vpn_protocol', 'proxy_suspect', 'node_offline', 'capture_degraded'], true)) {
                 $this->error('白名单类型无效');
             }
             if (isset($data['kind']) && $data['kind'] === '') {
@@ -702,6 +713,26 @@ class Monitor extends Backend
         $this->success('已加入验证队列');
     }
 
+    public function testOrigin(): void
+    {
+        $this->writable();
+        $id = (int) $this->request->post('id', 0);
+        $db = $this->db();
+        $db->transaction(function () use ($db, $id) {
+            $site = $db->table('websites')->where('id', $id)->lock(true)->find();
+            if (! $site || ! filter_var($site['host'], FILTER_VALIDATE_DOMAIN, FILTER_FLAG_HOSTNAME) || filter_var($site['host'], FILTER_VALIDATE_IP)) {
+                $this->error('请选择有效域名的网站线索');
+            }
+            if (! $db->table('ip_assets')->where('id', $site['ip_asset_id'])->find()) {
+                $this->error('公网 IP 尚未登记');
+            }
+            $this->queueProbe($id);
+            $db->table('probe_tasks')->where('website_id', $id)->update(['mode' => 'origin_test', 'status' => 'pending', 'attempts' => 0, 'available_at' => gmdate('Y-m-d H:i:s'), 'lease_token' => null, 'leased_until' => null, 'updated_at' => gmdate('Y-m-d H:i:s')]);
+            $this->audit('website.origin_test', 'Website:'.$id, ['host' => $site['host'], 'ip_asset_id' => $site['ip_asset_id']]);
+        });
+        $this->success('已加入源站测试队列；请求成功后仍需核实归属');
+    }
+
     private function queueProbe(int $id): void
     {
         if (! $this->db()->table('websites')->where('id', $id)->find()) {
@@ -712,7 +743,7 @@ class Monitor extends Backend
         if (! $task) {
             $this->db()->table('probe_tasks')->insert(['website_id' => $id, 'status' => 'pending', 'attempts' => 0, 'available_at' => $now, 'created_at' => $now, 'updated_at' => $now]);
         } elseif (! in_array($task['status'], ['pending', 'leased'], true)) {
-            $this->db()->table('probe_tasks')->where('website_id', $id)->update(['status' => 'pending', 'attempts' => 0, 'available_at' => $now, 'lease_token' => null, 'leased_until' => null, 'updated_at' => $now]);
+            $this->db()->table('probe_tasks')->where('website_id', $id)->update(['mode' => 'normal', 'status' => 'pending', 'attempts' => 0, 'available_at' => $now, 'lease_token' => null, 'leased_until' => null, 'updated_at' => $now]);
         }
         $this->audit('probe_queued', 'Website:'.$id);
     }
@@ -741,8 +772,11 @@ class Monitor extends Backend
                 'registration' => ['type' => 'cdn_origin', 'reason' => $reason, 'confirmed_by' => $this->auth->id, 'confirmed_at' => $now],
                 'previous_dns' => $old['previous_dns'] ?? ['status' => $site['ownership_status'], 'evidence' => array_diff_key($old, array_flip(['registration', 'previous_dns']))],
             ];
+            if (isset($old['origin_test'])) {
+                $evidence['origin_test'] = $old['origin_test'];
+            }
             $db->table('websites')->where('id', $id)->update(['source' => 'manual', 'ownership_status' => 'manual', 'ownership_evidence' => json_encode($evidence, JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR), 'updated_at' => gmdate('Y-m-d H:i:s')]);
-            $db->table('probe_tasks')->where('website_id', $id)->where('status', 'leased')->update(['status' => 'pending', 'attempts' => 0, 'available_at' => gmdate('Y-m-d H:i:s'), 'lease_token' => null, 'leased_until' => null, 'updated_at' => gmdate('Y-m-d H:i:s')]);
+            $db->table('probe_tasks')->where('website_id', $id)->whereIn('status', ['pending', 'leased'])->update(['mode' => 'normal', 'status' => 'pending', 'attempts' => 0, 'available_at' => gmdate('Y-m-d H:i:s'), 'lease_token' => null, 'leased_until' => null, 'updated_at' => gmdate('Y-m-d H:i:s')]);
             $this->audit('website.origin_registered', 'Website:'.$id, ['reason' => $reason, 'host' => $site['host'], 'ip_asset_id' => $site['ip_asset_id']]);
         });
         $this->queueProbe($id);

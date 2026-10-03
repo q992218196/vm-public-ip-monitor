@@ -603,6 +603,82 @@ class MonitorTest extends TestCase
         $this->assertSame(['198.51.100.1'], $site->ownership_evidence['addresses']);
     }
 
+    public function test_origin_test_is_explicit_target_bound_and_does_not_register_ownership(): void
+    {
+        config(['monitor.worker_token' => $this->token]);
+        $node = $this->node();
+        $this->upload($node, $this->payload())->assertOk();
+        ProcessBatch::dispatchSync(Batch::first()->id);
+        $site = Website::firstOrFail();
+        $queue = app(ProbeQueue::class);
+        $task = $queue->enqueue($site);
+        $claim = $this->withToken($this->token)->postJson('/api/v1/worker/claim')->assertOk()->json('task');
+        $this->assertSame('normal', $claim['mode']);
+        $url = '/api/v1/worker/tasks/'.$claim['id'].'/complete';
+        $proof = ['host' => $site->host, 'checked_at' => now()->toIso8601String(), 'method' => 'dns_A_AAAA', 'addresses' => ['198.51.100.1'],
+            'origin_test' => ['target_ip' => $claim['ip'], 'checked_at' => now()->toIso8601String(), 'method' => 'fixed_ip_host_sni', 'dns_status' => 'dns_mismatch']];
+        $body = ['lease_token' => $claim['lease_token'], 'status' => 'verified', 'ownership_status' => 'origin_response', 'ownership_evidence' => $proof, 'title' => 'Response from explicit test', 'http_status' => 200];
+        $this->postJson($url, $body)->assertUnprocessable();
+        $task->refresh()->update(['mode' => 'origin_test', 'status' => 'pending', 'lease_token' => null, 'leased_until' => null]);
+        $claim = $this->postJson('/api/v1/worker/claim')->assertOk()->json('task');
+        $this->assertSame('origin_test', $claim['mode']);
+        $body['lease_token'] = $claim['lease_token'];
+        $body['ownership_evidence']['origin_test']['target_ip'] = '203.0.113.11';
+        $this->postJson($url, $body)->assertUnprocessable();
+        $body['ownership_evidence'] = $proof;
+        $this->postJson($url, $body)->assertOk();
+        $this->assertSame('origin_response', $site->fresh()->ownership_status);
+        $this->assertSame('tls_sni', $site->fresh()->source);
+        $this->assertSame(['198.51.100.1'], $site->fresh()->ownership_evidence['addresses']);
+        $this->assertSame('normal', $task->fresh()->mode);
+        $queue->enqueue($site);
+        $claim = $this->postJson('/api/v1/worker/claim')->assertOk()->json('task');
+        $this->assertSame('normal', $claim['mode']);
+        $body['lease_token'] = $claim['lease_token'];
+        $body['status'] = 'failed';
+        $body['ownership_status'] = 'dns_mismatch';
+        unset($body['ownership_evidence']['origin_test']);
+        $this->postJson($url, $body)->assertOk();
+        $this->assertSame($proof['origin_test'], $site->fresh()->ownership_evidence['origin_test']);
+        $this->assertSame('dns_mismatch', $site->fresh()->ownership_status);
+    }
+
+    public function test_udp_rules_require_new_statistics_and_keep_transport_counts_separate(): void
+    {
+        $this->seed(MonitorSeeder::class);
+        Rule::where('kind', 'udp_flow_burst')->update(['threshold' => 2]);
+        Rule::where('kind', 'udp_packet_rate')->update(['threshold' => 10]);
+        $node = $this->node();
+        $payload = $this->payload();
+        $this->upload($node, $payload)->assertOk();
+        ProcessBatch::dispatchSync(Batch::first()->id);
+        $this->assertDatabaseMissing('alerts', ['kind' => 'udp_flow_burst']);
+        $payload = $this->payload();
+        $payload['metrics'][0] = array_replace($payload['metrics'][0], [
+            'udp_stats_version' => 1, 'udp_flows_out' => 3, 'udp_packets_out' => 600, 'udp_packets_in' => 20,
+            'udp_bytes_out' => 24000, 'udp_bytes_in' => 800, 'udp_flows_capped' => false, 'udp_endpoints_truncated' => false,
+            'packets_out' => 600, 'packets_in' => 20, 'bytes_out' => 24000, 'bytes_in' => 800,
+            'udp_endpoints' => [['peer_ip' => '198.51.100.1', 'peer_port' => 53, 'flows' => 3, 'packets_out' => 600, 'packets_in' => 20, 'bytes_out' => 24000, 'bytes_in' => 800]],
+        ]);
+        $this->upload($node, $payload)->assertOk();
+        ProcessBatch::dispatchSync(Batch::latest('id')->first()->id);
+        foreach (['udp_flow_burst' => 3, 'udp_packet_rate' => 20] as $kind => $value) {
+            $alert = Alert::where('kind', $kind)->firstOrFail();
+            $this->assertSame($value, $alert->evidence['value']);
+            $this->assertSame('low', $alert->severity);
+            $this->assertSame('UDP', $alert->evidence['sample']['transport']);
+            $this->assertSame([53], $alert->evidence['sample']['ports']);
+            $this->assertSame([], $alert->evidence['sample']['outbound_endpoints']);
+            $this->assertStringContainsString('不能直接判断攻击', $alert->evidence['note']);
+        }
+        $payload['batch_id'] = Str::uuid()->toString();
+        $payload['metrics'][0]['udp_flows_out'] = 601;
+        $this->upload($node, $payload)->assertUnprocessable();
+        $payload['metrics'][0]['udp_flows_out'] = 3;
+        $payload['metrics'][0]['udp_endpoints'] = array_fill(0, 9, $payload['metrics'][0]['udp_endpoints'][0]);
+        $this->upload($node, $payload)->assertUnprocessable();
+    }
+
     public function test_service_connection_rules_use_destination_samples_and_keep_login_outcomes_unknown(): void
     {
         $this->seed(MonitorSeeder::class);

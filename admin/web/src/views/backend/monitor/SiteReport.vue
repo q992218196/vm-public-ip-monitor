@@ -17,7 +17,17 @@
             :closable="false"
             title="此域名已人工登记为 CDN 源站；登记依据与原 DNS 结果保留。验证可能受源站访问限制或证书影响，人工登记不等于确认违规或部署。"
         />
+        <el-alert
+            v-if="record.ownership_evidence?.origin_test"
+            type="info"
+            :closable="false"
+            title="曾用当前域名的 Host/SNI 直接请求指定 IP 并取得响应，测试时间见下方。默认站点或反向代理也可能响应，需结合截图、页面和客户配置确认归属。"
+        />
         <el-descriptions :column="1" border>
+            <el-descriptions-item v-if="record.ownership_evidence?.origin_test" label="指定 IP 测试"
+                >{{ record.ownership_evidence.origin_test.target_ip }} · {{ record.ownership_evidence.origin_test.checked_at }} ·
+                {{ record.ownership_evidence.origin_test.limitations }}</el-descriptions-item
+            >
             <el-descriptions-item v-if="record.ownership_evidence?.registration" label="源站登记依据">{{
                 record.ownership_evidence.registration.reason
             }}</el-descriptions-item>
@@ -73,6 +83,7 @@ const ownershipLabel = computed(
                 dns_mismatch: '解析不匹配',
                 dns_unknown: 'DNS 暂不可确认',
                 unverified: '归属待验证',
+                origin_response: '指定 IP 响应，归属待核实',
             }) as Record<string, string>
         )[props.record.ownership_status] || '归属待验证'
 )

@@ -54,6 +54,38 @@ class EvidenceTest extends TestCase
         return $data;
     }
 
+    public function test_udp_pcap_groups_count_tuples_and_packets_without_inventing_tcp_handshakes(): void
+    {
+        $local = '203.0.113.10';
+        $peer = '198.51.100.1';
+        $udp = function ($src, $dst, $sp, $dp) {
+            $payload = 'secret-udp-payload';
+            $header = substr($this->packet($src, $dst, 0), 0, 34);
+            $header[23] = chr(17);
+            $header = substr_replace($header, pack('n', 28 + strlen($payload)), 16, 2);
+
+            return $header.pack('nnnn', $sp, $dp, 8 + strlen($payload), 0).$payload;
+        };
+        $packets = [$udp($local, $peer, 20000, 53), $udp($local, $peer, 20000, 53), $udp($peer, $local, 53, 20000), $udp($local, $peer, 20001, 53), $udp($local, $peer, 20002, 443)];
+        $path = tempnam(sys_get_temp_dir(), 'udp-pcap');
+        try {
+            file_put_contents($path, $this->pcap($packets));
+            $summary = app(PcapSummary::class)->summarize($path, $local);
+            $this->assertSame(5, $summary['analysis_version']);
+            $this->assertSame(0, $summary['observed_outbound_flows']);
+            $this->assertSame(0, $summary['completed_handshakes']);
+            $this->assertCount(2, $summary['udp_groups']);
+            $this->assertSame(53, $summary['udp_groups'][0]['peer_port']);
+            $this->assertSame(2, $summary['udp_groups'][0]['flows']);
+            $this->assertSame(3, $summary['udp_groups'][0]['packets_out']);
+            $this->assertSame(1, $summary['udp_groups'][0]['packets_in']);
+            $this->assertSame(strlen($packets[0]) * 3, $summary['udp_groups'][0]['bytes_out']);
+            $this->assertStringNotContainsString('secret-udp-payload', json_encode($summary));
+        } finally {
+            unlink($path);
+        }
+    }
+
     public function test_continuous_ip_events_merge_rules_and_keep_review_until_behavior_changes(): void
     {
         $event = $this->event();
@@ -164,7 +196,7 @@ class EvidenceTest extends TestCase
         $job->handle();
         Http::assertSentCount(1);
         Http::assertSent(fn ($request) => $request['messages'][1]['content'] && str_contains($request['messages'][1]['content'], 'pcap_summary') && ! str_contains($request->body(), base64_encode($data)));
-        Http::assertSent(fn ($request) => str_contains($request['messages'][0]['content'], '第一节必须是“对外攻击结论”') && str_contains($request['messages'][0]['content'], 'authentication_groups') && json_decode($request['messages'][1]['content'], true)['analysis_question']['source_ip'] === '203.0.113.10');
+        Http::assertSent(fn ($request) => str_contains($request['messages'][0]['content'], '第一节必须是“对外攻击结论”') && str_contains($request['messages'][0]['content'], 'authentication_groups') && str_contains($request['messages'][0]['content'], 'udp_groups') && json_decode($request['messages'][1]['content'], true)['analysis_question']['source_ip'] === '203.0.113.10');
         $this->assertSame('completed', $analysis->fresh()->status);
         $this->assertSame('open', $event->fresh()->status);
         $this->assertArrayNotHasKey('api_key_cipher', $analysis->fresh()->config_snapshot);

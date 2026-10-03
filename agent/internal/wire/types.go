@@ -1,6 +1,24 @@
 package wire
 
+type UDPEndpoint struct {
+	PeerIP     string `json:"peer_ip"`
+	PeerPort   uint16 `json:"peer_port"`
+	Flows      uint64 `json:"flows"`
+	PacketsOut uint64 `json:"packets_out"`
+	PacketsIn  uint64 `json:"packets_in"`
+	BytesOut   uint64 `json:"bytes_out"`
+	BytesIn    uint64 `json:"bytes_in"`
+}
 type Metric struct {
+	UDPStatsVersion          int                `json:"udp_stats_version"`
+	UDPFlowsOut              uint64             `json:"udp_flows_out"`
+	UDPFlowsCapped           bool               `json:"udp_flows_capped"`
+	UDPPacketsOut            uint64             `json:"udp_packets_out"`
+	UDPPacketsIn             uint64             `json:"udp_packets_in"`
+	UDPBytesOut              uint64             `json:"udp_bytes_out"`
+	UDPBytesIn               uint64             `json:"udp_bytes_in"`
+	UDPEndpoints             []UDPEndpoint      `json:"udp_endpoints,omitempty"`
+	UDPEndpointsTruncated    bool               `json:"udp_endpoints_truncated"`
 	IP                       string             `json:"ip"`
 	BytesOut                 uint64             `json:"bytes_out"`
 	BytesIn                  uint64             `json:"bytes_in"`

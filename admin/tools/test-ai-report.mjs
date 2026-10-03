@@ -12,7 +12,7 @@ let server, browser;
 try {
   await writeFile(
     fixturePath,
-    '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><style>body{margin:0;padding:24px;background:#f4f6fa;font:14px system-ui;--el-text-color-primary:#303133;--el-border-color:#ddd;--el-fill-color-light:#f5f7fa;--el-fill-color-lighter:#fafafa;--el-color-primary:#409eff}#app{max-width:900px;margin:auto;background:white;padding:20px;box-sizing:border-box}</style></head><body><div id="app"></div><script type="module">import {createApp, reactive, h} from "vue";import AiReport from "/src/views/backend/monitor/AiReport.vue";const state=reactive({content:""});createApp({setup:()=>()=>h(AiReport,{content:state.content})}).mount("#app");window.showReport=(text)=>state.content=text;window.ready=true;</script></body></html>',
+    '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><style>body{margin:0;padding:24px;background:#f4f6fa;font:14px system-ui;--el-text-color-primary:#303133;--el-border-color:#ddd;--el-fill-color-light:#f5f7fa;--el-fill-color-lighter:#fafafa;--el-color-primary:#409eff}#app{max-width:900px;margin:auto;background:white;padding:20px;box-sizing:border-box}</style></head><body><div id="app"></div><script type="module">import {createApp, reactive, h} from "vue";import ElementPlus from "element-plus";import "element-plus/dist/index.css";import AiReport from "/src/views/backend/monitor/AiReport.vue";import TrafficEvidence from "/src/views/backend/monitor/TrafficEvidence.vue";import SiteReport from "/src/views/backend/monitor/SiteReport.vue";const state=reactive({content:"",record:{},view:"ai"});createApp({setup:()=>()=>state.view==="udp"?h(TrafficEvidence,{record:state.record}):state.view==="site"?h(SiteReport,{record:state.record}):h(AiReport,{content:state.content})}).use(ElementPlus).mount("#app");window.showReport=(text)=>{state.view="ai";state.content=text};window.showEvidence=(view,record)=>{state.view=view;state.record=record};window.ready=true;</script></body></html>',
   );
   server = await createServer({
     root: webRoot,
@@ -104,10 +104,72 @@ try {
     document.querySelector(".ai-report").textContent.includes("旧报告"),
   );
   assert.equal(await page.locator(".ai-report br").count(), 1);
+  await page.setViewportSize({ width: 1280, height: 1100 });
+  await page.evaluate(() =>
+    window.showEvidence("udp", {
+      title: "UDP 出站包速率提醒",
+      evidence: {
+        sample: {
+          transport: "UDP",
+          observed_seconds: 30,
+          udp_flows_out: 2,
+          udp_packets_out: 600,
+          udp_packets_in: 20,
+          udp_bytes_out: 24000,
+          udp_bytes_in: 800,
+          udp_endpoints: [
+            {
+              peer_ip: "198.51.100.1",
+              peer_port: 53,
+              flows: 2,
+              packets_out: 600,
+              packets_in: 20,
+              bytes_out: 24000,
+              bytes_in: 800,
+            },
+          ],
+        },
+      },
+    }),
+  );
+  await page.getByText("UDP 出站流数", { exact: true }).waitFor();
+  assert.equal(await page.getByText("完整握手", { exact: true }).count(), 0);
+  assert.equal(
+    await page.getByText("198.51.100.1", { exact: true }).count(),
+    1,
+  );
+  await page.evaluate(() =>
+    window.showEvidence("site", {
+      status: "verified",
+      ownership_status: "origin_response",
+      ip: "203.0.113.10",
+      host: "hidden.example",
+      port: 443,
+      scheme: "https",
+      ownership_evidence: {
+        addresses: ["198.51.100.1"],
+        origin_test: {
+          target_ip: "203.0.113.10",
+          checked_at: "2026-10-03T00:00:00Z",
+        },
+      },
+    }),
+  );
+  await page.getByText("指定 IP 测试", { exact: true }).waitFor();
+  assert.ok(
+    (await page.locator(".site-report").textContent()).includes(
+      "指定 IP 响应，归属待核实",
+    ),
+  );
+  assert.ok(
+    (await page.locator(".site-report").textContent()).includes(
+      "默认站点或反向代理也可能响应",
+    ),
+  );
   assert.deepEqual(errors, []);
   assert.deepEqual(externalRequests, []);
   console.log(
-    "AI Markdown headings, lists, tables, old reports, fenced reports, mobile width and XSS/network isolation passed.",
+    "AI Markdown headings, lists, tables, old reports, fenced reports, mobile width, XSS/network isolation, UDP evidence and source test provenance passed.",
   );
 } finally {
   if (browser) await browser.close();

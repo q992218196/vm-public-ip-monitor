@@ -2,49 +2,80 @@
     <section>
         <h3>{{ record.title || '连接证据' }}</h3>
         <el-alert v-if="analysis.conclusion" type="info" :closable="false" :title="analysis.conclusion" />
-        <el-descriptions :column="2" border>
-            <el-descriptions-item label="公网 IP">{{ record.ip || sample.ip || '—' }}</el-descriptions-item>
-            <el-descriptions-item label="目标数">{{ sample.unique_targets ?? '—' }}</el-descriptions-item>
-            <el-descriptions-item label="TCP 发起">{{ sample.tcp_attempts ?? '—' }}</el-descriptions-item>
-            <el-descriptions-item label="SYN-ACK 回复">{{ sample.synack_replies ?? '未采集' }}</el-descriptions-item>
-            <el-descriptions-item label="握手回复比例">{{ replyRatio }}</el-descriptions-item>
-            <el-descriptions-item label="完整握手">{{ sample.completed_handshakes ?? '未采集' }} · {{ completionRatio }}</el-descriptions-item>
-            <el-descriptions-item label="配对 RST">{{ sample.rst_replies ?? '未采集' }}</el-descriptions-item>
-            <el-descriptions-item label="等待至少 3 秒仍无回复">{{ sample.mature_no_reply ?? '未采集' }}（不等于失败）</el-descriptions-item>
-            <el-descriptions-item label="目标端口">{{ (sample.ports || []).join('、') || '—' }}</el-descriptions-item>
-        </el-descriptions>
-        <p>{{ evidence.note }}</p>
-        <h4 v-if="endpoints.length">目标连接样本</h4>
-        <el-table v-if="endpoints.length" :data="endpoints" border size="small">
-            <el-table-column label="目标" min-width="170"
-                ><template #default="scope">{{ scope.row.peer_ip }}:{{ scope.row.peer_port }}</template></el-table-column
-            >
-            <el-table-column prop="attempts" label="发起" width="65" />
-            <el-table-column prop="synack_replies" label="回复" width="65" />
-            <el-table-column label="握手 / RST" width="115"
-                ><template #default="scope"
-                    >{{ scope.row.completed_handshakes ?? '—' }} / {{ scope.row.rst_replies ?? '—' }}</template
-                ></el-table-column
-            >
-            <el-table-column label="观察跨度" width="100"
-                ><template #default="scope">{{
-                    scope.row.max_observed_span_ms === undefined ? '未采集' : (scope.row.max_observed_span_ms / 1000).toFixed(1) + '秒'
-                }}</template></el-table-column
-            >
-            <el-table-column label="载荷 出／入" min-width="150"
-                ><template #default="scope">{{ scope.row.payload_out }} / {{ scope.row.payload_in }} B</template></el-table-column
-            >
-        </el-table>
-        <article v-for="(item, index) in endpoints.filter((item) => item.host || item.http_path)" :key="index" class="request-hint">
-            <p>{{ item.peer_ip }}:{{ item.peer_port }} · {{ item.scheme }} · {{ item.host || '未观察到域名' }}</p>
-            <p v-if="item.http_path">{{ item.http_method }} {{ item.http_path }} · 参数名称：{{ (item.query_keys || []).join('、') || '无' }}</p>
-            <p v-else>加密流量或未观察到 HTTP 请求头，无法获取路径和正文。</p>
-        </article>
-        <p v-if="!endpoints.length">该记录无目标级详细样本；升级 Agent 后的新采集窗口才会包含此证据。</p>
-        <p class="evidence-limit">
-            每窗口最多 8 个目标样本，按连接发起次数排序；域名／路径是有限的首个请求样本。载荷字节来自观察到的 VM 发起连接前 60
-            秒内报文，可能包含重传，不是应用请求成功统计。查询值、Cookie 和正文不保存。
-        </p>
+        <template v-if="sample.transport === 'UDP'">
+            <el-descriptions :column="2" border>
+                <el-descriptions-item label="公网 IP">{{ record.ip || sample.ip || '—' }}</el-descriptions-item>
+                <el-descriptions-item label="规则命中／阈值"
+                    >{{ evidence.value }} / {{ evidence.threshold }} {{ record.kind === 'udp_packet_rate' ? '包/秒' : '流' }}</el-descriptions-item
+                >
+                <el-descriptions-item label="UDP 出站流数">{{ sample.udp_flows_out ?? '未采集' }}（不同五元组）</el-descriptions-item>
+                <el-descriptions-item label="本采集窗口">{{ sample.observed_seconds ?? '—' }} 秒</el-descriptions-item>
+                <el-descriptions-item label="UDP 包数 出／入">{{ sample.udp_packets_out }} / {{ sample.udp_packets_in }}</el-descriptions-item>
+                <el-descriptions-item label="UDP 字节 出／入">{{ sample.udp_bytes_out }} / {{ sample.udp_bytes_in }} B</el-descriptions-item>
+            </el-descriptions>
+            <p>{{ evidence.note }}</p>
+            <el-table :data="sample.udp_endpoints || []" border size="small">
+                <el-table-column prop="peer_ip" label="目标 IP" min-width="150" />
+                <el-table-column prop="peer_port" label="目标端口" width="100" />
+                <el-table-column prop="flows" label="出站流数" width="100" />
+                <el-table-column label="包数 出／入" min-width="130"
+                    ><template #default="scope">{{ scope.row.packets_out }} / {{ scope.row.packets_in }}</template></el-table-column
+                >
+                <el-table-column label="字节 出／入" min-width="160"
+                    ><template #default="scope">{{ scope.row.bytes_out }} / {{ scope.row.bytes_in }} B</template></el-table-column
+                >
+            </el-table>
+            <p>
+                每窗口最多 8 个目标样本。UDP 无握手；服务回复也可能计入出站流，双向流量不代表应用成功。{{
+                    sample.udp_flows_capped || sample.udp_endpoints_truncated ? '状态限额或目标样本截断，证据不完整。' : ''
+                }}
+            </p>
+        </template>
+        <template v-else>
+            <el-descriptions :column="2" border>
+                <el-descriptions-item label="公网 IP">{{ record.ip || sample.ip || '—' }}</el-descriptions-item>
+                <el-descriptions-item label="目标数">{{ sample.unique_targets ?? '—' }}</el-descriptions-item>
+                <el-descriptions-item label="TCP 发起">{{ sample.tcp_attempts ?? '—' }}</el-descriptions-item>
+                <el-descriptions-item label="SYN-ACK 回复">{{ sample.synack_replies ?? '未采集' }}</el-descriptions-item>
+                <el-descriptions-item label="握手回复比例">{{ replyRatio }}</el-descriptions-item>
+                <el-descriptions-item label="完整握手">{{ sample.completed_handshakes ?? '未采集' }} · {{ completionRatio }}</el-descriptions-item>
+                <el-descriptions-item label="配对 RST">{{ sample.rst_replies ?? '未采集' }}</el-descriptions-item>
+                <el-descriptions-item label="等待至少 3 秒仍无回复">{{ sample.mature_no_reply ?? '未采集' }}（不等于失败）</el-descriptions-item>
+                <el-descriptions-item label="目标端口">{{ (sample.ports || []).join('、') || '—' }}</el-descriptions-item>
+            </el-descriptions>
+            <p>{{ evidence.note }}</p>
+            <h4 v-if="endpoints.length">目标连接样本</h4>
+            <el-table v-if="endpoints.length" :data="endpoints" border size="small">
+                <el-table-column label="目标" min-width="170"
+                    ><template #default="scope">{{ scope.row.peer_ip }}:{{ scope.row.peer_port }}</template></el-table-column
+                >
+                <el-table-column prop="attempts" label="发起" width="65" />
+                <el-table-column prop="synack_replies" label="回复" width="65" />
+                <el-table-column label="握手 / RST" width="115"
+                    ><template #default="scope"
+                        >{{ scope.row.completed_handshakes ?? '—' }} / {{ scope.row.rst_replies ?? '—' }}</template
+                    ></el-table-column
+                >
+                <el-table-column label="观察跨度" width="100"
+                    ><template #default="scope">{{
+                        scope.row.max_observed_span_ms === undefined ? '未采集' : (scope.row.max_observed_span_ms / 1000).toFixed(1) + '秒'
+                    }}</template></el-table-column
+                >
+                <el-table-column label="载荷 出／入" min-width="150"
+                    ><template #default="scope">{{ scope.row.payload_out }} / {{ scope.row.payload_in }} B</template></el-table-column
+                >
+            </el-table>
+            <article v-for="(item, index) in endpoints.filter((item) => item.host || item.http_path)" :key="index" class="request-hint">
+                <p>{{ item.peer_ip }}:{{ item.peer_port }} · {{ item.scheme }} · {{ item.host || '未观察到域名' }}</p>
+                <p v-if="item.http_path">{{ item.http_method }} {{ item.http_path }} · 参数名称：{{ (item.query_keys || []).join('、') || '无' }}</p>
+                <p v-else>加密流量或未观察到 HTTP 请求头，无法获取路径和正文。</p>
+            </article>
+            <p v-if="!endpoints.length">该记录无目标级详细样本；升级 Agent 后的新采集窗口才会包含此证据。</p>
+            <p class="evidence-limit">
+                每窗口最多 8 个目标样本，按连接发起次数排序；域名／路径是有限的首个请求样本。载荷字节来自观察到的 VM 发起连接前 60
+                秒内报文，可能包含重传，不是应用请求成功统计。查询值、Cookie 和正文不保存。
+            </p>
+        </template>
     </section>
 </template>
 <script setup lang="ts">

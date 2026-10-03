@@ -41,3 +41,11 @@ if ($empty['category'] !== 'needs_review' || $empty['timeline'] || ! str_contain
     throw new RuntimeException('Missing evidence is mistaken for normal activity');
 }
 echo "Event review report bounds, mixed versions and review priorities passed\n";
+
+$udpRow = $row;
+$udpRow['evidence'] = ['udp_stats_version' => 1, 'udp_flows_out' => 2, 'udp_packets_out' => 20, 'udp_packets_in' => 3, 'udp_bytes_out' => 2000, 'udp_bytes_in' => 300, 'udp_flows_capped' => true, 'udp_endpoints' => [['peer_ip' => '192.0.2.1', 'peer_port' => 53, 'flows' => 2, 'packets_out' => 20, 'packets_in' => 3, 'bytes_out' => 2000, 'bytes_in' => 300]]];
+$udp = EventReviewReport::build($event, $alerts, [$udpRow, $udpRow, $old]);
+if ($udp['udp_totals']['windows'] !== 2 || $udp['udp_totals']['flows'] !== 4 || $udp['udp_totals']['packets_out'] !== 40 || $udp['udp_totals']['packets_in'] !== 6 || ! $udp['udp_totals']['capped'] || $udp['udp_targets'][0]['peer_port'] !== 53 || $udp['udp_targets'][0]['bytes_in'] !== 600) {
+    throw new RuntimeException('UDP report mixes transport statistics or old versions');
+}
+echo "UDP windows and endpoint packet evidence remain separate from TCP.\n";
