@@ -213,6 +213,26 @@ jobs:
           cmp /tmp/vm-agent-smoke /home/vm-monitor-server/agent-dist/vm-agent-linux-amd64
           curl -fsS -o /tmp/uninstall-smoke.sh http://127.0.0.1:8081/downloads/uninstall.sh
           cmp /tmp/uninstall-smoke.sh /home/vm-monitor-server/agent-dist/uninstall.sh
+          docker compose -f compose.yml -f compose.buildadmin.yml run --rm --no-deps app php artisan migrate --force
+          printf 'test-pcap-password-2026\ntest-pcap-password-2026\n' | docker compose -f compose.yml -f compose.buildadmin.yml exec -T buildadmin-app php tools/init-admin.php pcap@example.test
+          docker compose -f compose.yml -f compose.buildadmin.yml exec -T buildadmin-app sh -c "sed -i \"s/'admin_login_captcha'   => true/'admin_login_captcha'   => false/\" config/buildadmin.php"
+          curl -fsS -H 'server: true' -d 'username=pcap@example.test&password=test-pcap-password-2026' http://127.0.0.1:8081/admin/Index/login >/tmp/pcap-login.json
+          pcap_token=$(python3 -c 'import json; print(json.load(open("/tmp/pcap-login.json"))["data"]["userInfo"]["token"])')
+          docker compose -f compose.yml -f compose.buildadmin.yml exec -T postgres psql -U monitor -d monitor <<'SQL'
+          INSERT INTO nodes (id,name,cidrs) VALUES ('00000000-0000-4000-8000-000000000001','pcap-smoke','[]');
+          INSERT INTO monitor_events(id,node_id,title,severity,kinds,first_seen_at,last_seen_at) VALUES (1,'00000000-0000-4000-8000-000000000001','download','medium','[]',now(),now());
+          INSERT INTO packet_captures(id,event_id,node_id,ip,status,path,sha256) VALUES ('00000000-0000-4000-8000-000000000003',1,'00000000-0000-4000-8000-000000000001','203.0.113.10','uploaded','packet-evidence/00000000-0000-4000-8000-000000000003.pcap',repeat('a',64));
+          SQL
+          sudo mkdir -p /home/vm-monitor-server/storage/app/private/packet-evidence
+          sudo dd if=/dev/zero of=/home/vm-monitor-server/storage/app/private/packet-evidence/00000000-0000-4000-8000-000000000003.pcap bs=1024 count=128 status=none
+          sudo chown -R 33:33 /home/vm-monitor-server/storage/app/private/packet-evidence
+          sudo chmod 600 /home/vm-monitor-server/storage/app/private/packet-evidence/00000000-0000-4000-8000-000000000003.pcap
+          test "$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:8081/private-pcap/00000000-0000-4000-8000-000000000003.pcap)" = 404
+          curl -fsS -H 'server: true' -H "batoken: $pcap_token" -D /tmp/pcap-headers -o /tmp/pcap-smoke 'http://127.0.0.1:8081/admin/EventEvidence/download?id=00000000-0000-4000-8000-000000000003'
+          cmp /tmp/pcap-smoke /home/vm-monitor-server/storage/app/private/packet-evidence/00000000-0000-4000-8000-000000000003.pcap
+          grep -qi 'Cache-Control: no-store' /tmp/pcap-headers
+          test "$(curl -fsS -H 'server: true' -H "batoken: $pcap_token" -H 'Range: bytes=0-1023' -o /tmp/pcap-range -w '%{http_code}' 'http://127.0.0.1:8081/admin/EventEvidence/download?id=00000000-0000-4000-8000-000000000003')" = 206
+          test "$(wc -c </tmp/pcap-range)" = 1024
           docker compose -f compose.yml -f compose.buildadmin.yml up -d --no-build app web
           for attempt in 1 2 3 4 5 6 7 8 9 10; do
             status=$(curl -sS -o /dev/null -w '%{http_code}' 'http://127.0.0.1:8080/api/v1/agent/update?version=0.3.0' || true)

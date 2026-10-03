@@ -96,7 +96,7 @@ docker compose -f compose.yml -f compose.buildadmin.yml --profile screenshots up
 
 后台强制刷新，然后在“采集节点”确认最近上报持续更新。规则初始化只新增缺失规则，保留已修改阈值。
 
-本版 Agent 为 **1.1.0**：先升级主控，再在采集节点下发更新。UDP 检测需要节点上报新版统计，历史数据不会补出这些统计。
+本版 Agent 为 **1.2.0**：先升级主控，再在采集节点下发更新。新版本补全每目标最多 128 个端口的业务范围，减少白名单因截断反复失效。先更新主控，再更新节点，重新审核业务白名单；旧节点的截断数据仍要求复核。UDP 检测同样需要新版节点统计。
 
 ## 网站验证与截图
 
@@ -201,11 +201,11 @@ bash /home/vm-monitor/bin/uninstall.sh
 
 UDP 没有 TCP 握手，五元组只是源／目的 IP、源／目的端口和协议。同一窗口相同五元组只计一次，跨窗口可能重复；出站数据也可能是服务器回复。默认作为低级别行为提醒，详情显示目标端口、双向包量和字节量。DNS、QUIC、游戏等正常业务也可能较高，阈值在“检测规则”按业务调整。流状态最多 16384 项，每个 IP 上报最多 8 个端点样本，达到限额会注明；旧 Agent 不参与 UDP 检测。
 
-白名单限定节点、源 IP、类型、已核实目标范围、端口、强度和级别，默认 30 天；新目标、新端口、更强证据或样本不足时仍进入复核。“采集覆盖下降”是采集质量提醒，不提供白名单，应检查漏采或状态限额。
+事件白名单先显示最近一小时窗口、近期抓包与此前已批准的目标／端口，逐项核实后确认。按每个目标分别批准端口，重复审批保留之前批准范围；需要缩减时删除原例外再重新审核。白名单限定节点、源 IP、类型、已核实目标范围、端口、强度和级别，默认 30 天；新目标、新端口、更强证据或样本不足时仍进入复核。“采集覆盖下降”是采集质量提醒，不提供白名单，应检查漏采或状态限额。
 
 ### PCAP 与手动 AI
 
-无法判断的事件，可在详情申请定向抓包，再查看本地抓包分析或下载原始 PCAP。抓包从节点领取任务时开始，不能恢复历史流量。
+无法判断的事件，可在详情申请定向抓包，再查看本地抓包分析或下载原始 PCAP。抓包从节点领取任务时开始，不能恢复历史流量。手动任务完成或失败后可立即重新申请；同一 IP 不能同时有等待或执行中的任务，节点队列最多 10 个。自动抓包保留 30 分钟限频。
 
 | 项目 | 默认值 |
 | --- | --- |
@@ -214,11 +214,19 @@ UDP 没有 TCP 握手，五元组只是源／目的 IP、源／目的端口和�
 | PCAP 上传限速 | 每节点 2048 KiB/s，仅上传 PCAP 时使用 |
 | 主控证据 | `storage/app/private/packet-evidence`，20 GiB、7 天 |
 
-节点可调整 `evidence_enabled`、`evidence_limit_mib`、`evidence_keep_hours`、`evidence_upload_kibps`；证据额度加上缓存额度和 128 MiB 余量不能超过总磁盘预算。主控 `.env` 可调整 `MONITOR_CAPTURE_BYTES`、`MONITOR_CAPTURE_DAYS`。容量或文件数满时可能提前清理或暂停任务。只读账号不能下载原始 PCAP。
+节点可调整 `evidence_enabled`、`evidence_limit_mib`、`evidence_keep_hours`、`evidence_upload_kibps`；证据额度加上缓存额度和 128 MiB 余量不能超过总磁盘预算。PCAP 下载显示进度，可取消，取消固定一分钟超时；由 Nginx 传输，持续下载不会因总时长超过一分钟失败（连接中断仍需重试）。
+
+主控 `.env` 可调整 `MONITOR_CAPTURE_BYTES`、`MONITOR_CAPTURE_DAYS`。容量或文件数满时可能提前清理或暂停任务。只读账号不能下载原始 PCAP。
 
 “AI 分析设置”填写 API 地址、模型和密钥。**只有手动申请 AI 分析才调用接口**；保存设置、抓包和本地解析不调用 AI。使用独立 `ai-queue`，报告按 Markdown 展示。
 
-默认发送统计摘要，上限 128 KiB；可手选完整逐包文本，整份发送证据上限 2 MiB。文本包含包头、方向、端口及脱敏请求线索，不含原始二进制、密码、Cookie、Authorization 或请求正文。解析最多 32 MiB、20 万帧、4096 个流、8 秒；完整模式超限会失败，不自动分批收费。HTTPS 正文无法从旁路抓包直接读取。
+AI 发送方式：
+
+- **统计摘要**：上限 128 KiB。
+- **完整逐包文本**：完整转换并发送，文本本地保护上限 16 MiB；超限失败，不自动截取或分批。
+- **逐包文本前 2 MiB**：读取整份抓包并计算统计，发送逐包文本前段的完整行，明确标注未发送的后续文本；解析未读完整文件则不调用 AI。
+
+这些是系统保护值；DeepSeek 按模型上下文 token 数限制输入与输出，并非固定 2 MiB。大文本可能超过所选模型限制，接口拒绝后不会自动重试。文本包含包头、方向、端口及脱敏请求线索，不含原始二进制、密码、Cookie、Authorization 或请求正文。解析最多 32 MiB、20 万帧、4096 个流、8 秒；完整模式超限会失败，不自动分批收费。HTTPS 正文无法从旁路抓包直接读取。
 
 AI 报告优先回答本次抓包窗口该 IP 是否有对外攻击证据，分别说明扫描、爆破、UDP 行为、置信度和限制。报告不自动封禁或审核；历史事件与当前抓包时间不一致时不能互相证明。失败后需要再次分析，由管理员重新申请，供应商费用以实际调用为准。
 
@@ -243,7 +251,7 @@ docker compose -f compose.yml -f compose.buildadmin.yml --profile https ps
 tail -n 40 /home/vm-monitor-server/nginx-logs/error.log
 tail -n 40 /home/vm-monitor-server/storage/logs/php-fpm.log
 tail -n 40 /home/vm-monitor-server/worker/worker.log
-curl -sS -o /dev/null -w 'Agent API: %{http_code}\n' 'https://vm-monitor.lcayun.cn/api/v1/agent/update?version=1.1.0'
+curl -sS -o /dev/null -w 'Agent API: %{http_code}\n' 'https://vm-monitor.lcayun.cn/api/v1/agent/update?version=1.2.0'
 ```
 
 无 Agent 令牌的最后一项正常应为 **401**。示例域名和自定义目录请替换。BuildAdmin 日志在 `buildadmin/runtime`；节点日志在宿主机的 `data_dir/logs/agent.log`。

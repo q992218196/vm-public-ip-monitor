@@ -84,6 +84,14 @@ $settings['enabled'] = true;
 $settings['api_key'] = '';
 $ok($request('saveSettings', $settings, true));
 $db->prepare('UPDATE packet_captures SET status=?,sha256=?,metadata=?,summary=? WHERE id=?')->execute(['uploaded', str_repeat('a', 64), '{}', '{"matched_packets":3}', $task]);
+$secondTask = $ok($request('capture', ['id' => 100], true))['id'];
+if (($request('capture', ['id' => 100], true)['code'] ?? null) === 1) {
+    throw new RuntimeException('Concurrent captures for the same IP allowed');
+}
+$db->prepare('UPDATE packet_captures SET status=? WHERE id=?')->execute(['failed', $secondTask]);
+$thirdTask = $ok($request('capture', ['id' => 100], true))['id'];
+$db->prepare('UPDATE packet_captures SET status=? WHERE id=?')->execute(['failed', $thirdTask]);
+
 if (($request('requestAi', ['capture_id' => $task, 'evidence_mode' => 'invalid'], true)['code'] ?? null) === 1) {
     throw new RuntimeException('Unknown AI evidence mode accepted');
 }
@@ -95,6 +103,15 @@ $analysis = $ok($request('analysis', ['id' => $id]))['record'];
 if ($analysis['status'] !== 'pending' || $analysis['evidence_mode'] !== 'full_packets' || isset($analysis['config_snapshot'])) {
     throw new RuntimeException('AI credentials exposed or automatically executed');
 }
+$db->prepare('UPDATE ai_analyses SET status=?,evidence=? WHERE id=?')->execute(['completed', json_encode(['packet_text' => ['text' => str_repeat('sensitive-packet-text', 10000), 'bytes' => 210000]]), $id]);
+$read = $ok($request('analysis', ['id' => $id]))['record'];
+if (isset($read['evidence']['packet_text']['text']) || strlen(json_encode($read)) > 4096) {
+    throw new RuntimeException('Report opening transfers all packet text again');
+}
+$excerptId = $ok($request('requestAi', ['capture_id' => $task, 'evidence_mode' => 'packet_excerpt'], true))['id'];
+if ($ok($request('analysis', ['id' => $excerptId]))['record']['evidence_mode'] !== 'packet_excerpt') {
+    throw new RuntimeException('Packet excerpt mode lost');
+}
 if ($ok($request('captureSummary', ['id' => $task]))['record']['summary']['matched_packets'] !== 3) {
     throw new RuntimeException('Local summary missing');
 }
@@ -103,7 +120,7 @@ foreach (['capture', 'review', 'whitelist', 'requestAi', 'saveSettings'] as $act
         throw new RuntimeException('Viewer can mutate evidence: '.$action);
     }
 }
-foreach (['settings', 'download'] as $action) {
+foreach (['settings', 'download', 'whitelistPreview'] as $action) {
     if (($request($action, ['id' => $task], false, true)['code'] ?? null) !== 403) {
         throw new RuntimeException('Viewer can read secrets or PCAP');
     }
@@ -112,7 +129,17 @@ if ($ok($request('count', [], false, true))['total'] !== 1) {
     throw new RuntimeException('Viewer cannot read events');
 }
 $ok($request('review', ['ids' => [100], 'status' => 'normal', 'notes' => 'Authorized business'], true));
-$ok($request('whitelist', ['id' => 100], true));
+$db->prepare('UPDATE alerts SET evidence=? WHERE id=1')->execute([json_encode(['value' => 100, 'sample' => ['targets' => ['192.0.2.2'], 'ports' => [443], 'unique_targets' => 1, 'port_scan_targets' => [['peer_ip' => '192.0.2.2', 'port_count' => 1, 'ports' => [443], 'truncated' => false]]]])]);
+$preview = $ok($request('whitelistPreview', ['id' => 100]));
+if ($preview['target_ports']['192.0.2.2'] !== [443] || ($request('whitelist', ['id' => 100, 'fingerprint' => 'stale'], true)['code'] ?? null) === 1) {
+    throw new RuntimeException('Reviewed target profile missing or stale preview accepted');
+}
+$ok($request('whitelist', ['id' => 100, 'fingerprint' => $preview['fingerprint']], true));
+$ok($request('whitelist', ['id' => 100, 'fingerprint' => $preview['fingerprint']], true));
+$scopes = $db->query("SELECT behavior_scope FROM exclusions WHERE kind='horizontal_scan' AND node_id='00000000-0000-4000-8000-000000000001'")->fetchAll(PDO::FETCH_COLUMN);
+if (! array_filter($scopes, fn ($raw) => (json_decode($raw, true)['target_ports']['192.0.2.2'] ?? []) === [443])) {
+    throw new RuntimeException('Per-target business scope was not saved');
+}
 $event = $db->query('SELECT status FROM monitor_events WHERE id=100')->fetchColumn();
 if ($event !== 'normal') {
     throw new RuntimeException('Whitelist review incorrect');

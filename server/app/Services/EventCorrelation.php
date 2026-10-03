@@ -30,7 +30,7 @@ class EventCorrelation
             if (isset($sample['capture_quality'])) {
                 $quality = $sample['capture_quality'] + ['observed_at' => $evidence['sample_window_end'] ?? $time->toIso8601String()];
             }
-            $behavior = ['ports' => array_slice(array_values(array_unique($sample['ports'] ?? [])), 0, 64),
+            $behavior = ['ports' => array_slice(array_values(array_unique($sample['ports'] ?? [])), 0, 256),
                 'complete_ports' => isset($sample['ports']) && ! ($sample['port_samples_truncated'] ?? true) && ! ($sample['cardinality_capped'] ?? false),
                 'category' => $evidence['connection_analysis']['category'] ?? 'unknown', 'observed_at' => $behaviorTime->toIso8601String(), 'change_streak' => 0];
             if (! $event) {
@@ -99,7 +99,8 @@ class EventCorrelation
     public function requestCapture(MonitorEvent $event, string $ip, string $source = 'manual'): ?PacketCapture
     {
         $query = PacketCapture::where('node_id', $event->node_id);
-        if ((clone $query)->whereIn('status', ['pending', 'leased'])->count() >= 10 || (clone $query)->where('ip', $ip)->where('created_at', '>', now()->subMinutes(30))->exists()) {
+        if ((clone $query)->whereIn('status', ['pending', 'leased'])->count() >= 10 || (clone $query)->where('ip', $ip)->whereIn('status', ['pending', 'leased'])->exists()
+            || ($source === 'auto' && (clone $query)->where('ip', $ip)->where('created_at', '>', now()->subMinutes(30))->exists())) {
             return null;
         }
 

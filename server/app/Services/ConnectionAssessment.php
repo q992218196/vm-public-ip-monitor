@@ -38,6 +38,9 @@ class ConnectionAssessment
         $severity = $scan || $service || $kind === 'suspected_bruteforce' ? 'medium' : 'low';
         $category = $severity === 'low' ? 'behavior_notice' : 'needs_review';
         $reasons = [$scan ? '目标或端口数量达到规则阈值，仍需区分业务连接与探测行为' : '连接数量或带宽阈值只能证明活跃程度，不能证明攻击'];
+        if ($kind === 'vertical_scan') {
+            $reasons[] = '固定目标的多端口健康检查、服务池检查也会触发此规则；按目标核查业务范围，数量本身不确认扫描或违规，已审核目标端口可建立定向业务例外';
+        }
         if ($service) {
             $reasons[] = '仅统计有界目标样本中最活跃目标的连接下界，跨窗口取最大值；常见端口只提示服务类型，不代表已观察登录失败或爆破';
         }

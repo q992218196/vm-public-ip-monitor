@@ -71,6 +71,36 @@ class BehaviorWhitelistTest extends TestCase
         $this->assertNotNull($analyzer->alert($other, $ip, 'horizontal_scan', 'medium', 'test', $this->evidence(), now()));
     }
 
+    public function test_complete_target_profiles_allow_reviewed_many_port_business_without_hiding_scope_changes(): void
+    {
+        $scope = $this->scope();
+        $scope['version'] = 2;
+        $scope['target_ports'] = ['198.51.100.1' => range(11000, 11053), '198.51.100.2' => [3389]];
+        $scope['ports'] = [...range(11000, 11053), 3389];
+        $entry = new Exclusion(['behavior_scope' => $scope]);
+        $e = ['value' => 54, 'assessed_severity' => 'medium', 'sample' => ['targets' => ['198.51.100.1', '198.51.100.2'], 'ports' => $scope['ports'], 'unique_targets' => 2,
+            'endpoint_samples_truncated' => true, 'outbound_samples_truncated' => true, 'port_scan_targets' => [
+                ['peer_ip' => '198.51.100.1', 'port_count' => 54, 'ports' => range(11000, 11053), 'truncated' => false],
+                ['peer_ip' => '198.51.100.2', 'port_count' => 1, 'ports' => [3389], 'truncated' => false]]]];
+        $checker = app(BehaviorWhitelist::class);
+        $this->assertTrue($checker->evaluate($entry, $e)['match']);
+        $changed = $e;
+        $changed['sample']['port_scan_targets'][0]['ports'][0] = 3389;
+        $this->assertFalse($checker->evaluate($entry, $changed)['match'], 'A port approved for another target must not be allowed here');
+        $changed = $e;
+        $changed['sample']['port_scan_targets'][0]['truncated'] = true;
+        $this->assertFalse($checker->evaluate($entry, $changed)['match']);
+        $changed = $e;
+        $changed['sample']['unique_targets'] = 3;
+        $this->assertFalse($checker->evaluate($entry, $changed)['match']);
+        $changed = $e;
+        $changed['sample']['targets'][] = '192.0.2.1';
+        $this->assertFalse($checker->evaluate($entry, $changed)['match']);
+        $changed = $e;
+        $changed['connection_analysis']['category'] = 'strong_anomaly';
+        $this->assertFalse($checker->evaluate($entry, $changed)['match']);
+    }
+
     public function test_ipv6_endpoint_scope_matches_explicitly_approved_range(): void
     {
         $entry = new Exclusion(['behavior_scope' => array_replace($this->scope(), ['target_cidrs' => ['2001:db8:1::/48']])]);

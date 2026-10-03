@@ -2,6 +2,7 @@
 
 namespace app\admin\controller;
 
+use app\common\service\BusinessScope;
 use app\common\service\EventReviewReport;
 
 class EventEvidence extends Monitor
@@ -132,6 +133,45 @@ class EventEvidence extends Monitor
         $this->success('已记录审核结果');
     }
 
+    private function businessProfile(array $event): array
+    {
+        $samples = [];
+        $cutoff = gmdate('Y-m-d H:i:s', strtotime($event['last_seen_at'].' UTC') - 3600);
+        $rows = $this->db()->table('traffic_metrics')->where('node_id', $event['node_id'])->where('ip_asset_id', $event['ip_asset_id'])
+            ->where('window_end', '>=', $cutoff)->where('window_end', '<=', $event['last_seen_at'])->field('evidence')->order('window_end', 'desc')->limit(120)->select()->toArray();
+        foreach ($rows as $row) {
+            $samples[] = $this->decode($row['evidence']);
+        }
+        $summaries = [];
+        foreach ($this->db()->table('packet_captures')->where('event_id', $event['id'])->where('status', 'uploaded')->where('created_at', '>=', $cutoff)->field('summary')->order('created_at', 'desc')->limit(3)->select()->toArray() as $row) {
+            $summaries[] = $this->decode($row['summary']);
+        }
+        $ip = $this->db()->table('ip_assets')->where('id', $event['ip_asset_id'])->value('ip');
+        $approved = [];
+        if ($ip) {
+            foreach ($this->db()->table('exclusions')->where('node_id', $event['node_id'])->where('cidr', $ip.(str_contains($ip, ':') ? '/128' : '/32'))->whereIn('kind', $this->decode($event['kinds']))->where('expires_at', '>', gmdate('Y-m-d H:i:s'))->field('behavior_scope')->select()->toArray() as $row) {
+                $approved[] = $this->decode($row['behavior_scope']);
+            }
+        }
+        $targets = BusinessScope::profile($samples, $summaries, $approved);
+        if (count($targets) > 256 || array_filter($targets, fn ($ports) => count($ports) > 128)) {
+            $this->error('业务范围超过有界限制；请在检测排除中分别登记已核实业务');
+        }
+
+        return $targets;
+    }
+
+    public function whitelistPreview(): void
+    {
+        $this->writable();
+        $event = $this->db()->table('monitor_events')->where('id', (int) $this->request->get('id'))->find();
+        if (! $event) {
+            $this->error('事件不存在');
+        }
+        $targets = $event['ip_asset_id'] ? $this->businessProfile($event) : [];
+        $this->success('', ['target_ports' => $targets, 'fingerprint' => BusinessScope::fingerprint($targets)]);
+    }
+
     public function whitelist(): void
     {
         $this->writable();
@@ -151,12 +191,24 @@ class EventEvidence extends Monitor
                 $this->error('IP 资产不存在');
             }
             $cidr = $ip ? $ip.(str_contains($ip, ':') ? '/128' : '/32') : null;
+            $profile = $ip ? $this->businessProfile($event) : [];
+            if ($profile && ! hash_equals(BusinessScope::fingerprint($profile), (string) $this->request->post('fingerprint', ''))) {
+                $this->error('业务目标或端口已变化，请重新打开白名单预览并审核');
+            }
             $now = gmdate('Y-m-d H:i:s');
             foreach ($this->decode($event['kinds']) as $kind) {
                 $scope = ['node_id' => $event['node_id'], 'cidr' => $cidr, 'kind' => $kind];
                 $existing = $this->db()->table('exclusions')->where($scope)->find();
                 $alert = $this->db()->table('alerts')->where('event_id', $id)->where('kind', $kind)->order('last_seen_at', 'desc')->find();
                 $behaviorScope = $ip ? $this->behaviorWhitelistScope((array) $this->decode($alert['evidence'] ?? null), $alert['severity'] ?? $event['severity']) : null;
+                if ($profile && ! empty($this->decode($alert['evidence'] ?? null)['sample']['port_scan_targets'])) {
+                    $decoded = json_decode($behaviorScope, true);
+                    $decoded['version'] = 2;
+                    $decoded['target_ports'] = $profile;
+                    $decoded['target_cidrs'] = array_map(fn ($peer) => $peer.(str_contains($peer, ':') ? '/128' : '/32'), array_keys($profile));
+                    $decoded['ports'] = array_values(array_unique(array_merge(...array_values($profile))));
+                    $behaviorScope = json_encode($decoded);
+                }
                 $values = ['expires_at' => gmdate('Y-m-d H:i:s', time() + 30 * 86400), 'behavior_scope' => $behaviorScope, 'updated_at' => $now];
                 if ($existing) {
                     $this->db()->table('exclusions')->where('id', $existing['id'])->update($values);
@@ -164,7 +216,7 @@ class EventEvidence extends Monitor
                     $this->db()->table('exclusions')->insert($scope + $values + ['reason' => '管理员审核事件 #'.$id, 'created_at' => $now]);
                 }
             }
-            $this->db()->table('monitor_events')->where('id', $id)->update(['status' => 'normal', 'review_context' => $event['behavior'] ?: '{}', 'reopen_reason' => null, 'review_notes' => '当前节点、IP、已命中类型建立 30 天定向业务例外；目标或行为变化重新复核', 'updated_at' => $now]);
+            $this->db()->table('monitor_events')->where('id', $id)->update(['status' => 'normal', 'review_context' => $event['behavior'] ?: '{}', 'reopen_reason' => null, 'review_notes' => '当前节点、IP、已命中类型建立 30 天业务例外；按最近一小时窗口、抓包和已批准记录整理目标与端口；范围或更强证据变化重新复核', 'updated_at' => $now]);
             $this->db()->table('alerts')->where('event_id', $id)->update(['status' => 'resolved', 'resolution' => '事件已建立 30 天定向业务例外，范围变化时重新复核', 'updated_at' => $now]);
             $this->audit('event.whitelisted', 'MonitorEvent:'.$id, ['ip' => $ip, 'kinds' => $this->decode($event['kinds'])]);
         });
@@ -192,8 +244,11 @@ class EventEvidence extends Monitor
             }
             $ip = $this->db()->table('ip_assets')->where('id', $event['ip_asset_id'])->value('ip');
             $tasks = $this->db()->table('packet_captures')->where('node_id', $node['id']);
-            if ((clone $tasks)->whereIn('status', ['pending', 'leased'])->count() >= 10 || (clone $tasks)->where('ip', $ip)->where('created_at', '>', gmdate('Y-m-d H:i:s', time() - 1800))->whereIn('status', ['pending', 'leased', 'uploaded'])->find()) {
-                $this->error('该 IP 已有最近 30 分钟的采集任务，或节点等待队列已满');
+            if ((clone $tasks)->where('ip', $ip)->whereIn('status', ['pending', 'leased'])->find()) {
+                $this->error('该 IP 已有等待或执行中的抓包；完成或失败后可立即再次申请');
+            }
+            if ((clone $tasks)->whereIn('status', ['pending', 'leased'])->count() >= 10) {
+                $this->error('节点抓包等待队列已满（上限 10 个），请等待任务完成');
             }
             $b = random_bytes(16);
             $b[6] = chr((ord($b[6]) & 15) | 64);
@@ -221,7 +276,7 @@ class EventEvidence extends Monitor
         }
         $this->audit('capture.downloaded', 'PacketCapture:'.$id, ['sha256' => $capture['sha256']]);
 
-        return download($path, $id.'.pcap')->header(['Cache-Control' => 'no-store', 'X-Content-Type-Options' => 'nosniff']);
+        return response('', 200, ['X-Accel-Redirect' => '/private-pcap/'.$id.'.pcap', 'Content-Type' => 'application/vnd.tcpdump.pcap', 'Content-Disposition' => 'attachment; filename="'.$id.'.pcap"', 'Cache-Control' => 'no-store', 'X-Content-Type-Options' => 'nosniff']);
     }
 
     public function settings(): void
@@ -290,7 +345,7 @@ class EventEvidence extends Monitor
         $this->writable();
         $captureId = (string) $this->request->post('capture_id');
         $mode = (string) $this->request->post('evidence_mode', 'summary');
-        if (! in_array($mode, ['summary', 'full_packets'], true)) {
+        if (! in_array($mode, ['summary', 'full_packets', 'packet_excerpt'], true)) {
             $this->error('证据发送模式无效');
         }
         $analysisId = 0;
@@ -325,6 +380,10 @@ class EventEvidence extends Monitor
         $row['endpoint'] = $config['endpoint'] ?? null;
         $row['evidence_mode'] = $config['evidence_mode'] ?? 'summary';
         $row['evidence'] = $this->decode($row['evidence']);
+        if (isset($row['evidence']['packet_text']['text'])) {
+            unset($row['evidence']['packet_text']['text']);
+            $row['evidence']['packet_text']['text_omitted_from_response'] = true;
+        }
         $row['usage'] = $this->decode($row['usage']);
         $this->success('', ['record' => $row]);
     }

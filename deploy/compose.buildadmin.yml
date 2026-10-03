@@ -64,6 +64,7 @@ services:
     volumes:
       - ${MONITOR_DATA_DIR:-/home/vm-monitor-server}/buildadmin/uploads:/var/www/html/public/uploads:ro
       - ${MONITOR_DATA_DIR:-/home/vm-monitor-server}/agent-dist:/agent-dist:ro
+      - ${MONITOR_DATA_DIR:-/home/vm-monitor-server}/storage:/monitor-storage:ro
     depends_on: [buildadmin-app]
     logging:
       driver: none

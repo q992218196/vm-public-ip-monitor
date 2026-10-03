@@ -10,7 +10,7 @@ class BehaviorWhitelist
     public function evaluate(Exclusion $entry, array $evidence): array
     {
         $scope = $entry->behavior_scope;
-        if (! is_array($scope) || ($scope['version'] ?? 0) !== 1) {
+        if (! is_array($scope) || ! in_array($scope['version'] ?? 0, [1, 2], true)) {
             return ['match' => false, 'reason' => '历史白名单缺少目标与行为范围，请重新审核'];
         }
         $sample = $evidence['sample'] ?? $evidence;
@@ -53,11 +53,31 @@ class BehaviorWhitelist
                 return ['match' => false, 'reason' => '出现未批准的目标 IP：'.$target];
             }
         }
-        if (array_diff($ports, $scope['ports'] ?? [])) {
+        if (($scope['version'] ?? 0) === 2) {
+            $profiles = $sample['port_scan_targets'] ?? [];
+            $profilePeers = array_unique(array_column($profiles, 'peer_ip'));
+            if (! $profiles || count($profilePeers) !== count($profiles) || count($profilePeers) !== ($sample['unique_targets'] ?? -1) || array_diff($targets, $profilePeers)) {
+                return ['match' => false, 'reason' => '目标端口范围不完整，请升级 Agent 或补充抓包复核'];
+            }
+            $allPorts = [];
+            foreach ($profiles as $profile) {
+                $currentPorts = array_values(array_unique($profile['ports'] ?? []));
+                if (($profile['truncated'] ?? true) || count($currentPorts) !== ($profile['port_count'] ?? -1)) {
+                    return ['match' => false, 'reason' => '目标端口样本截断，不能确认已审核范围；需要 Agent 1.2.0 或以上'];
+                }
+                if (array_diff($currentPorts, $scope['target_ports'][$profile['peer_ip']] ?? [])) {
+                    return ['match' => false, 'reason' => '目标 '.$profile['peer_ip'].' 出现未批准的端口'];
+                }
+                $allPorts = [...$allPorts, ...$currentPorts];
+            }
+            if (array_diff($ports, $allPorts)) {
+                return ['match' => false, 'reason' => '目标端口明细与全局证据不一致'];
+            }
+        } elseif (array_diff($ports, $scope['ports'] ?? [])) {
             return ['match' => false, 'reason' => '出现未批准的目标端口'];
         }
-        if (($sample['unique_targets'] ?? count($targets)) > count($targets) || ($sample['egress_target_count'] ?? count($targets)) > count($targets)
-            || ($sample['port_samples_truncated'] ?? false) || ($sample['endpoint_samples_truncated'] ?? false) || ($sample['outbound_samples_truncated'] ?? false)) {
+        if (($scope['version'] ?? 0) === 1 && (($sample['unique_targets'] ?? count($targets)) > count($targets) || ($sample['egress_target_count'] ?? count($targets)) > count($targets)
+            || ($sample['port_samples_truncated'] ?? false) || ($sample['endpoint_samples_truncated'] ?? false) || ($sample['outbound_samples_truncated'] ?? false))) {
             return ['match' => false, 'reason' => '当前目标或端口仅有截断样本，不能据此抑制全部检测'];
         }
         $value = (float) ($evidence['value'] ?? 0);

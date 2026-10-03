@@ -394,12 +394,12 @@ func TestSYNACKReplyCountsOnlyMatchingOutboundAttemptOnce(t *testing.T) {
 func TestPortEvidenceIsBounded(t *testing.T) {
 	now := time.Now()
 	e := New(cfg(), now)
-	for port := uint16(1); port <= 70; port++ {
+	for port := uint16(1); port <= 150; port++ {
 		p := frame("203.0.113.1", "1.1.1.1", 40000+port, port, 1, 2, "")
 		e.Process(p, len(p), "a", now)
 	}
 	m := e.Snapshot(now.Add(time.Second)).Metrics[0]
-	if len(m.Ports) != 64 || m.Ports[0] != 1 || m.Ports[63] != 64 || !m.PortSamplesTruncated {
+	if len(m.Ports) != 150 || m.Ports[0] != 1 || m.Ports[149] != 150 || m.PortSamplesTruncated || len(m.PortScanTargets[0].Ports) != 128 || !m.PortScanTargets[0].Truncated {
 		t.Fatalf("unexpected port sample: %+v", m)
 	}
 }
@@ -436,5 +436,18 @@ func TestFloodKeepsStateBounded(t *testing.T) {
 	b := e.Snapshot(now.Add(30 * time.Second))
 	if b.Health.StateDropped == 0 {
 		t.Fatal("state loss must be visible")
+	}
+}
+
+func TestCompleteBusinessPortProfileAboveOldSampleLimits(t *testing.T) {
+	now := time.Now()
+	e := New(cfg(), now)
+	for i := 0; i < 90; i++ {
+		p := frame("203.0.113.1", "198.51.100.2", uint16(40000+i), uint16(11000+i), 1, 2, "")
+		e.Process(p, len(p), "a", now)
+	}
+	m := e.Snapshot(now.Add(30 * time.Second)).Metrics[0]
+	if len(m.Ports) != 90 || m.PortSamplesTruncated || len(m.PortScanTargets) != 1 || len(m.PortScanTargets[0].Ports) != 90 || m.PortScanTargets[0].Truncated {
+		t.Fatalf("approved business port profile must be complete above previous 32/64 sample limits: %+v", m)
 	}
 }

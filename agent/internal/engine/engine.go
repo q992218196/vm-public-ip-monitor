@@ -616,10 +616,10 @@ func (e *Engine) Snapshot(now time.Time) wire.Batch {
 			ports = append(ports, int(port))
 		}
 		sort.Ints(ports)
-		s.m.PortSamplesTruncated = len(ports) > 64
+		s.m.PortSamplesTruncated = len(ports) > 256
 		s.m.EndpointSamplesTruncated = len(endpoints) > 32
-		s.m.Ports = make([]uint16, 0, min(len(ports), 64))
-		for _, port := range ports[:min(len(ports), 64)] {
+		s.m.Ports = make([]uint16, 0, min(len(ports), 256))
+		for _, port := range ports[:min(len(ports), 256)] {
 			s.m.Ports = append(s.m.Ports, uint16(port))
 		}
 		sort.Strings(endpoints)
@@ -642,7 +642,7 @@ func (e *Engine) Snapshot(now time.Time) wire.Batch {
 		portTargets := make([]wire.PortTarget, 0, len(portsByTarget))
 		for target, portList := range portsByTarget {
 			sort.Slice(portList, func(i, j int) bool { return portList[i] < portList[j] })
-			portTargets = append(portTargets, wire.PortTarget{PeerIP: target.String(), PortCount: len(portList), Ports: portList[:min(len(portList), 32)], Truncated: len(portList) > 32 || s.m.CardinalityCapped})
+			portTargets = append(portTargets, wire.PortTarget{PeerIP: target.String(), PortCount: len(portList), Ports: portList[:min(len(portList), 128)], Truncated: len(portList) > 128 || s.m.CardinalityCapped})
 		}
 		sort.Slice(portTargets, func(i, j int) bool {
 			if portTargets[i].PortCount != portTargets[j].PortCount {

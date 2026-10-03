@@ -28,5 +28,11 @@ ENTRYPOINT ["buildadmin-entrypoint"]
 CMD ["php-fpm"]
 
 FROM nginx:1.28-alpine AS web
+RUN storage_group="$(awk -F: '$3 == 33 {print $1}' /etc/group)" \
+    && { [ -n "$storage_group" ] || { addgroup -g 33 monitor-storage; storage_group=monitor-storage; }; } \
+    && storage_user="$(awk -F: '$3 == 33 {print $1}' /etc/passwd)" \
+    && { [ -n "$storage_user" ] || { adduser -D -H -u 33 -G "$storage_group" monitor-storage; storage_user=monitor-storage; }; } \
+    && sed -i -E "s/^user[[:space:]]+nginx;/user $storage_user $storage_group;/" /etc/nginx/nginx.conf \
+    && chown -R 33:33 /var/cache/nginx
 COPY --from=app /var/www/html/public /var/www/html/public
 COPY deploy/buildadmin/nginx.conf /etc/nginx/conf.d/default.conf

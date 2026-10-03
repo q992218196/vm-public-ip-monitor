@@ -1,7 +1,9 @@
 <?php
 
 require __DIR__.'/../app/common/service/EventReviewReport.php';
+require __DIR__.'/../app/common/service/BusinessScope.php';
 
+use app\common\service\BusinessScope;
 use app\common\service\EventReviewReport;
 
 $event = ['id' => 1, 'status' => 'open', 'quality' => '{}'];
@@ -49,3 +51,13 @@ if ($udp['udp_totals']['windows'] !== 2 || $udp['udp_totals']['flows'] !== 4 || 
     throw new RuntimeException('UDP report mixes transport statistics or old versions');
 }
 echo "UDP windows and endpoint packet evidence remain separate from TCP.\n";
+
+$profile = BusinessScope::profile(
+    [['port_scan_targets' => [['peer_ip' => '192.0.2.1', 'ports' => [11001, 11002]]]], ['port_scan_targets' => [['peer_ip' => '192.0.2.1', 'ports' => [11000]]]]],
+    [['pcap_fully_read' => true, 'summary_capped' => false, 'peer_groups' => [['peer_ip' => '192.0.2.2', 'ports' => [3389]]]]],
+    [['target_ports' => ['192.0.2.1' => [11003]]]]
+);
+if ($profile !== ['192.0.2.1' => [11000, 11001, 11002, 11003], '192.0.2.2' => [3389]]) {
+    throw new RuntimeException('Business approval must combine recent windows and preserve previous approval without mixing ports across targets');
+}
+echo "Business scope aggregation passed.\n";

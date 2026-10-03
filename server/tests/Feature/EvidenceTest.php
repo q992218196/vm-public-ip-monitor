@@ -71,7 +71,7 @@ class EvidenceTest extends TestCase
         try {
             file_put_contents($path, $this->pcap($packets));
             $summary = app(PcapSummary::class)->summarize($path, $local);
-            $this->assertSame(5, $summary['analysis_version']);
+            $this->assertSame(6, $summary['analysis_version']);
             $this->assertSame(0, $summary['observed_outbound_flows']);
             $this->assertSame(0, $summary['completed_handshakes']);
             $this->assertCount(2, $summary['udp_groups']);
@@ -147,6 +147,24 @@ class EvidenceTest extends TestCase
             $this->assertStringNotContainsString('secret', json_encode($summary));
             file_put_contents($path, $this->pcap([$this->packet('203.0.113.10', '1.1.1.1', 2), $this->packet('1.1.1.1', '203.0.113.10', 18, 443, 20000)]));
             $this->assertSame(0, app(PcapSummary::class)->summarize($path, '203.0.113.10')['completed_handshakes']);
+        } finally {
+            unlink($path);
+        }
+    }
+
+    public function test_rst_after_handshake_is_distinguished_from_connection_refusal(): void
+    {
+        $path = tempnam(sys_get_temp_dir(), 'rst-pcap');
+        try {
+            $packets = [$this->packet('203.0.113.10', '198.51.100.1', 2), $this->packet('198.51.100.1', '203.0.113.10', 18, 443, 20000), $this->packet('203.0.113.10', '198.51.100.1', 16), $this->packet('198.51.100.1', '203.0.113.10', 20, 443, 20000)];
+            $packets[] = $this->packet('203.0.113.10', '198.51.100.2', 2);
+            $packets[] = substr_replace($this->packet('198.51.100.2', '203.0.113.10', 20, 443, 20000), pack('N', 101), 42, 4);
+            file_put_contents($path, $this->pcap($packets));
+            $s = app(PcapSummary::class)->summarize($path, '203.0.113.10');
+            $this->assertSame(1, $s['rst_before_handshake_flows']);
+            $this->assertSame(1, $s['rst_after_handshake_flows']);
+            $this->assertSame(0, $s['peer_groups'][0]['rst_before_handshake_flows']);
+            $this->assertSame(1, $s['peer_groups'][1]['rst_before_handshake_flows']);
         } finally {
             unlink($path);
         }
@@ -269,7 +287,7 @@ class EvidenceTest extends TestCase
     public function test_over_limit_full_text_fails_without_any_ai_call_or_automatic_fallback(): void
     {
         Http::preventStrayRequests();
-        $analysis = $this->analysisForPackets(array_fill(0, 40000, $this->packet('203.0.113.10', '1.1.1.1', 2)));
+        $analysis = $this->analysisForPackets(array_fill(0, 220000, $this->packet('203.0.113.10', '1.1.1.1', 2)));
         $job = new AnalyzeEvidence($analysis->id);
         $job->handle();
         $job->handle();
@@ -283,18 +301,51 @@ class EvidenceTest extends TestCase
         $this->assertArrayNotHasKey('api_key_cipher', $analysis->config_snapshot);
     }
 
-    public function test_complete_text_that_exceeds_json_budget_is_not_sent(): void
+    public function test_excerpt_sends_two_mib_of_complete_rows_and_full_file_statistics_once(): void
     {
-        Http::preventStrayRequests();
-        $analysis = $this->analysisForPackets(array_fill(0, 25000, $this->packet('203.0.113.10', '1.1.1.1', 2)));
+        Http::fake(['api.deepseek.com/*' => Http::response(['choices' => [['message' => ['content' => '部分逐包证据']]]])]);
+        $analysis = $this->analysisForPackets(array_fill(0, 40000, $this->packet('203.0.113.10', '1.1.1.1', 2)));
+        $config = $analysis->config_snapshot;
+        $config['evidence_mode'] = 'packet_excerpt';
+        $analysis->update(['config_snapshot' => $config]);
+        $job = new AnalyzeEvidence($analysis->id);
+        $job->handle();
+        $job->handle();
+        Http::assertSentCount(1);
+        Http::assertSent(function ($request) {
+            $e = json_decode($request['messages'][1]['content'], true);
+
+            return $e['coverage']['mode'] === 'packet_excerpt' && $e['coverage']['pcap_fully_read'] && $e['coverage']['frames_read'] === 40000
+                && ! $e['packet_text']['complete'] && $e['packet_text']['bytes'] <= PcapSummary::PACKET_TEXT_LIMIT
+                && $e['packet_text']['frames'] < 40000 && str_ends_with($e['packet_text']['text'], "\n");
+        });
+        $this->assertSame('completed', $analysis->fresh()->status);
+    }
+
+    public function test_full_text_larger_than_two_mib_is_sent_without_truncation(): void
+    {
+        Http::fake(['api.deepseek.com/*' => Http::response(['choices' => [['message' => ['content' => '全量报告']]]])]);
+        $analysis = $this->analysisForPackets(array_fill(0, 40000, $this->packet('203.0.113.10', '1.1.1.1', 2)));
         (new AnalyzeEvidence($analysis->id))->handle();
-        Http::assertNothingSent();
-        $analysis->refresh();
-        $this->assertSame('failed', $analysis->status);
-        $this->assertStringContainsString('发送上限', $analysis->last_error);
-        $this->assertTrue($analysis->evidence['coverage']['packet_text_complete']);
-        $this->assertFalse($analysis->evidence['coverage']['ai_call_attempted']);
-        $this->assertArrayNotHasKey('packet_text', $analysis->evidence);
+        Http::assertSentCount(1);
+        $this->assertSame('completed', $analysis->fresh()->status);
+        $this->assertTrue($analysis->fresh()->evidence['packet_text']['complete']);
+        $this->assertSame(40000, $analysis->fresh()->evidence['packet_text']['frames']);
+        $this->assertGreaterThan(PcapSummary::PACKET_TEXT_LIMIT, $analysis->fresh()->evidence['packet_text']['bytes']);
+    }
+
+    public function test_manual_capture_can_repeat_after_completion_but_active_task_and_automatic_cooldown_remain(): void
+    {
+        $event = $this->event();
+        $service = app(EventCorrelation::class);
+        $first = $service->requestCapture($event, '203.0.113.10');
+        $this->assertNull($service->requestCapture($event, '203.0.113.10'));
+        $first->update(['status' => 'uploaded']);
+        $this->assertNull($service->requestCapture($event, '203.0.113.10', 'auto'));
+        $second = $service->requestCapture($event, '203.0.113.10');
+        $this->assertNotNull($second);
+        $second->update(['status' => 'failed']);
+        $this->assertNotNull($service->requestCapture($event, '203.0.113.10'));
     }
 
     private function analysisForPackets(array $packets): AiAnalysis

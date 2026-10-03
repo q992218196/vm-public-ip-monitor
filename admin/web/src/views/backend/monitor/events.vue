@@ -199,19 +199,55 @@
                 ><el-button type="primary" :loading="reviewing" @click="review">保存审核结果</el-button></template
             ></el-dialog
         >
+        <el-dialog v-model="whitelistOpen" title="审核业务范围（30 天）" width="min(850px, 95vw)" :close-on-click-modal="false">
+            <el-alert
+                title="请逐项核实：下面是最近一小时窗口、近期完整抓包及之前已批准范围的目标与端口，不代表自动确认业务正常。"
+                type="warning"
+                :closable="false"
+            />
+            <el-table
+                v-loading="whitelistLoading"
+                :data="Object.entries(whitelistProfile).map(([ip, ports]) => ({ ip, ports }))"
+                border
+                max-height="420"
+            >
+                <el-table-column prop="ip" label="目标 IP" width="180" />
+                <el-table-column label="允许的目标端口"
+                    ><template #default="scope">{{ scope.row.ports.join(', ') }}</template></el-table-column
+                >
+            </el-table>
+            <p>每个目标只批准对应端口。新目标、未批准端口、强度超限或更强异常仍告警。重复审批会保留之前批准的范围；删除范围请到检测排除编辑。</p>
+            <p>Agent 1.2.0 提供每目标最多 128 个端口的完整范围；旧版截断证据仍可能要求复核，升级后再审核此范围。</p>
+            <template #footer
+                ><el-button @click="whitelistOpen = false">取消</el-button
+                ><el-button type="warning" :loading="whitelistSaving" :disabled="whitelistLoading" @click="saveWhitelist"
+                    >确认已核实，保存业务例外</el-button
+                ></template
+            >
+        </el-dialog>
+        <el-dialog v-model="downloadOpen" title="下载 PCAP" width="min(480px, 95vw)" :close-on-click-modal="false" :show-close="false">
+            <p>正在下载，持续传输不会在一分钟后取消。</p>
+            <el-progress :percentage="downloadPercent" />
+            <template #footer><el-button @click="cancelDownload">取消下载</el-button></template>
+        </el-dialog>
         <el-dialog v-model="aiRequestOpen" title="手动申请 AI 分析" width="min(700px, 95vw)" :close-on-click-modal="false">
             <p>接口：{{ detail?.ai?.endpoint }} · 模型：{{ detail?.ai?.model }}</p>
             <el-radio-group v-model="aiMode" class="ai-mode">
                 <el-radio value="summary" border>统计摘要（推荐）</el-radio>
                 <el-radio value="full_packets" border>完整逐包文本</el-radio>
+                <el-radio value="packet_excerpt" border>逐包文本前 2 MiB</el-radio>
             </el-radio-group>
             <p v-if="aiMode === 'summary'">发送端口分组统计、32 条连接样本、可见请求头、规则与采集质量。文本上限 128 KiB。</p>
+            <p v-else-if="aiMode === 'full_packets'">
+                逐帧转换整个已存储 PCAP 并发送。完整文本本地保护上限 16 MiB，最多解析 20 万帧／8 秒；无法完整转换时不调用 AI。
+                不自动截取、不自动分批；模型仍可能因 token 上下文限制拒绝请求。
+            </p>
             <p v-else>
-                逐帧转换整个已存储 PCAP，发送时间、方向、IP/端口、TCP 标志及序号、包长和可见请求线索。每帧一行，超出 2 MiB 发送上限、20 万帧或 8
-                秒解析上限时停止，不调用 AI，也不自动分批收费。
+                读取整个 PCAP，按文件顺序发送逐包文本的前 2 MiB（保留完整行），同时发送总体统计。明确标注截取范围，后续逐包文本不发送。 2 MiB
+                是本系统的文本保护值，不是 AI 接口上限；仍受模型 token 限制。超过 20 万帧或 8 秒而未读完整文件时不调用 AI。
             </p>
             <el-alert
-                title="两种模式都不外发原始载荷、查询参数值、Cookie、Authorization 或请求正文；不解密 HTTPS。可见路径仍可能含业务信息。"
+                title="三种模式都不外发原始载荷、查询参数值、Cookie、Authorization 或请求正文；不解密 HTTPS。可见路径仍可能含业务信息。"
                 type="info"
                 :closable="false"
             />
@@ -231,7 +267,11 @@
                     <p>模型：{{ report.model }} · 申请人 ID：{{ report.requested_by }} · 用量：{{ report.usage?.total_tokens ?? '未返回' }} tokens</p>
                     <el-descriptions v-if="report.evidence?.coverage" :column="2" border class="report-coverage">
                         <el-descriptions-item label="发送方式">{{
-                            report.evidence_mode === 'full_packets' ? '完整逐包文本' : '统计摘要'
+                            report.evidence_mode === 'full_packets'
+                                ? '完整逐包文本'
+                                : report.evidence_mode === 'packet_excerpt'
+                                  ? '逐包文本前 2 MiB'
+                                  : '统计摘要'
                         }}</el-descriptions-item>
                         <el-descriptions-item label="PCAP 读取">{{
                             report.evidence.coverage.pcap_fully_read ? '已读完整文件' : '未读完整文件'
@@ -240,10 +280,12 @@
                         <el-descriptions-item label="逐包文本"
                             >{{ report.evidence.coverage.packet_text_frames }} 帧 ·
                             {{ (report.evidence.coverage.packet_text_bytes / 1024).toFixed(1) }} KiB{{
-                                report.evidence_mode === 'full_packets'
+                                report.evidence_mode !== 'summary'
                                     ? report.evidence.coverage.packet_text_complete
                                         ? ' · 全部帧'
-                                        : ' · 未完成，未调用 AI'
+                                        : report.evidence_mode === 'packet_excerpt'
+                                          ? ' · 仅前段文本'
+                                          : ' · 未完成，未调用 AI'
                                     : ''
                             }}</el-descriptions-item
                         >
@@ -386,14 +428,23 @@
 </template>
 <script setup lang="ts">
 import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from 'element-plus'
 import createAxios from '/@/utils/axios'
 import TrafficEvidence from './TrafficEvidence.vue'
 import EventReviewReport from './EventReviewReport.vue'
 const AiReport = defineAsyncComponent(() => import('./AiReport.vue'))
+const whitelistOpen = ref(false)
+const whitelistProfile = ref<Record<string, number[]>>({})
+const whitelistFingerprint = ref('')
+const whitelistId = ref(0)
+const whitelistSaving = ref(false)
+const whitelistLoading = ref(false)
+const downloadOpen = ref(false)
+const downloadPercent = ref(0)
+let downloadController: AbortController | null = null
 const aiRequestOpen = ref(false)
 const aiCapture = ref<any>(null)
-const aiMode = ref<'summary' | 'full_packets'>('summary')
+const aiMode = ref<'summary' | 'full_packets' | 'packet_excerpt'>('summary')
 const evidenceOpen = ref<string[]>([])
 const statuses: Record<string, string> = { open: '待处理', acknowledged: '观察中', normal: '已核查正常', resolved: '已处理' }
 const names: Record<string, string> = {
@@ -615,15 +666,32 @@ async function review() {
     }
 }
 async function whitelist(id: number) {
-    const answer = await ElMessageBox.prompt(
-        '默认批准当前可见目标和端口。可填写已核实的目标 IP／CIDR（逗号分隔）。新目标、端口、强度超限、更强证据或截断样本仍告警，不停止检测。',
-        '定向业务例外（30 天）',
-        { inputPlaceholder: '留空使用当前目标；例如 198.51.100.0/24', inputType: 'textarea' }
-    )
-    const result = await api('whitelist', { id, target_cidrs: answer.value.split(/[\s,，]+/).filter(Boolean) }, 'post')
-    ElMessage.success(result.msg || '已保存定向业务例外')
-    load()
-    if (detailOpen.value) await refreshDetail()
+    whitelistLoading.value = true
+    whitelistOpen.value = true
+    whitelistProfile.value = {}
+    try {
+        const result = await api('whitelistPreview', { id })
+        whitelistId.value = id
+        whitelistProfile.value = result.data.target_ports || {}
+        whitelistFingerprint.value = result.data.fingerprint
+    } catch (error) {
+        whitelistOpen.value = false
+        throw error
+    } finally {
+        whitelistLoading.value = false
+    }
+}
+async function saveWhitelist() {
+    whitelistSaving.value = true
+    try {
+        const result = await api('whitelist', { id: whitelistId.value, fingerprint: whitelistFingerprint.value }, 'post')
+        ElMessage.success(result.msg || '已保存定向业务例外')
+        whitelistOpen.value = false
+        load()
+        if (detailOpen.value) await refreshDetail()
+    } finally {
+        whitelistSaving.value = false
+    }
 }
 async function capture() {
     capturing.value = true
@@ -635,14 +703,25 @@ async function capture() {
         capturing.value = false
     }
 }
+function cancelDownload() {
+    downloadController?.abort()
+}
 async function download(item: any) {
+    if (downloading.value) return
     downloading.value = item.id
+    downloadPercent.value = 0
+    downloadOpen.value = true
+    downloadController = new AbortController()
     try {
         const blob = await createAxios<any, Promise<Blob>>({
             url: '/admin/EventEvidence/download',
             params: { id: item.id },
             responseType: 'blob',
-            timeout: 60000,
+            timeout: 0,
+            signal: downloadController.signal,
+            onDownloadProgress: (event) => {
+                downloadPercent.value = event.total ? Math.min(100, Math.round((event.loaded / event.total) * 100)) : 0
+            },
         })
         if (blob.type.includes('json')) {
             ElMessage.error('下载失败，请重新登录后重试')
@@ -654,8 +733,13 @@ async function download(item: any) {
         a.download = item.id + '.pcap'
         a.click()
         URL.revokeObjectURL(url)
+    } catch (error: any) {
+        if (error?.code === 'ERR_CANCELED') ElMessage.info('已取消下载')
+        else throw error
     } finally {
         downloading.value = ''
+        downloadOpen.value = false
+        downloadController = null
     }
 }
 async function requestAi(item: any) {
@@ -745,6 +829,7 @@ onMounted(() => {
     load()
 })
 onBeforeUnmount(() => {
+    downloadController?.abort()
     clearTimeout(poll)
     generation++
     detailGeneration++
