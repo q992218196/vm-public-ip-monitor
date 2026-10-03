@@ -193,6 +193,9 @@ try {
   assert.ok((await page.locator(".el-dialog").textContent()).includes("11000, 11001, 11002"));
   await page.getByRole("button", {name: "取消", exact: true}).click();
   assert.ok((await page.locator(".el-table__header").first().textContent()).includes("主要告警"));
+  const headlineBox = await page.getByRole("button", {name: eventFixture.title, exact: true}).boundingBox();
+  const countBox = await page.getByRole("button", {name: "共 2 类命中，查看全部", exact: true}).boundingBox();
+  assert.ok(countBox.y >= headlineBox.y + headlineBox.height, "Other rule hits must remain visible below the headline");
   await page.getByRole("button", {name: "共 2 类命中，查看全部", exact: true}).click();
   await page.getByRole("heading", {name: "SMB 服务高频连接（待复核） · 103.123.132.239", exact: true}).waitFor();
   await page.getByRole("button", {name: "AI 分析", exact: true}).click();

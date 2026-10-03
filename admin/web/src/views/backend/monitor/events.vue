@@ -57,7 +57,11 @@
                             <el-button link type="primary" @click="filterBy(column.key, scope.row[column.key])">{{
                                 scope.row[column.key] || '—'
                             }}</el-button>
-                            <el-button v-if="column.key === 'title' && scope.row.kinds.length > 1" link @click="openDetail(scope.row.id)"
+                            <el-button
+                                v-if="column.key === 'title' && scope.row.kinds.length > 1"
+                                class="rule-count"
+                                link
+                                @click="openDetail(scope.row.id)"
                                 >共 {{ scope.row.kinds.length }} 类命中，查看全部</el-button
                             >
                         </template>
@@ -885,6 +889,13 @@ onBeforeUnmount(() => {
 }
 .clickable {
     cursor: pointer;
+}
+.rule-count {
+    display: flex;
+    width: fit-content;
+    margin: 6px 0 0;
+    font-size: 12px;
+    color: var(--el-text-color-secondary);
 }
 pre {
     white-space: pre-wrap;
