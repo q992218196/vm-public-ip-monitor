@@ -233,7 +233,7 @@ jobs:
           sudo chmod 600 /home/vm-monitor-server/storage/app/private/packet-evidence/00000000-0000-4000-8000-000000000003.pcap
           test "$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:8081/private-pcap/00000000-0000-4000-8000-000000000003.pcap)" = 404
           curl -fsS -H 'server: true' -H "batoken: $pcap_token" -D /tmp/pcap-headers -o /tmp/pcap-smoke 'http://127.0.0.1:8081/admin/EventEvidence/download?id=00000000-0000-4000-8000-000000000003'
-          cmp /tmp/pcap-smoke /home/vm-monitor-server/storage/app/private/packet-evidence/00000000-0000-4000-8000-000000000003.pcap
+          sudo cmp /tmp/pcap-smoke /home/vm-monitor-server/storage/app/private/packet-evidence/00000000-0000-4000-8000-000000000003.pcap
           grep -qi 'Cache-Control: no-store' /tmp/pcap-headers
           test "$(curl -fsS -H 'server: true' -H "batoken: $pcap_token" -H 'Range: bytes=0-1023' -o /tmp/pcap-range -w '%{http_code}' 'http://127.0.0.1:8081/admin/EventEvidence/download?id=00000000-0000-4000-8000-000000000003')" = 206
           test "$(wc -c </tmp/pcap-range)" = 1024
