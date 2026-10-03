@@ -9,6 +9,9 @@
                     >{{ evidence.value }} / {{ evidence.threshold }} {{ record.kind === 'udp_packet_rate' ? '包/秒' : '流' }}</el-descriptions-item
                 >
                 <el-descriptions-item label="UDP 出站流数">{{ sample.udp_flows_out ?? '未采集' }}（不同五元组）</el-descriptions-item>
+                <el-descriptions-item v-if="sample.udp_filter_version === 1" label="计入规则的流数／包数"
+                    >{{ sample.udp_non_dns_flows_out }} / {{ sample.udp_non_dns_packets_out }}（排除目标端口 53）</el-descriptions-item
+                >
                 <el-descriptions-item label="本采集窗口">{{ sample.observed_seconds ?? '—' }} 秒</el-descriptions-item>
                 <el-descriptions-item label="UDP 包数 出／入">{{ sample.udp_packets_out }} / {{ sample.udp_packets_in }}</el-descriptions-item>
                 <el-descriptions-item label="UDP 字节 出／入">{{ sample.udp_bytes_out }} / {{ sample.udp_bytes_in }} B</el-descriptions-item>

@@ -361,6 +361,9 @@ func (e *Engine) observeUDP(p packet.Packet, out bool) {
 	}
 	if out {
 		s.m.UDPPacketsOut++
+		if p.DstPort != 53 {
+			s.m.UDPNonDNSPacketsOut++
+		}
 		s.m.UDPBytesOut += uint64(p.Size)
 	} else {
 		s.m.UDPPacketsIn++
@@ -381,6 +384,9 @@ func (e *Engine) observeUDP(p packet.Packet, out bool) {
 			if len(e.udpFlows) < min(e.c.MaxFlows, 16384) {
 				e.udpFlows[flow] = true
 				s.m.UDPFlowsOut++
+				if p.DstPort != 53 {
+					s.m.UDPNonDNSFlowsOut++
+				}
 				if endpoint != nil {
 					endpoint.Flows++
 				}
@@ -577,6 +583,7 @@ func (e *Engine) Snapshot(now time.Time) wire.Batch {
 	}
 	for _, s := range e.ips {
 		s.m.UDPStatsVersion = 1
+		s.m.UDPFilterVersion = 1
 		udpEndpoints := make([]wire.UDPEndpoint, 0, len(s.udpEndpoints))
 		for _, endpoint := range s.udpEndpoints {
 			udpEndpoints = append(udpEndpoints, *endpoint)
@@ -591,6 +598,11 @@ func (e *Engine) Snapshot(now time.Time) wire.Batch {
 			return udpEndpoints[i].PeerPort < udpEndpoints[j].PeerPort
 		})
 		s.m.UDPEndpointsTruncated = s.m.UDPEndpointsTruncated || len(udpEndpoints) > 8
+		for _, endpoint := range udpEndpoints {
+			if endpoint.PeerPort != 53 && endpoint.PacketsOut > 0 && len(s.m.UDPNonDNSEndpoints) < 8 {
+				s.m.UDPNonDNSEndpoints = append(s.m.UDPNonDNSEndpoints, endpoint)
+			}
+		}
 		s.m.UDPEndpoints = udpEndpoints[:min(len(udpEndpoints), 8)]
 		s.m.ConnectionStatsVersion = 1
 		s.m.UniqueTargets = len(s.targets)

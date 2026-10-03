@@ -10,6 +10,9 @@ class ConnectionAssessment
     {
         if (in_array($kind, ['udp_flow_burst', 'udp_packet_rate'], true)) {
             $reasons = ['UDP 流数量或包速率达到阈值，只证明流量活跃，不能直接判断攻击', 'UDP 流按单采集窗口内不同五元组计数，重复包不增加流数，服务回复也可能计入出站流；不是连接握手或应用请求数'];
+            if (($sample['udp_filter_version'] ?? 0) === 1) {
+                $reasons[] = '两个 UDP 规则均排除目标端口 53；原始流量与抓包保留 DNS，源端口 53 的出站回复不在排除范围';
+            }
             $gaps = ['DNS、QUIC、游戏、音视频和业务突发都可能符合；无 TCP 握手，不能计算握手成功率或把双向包视为认证成功', '目标样本最多 8 条，包速率按实际覆盖窗口时长计算，不代表未采集时间的速率'];
             if (($sample['udp_flows_capped'] ?? false) || ($sample['udp_endpoints_truncated'] ?? false)) {
                 $gaps[] = 'UDP 状态触及限额或目标样本截断，计数是观察下界，业务例外不自动放行';

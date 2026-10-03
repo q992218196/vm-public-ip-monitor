@@ -461,9 +461,7 @@ const definitions: Record<string, Definition> = {
                 ...col('kind', '检测类型'),
                 type: 'select',
                 options: options({
-                    horizontal_scan: '横向扫描',
                     vertical_scan: '端口扫描',
-                    suspected_bruteforce: '认证端口重复连接',
                     ssh_connections: 'SSH 服务高频连接',
                     smb_connections: 'SMB 服务高频连接',
                     rdp_connections: 'RDP 服务高频连接',
@@ -508,9 +506,7 @@ const definitions: Record<string, Definition> = {
                 ...col('kind', '仅对此类型应用业务例外'),
                 type: 'select',
                 options: options({
-                    horizontal_scan: '横向扫描',
                     vertical_scan: '端口扫描',
-                    suspected_bruteforce: '认证端口重复连接',
                     ssh_connections: 'SSH 服务高频连接',
                     smb_connections: 'SMB 服务高频连接',
                     rdp_connections: 'RDP 服务高频连接',

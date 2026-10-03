@@ -43,6 +43,13 @@ class IngestController extends Controller
             'metrics.*.port_samples_truncated' => 'sometimes|boolean', 'metrics.*.endpoint_samples_truncated' => 'sometimes|boolean',
             'metrics.*.cardinality_capped' => 'required|boolean',
             'metrics.*.udp_stats_version' => 'sometimes|integer|in:1',
+            'metrics.*.udp_filter_version' => 'sometimes|integer|in:1',
+            ...collect(['udp_non_dns_flows_out', 'udp_non_dns_packets_out'])->mapWithKeys(fn ($f) => ["metrics.*.$f" => 'required_with:metrics.*.udp_filter_version|integer|min:0|max:1000000000000000'])->all(),
+            'metrics.*.udp_non_dns_endpoints' => 'sometimes|array|max:8',
+            'metrics.*.udp_non_dns_endpoints.*' => 'array:peer_ip,peer_port,flows,packets_out,packets_in,bytes_out,bytes_in',
+            'metrics.*.udp_non_dns_endpoints.*.peer_ip' => 'required|ip',
+            'metrics.*.udp_non_dns_endpoints.*.peer_port' => 'required|integer|min:0|max:65535|not_in:53',
+            ...collect(['flows', 'packets_out', 'packets_in', 'bytes_out', 'bytes_in'])->mapWithKeys(fn ($f) => ["metrics.*.udp_non_dns_endpoints.*.$f" => 'required|integer|min:0|max:1000000000000000'])->all(),
             'metrics.*.udp_flows_capped' => 'sometimes|boolean', 'metrics.*.udp_endpoints_truncated' => 'sometimes|boolean',
             ...collect(['udp_flows_out', 'udp_packets_out', 'udp_packets_in', 'udp_bytes_out', 'udp_bytes_in'])->mapWithKeys(fn ($f) => ["metrics.*.$f" => 'required_with:metrics.*.udp_stats_version|integer|min:0|max:1000000000000000'])->all(),
             'metrics.*.udp_endpoints' => 'sometimes|array|max:8',
@@ -123,6 +130,16 @@ class IngestController extends Controller
         }
         $v['health'] = $health + ['version' => $v['health']['version'], 'interfaces' => $v['health']['interfaces'] ?? [], 'update_error' => $v['health']['update_error'] ?? null];
         foreach ($v['metrics'] as $index => $metric) {
+            if (($metric['udp_filter_version'] ?? 0) === 1) {
+                if (($metric['udp_stats_version'] ?? 0) !== 1 || $metric['udp_non_dns_flows_out'] > $metric['udp_non_dns_packets_out'] || $metric['udp_non_dns_flows_out'] > $metric['udp_flows_out'] || $metric['udp_non_dns_packets_out'] > $metric['udp_packets_out']) {
+                    throw ValidationException::withMessages(["metrics.$index.udp_filter_version" => '排除目标端口 53 后的 UDP 统计不一致']);
+                }
+                foreach ($metric['udp_non_dns_endpoints'] ?? [] as $endpoint) {
+                    if ($endpoint['flows'] > $endpoint['packets_out'] || $endpoint['flows'] > $metric['udp_non_dns_flows_out'] || $endpoint['packets_out'] > $metric['udp_non_dns_packets_out'] || $endpoint['packets_in'] > $metric['udp_packets_in'] || $endpoint['bytes_out'] > $metric['udp_bytes_out'] || $endpoint['bytes_in'] > $metric['udp_bytes_in']) {
+                        throw ValidationException::withMessages(["metrics.$index.udp_non_dns_endpoints" => '非 DNS 端点统计不一致']);
+                    }
+                }
+            }
             if (($metric['udp_stats_version'] ?? 0) === 1) {
                 if ($metric['udp_flows_out'] > $metric['udp_packets_out'] || $metric['udp_packets_out'] > $metric['packets_out'] || $metric['udp_packets_in'] > $metric['packets_in'] || $metric['udp_bytes_out'] > $metric['bytes_out'] || $metric['udp_bytes_in'] > $metric['bytes_in']) {
                     throw ValidationException::withMessages(["metrics.$index.udp_flows_out" => 'UDP 统计超过包数或整体流量']);

@@ -30,7 +30,7 @@ class Analyzer
         $p = $batch->payload;
         $at = $batch->window_end;
         $this->observed = [];
-        $this->rules = Rule::where('enabled', true)->where(fn ($q) => $q->whereNull('node_id')->orWhere('node_id', $node->id))->get();
+        $this->rules = Rule::where('enabled', true)->whereNotIn('kind', ['horizontal_scan', 'suspected_bruteforce'])->where(fn ($q) => $q->whereNull('node_id')->orWhere('node_id', $node->id))->get();
         $this->exclusions = Exclusion::where('expires_at', '>', $at)->where(fn ($q) => $q->whereNull('node_id')->orWhere('node_id', $node->id))->get();
         foreach ($p['metrics'] as $m) {
             $m['capture_quality'] = array_intersect_key($p['health'], array_flip(['captured', 'kernel_drops', 'decode_skipped', 'state_dropped', 'reassembly_dropped', 'interfaces', 'version']));
@@ -149,16 +149,20 @@ class Analyzer
         foreach ($this->rules as $rule) {
             $cutoff = $batch->window_end->copy()->subSeconds($rule->window_seconds);
             $rows = $history->filter(fn ($row) => $row->window_end->gt($cutoff));
+            if (in_array($rule->kind, ['udp_flow_burst', 'udp_packet_rate'], true)) {
+                $rows = $rows->filter(fn ($row) => ($row->evidence['udp_filter_version'] ?? 0) === 1);
+                if ($rows->isEmpty()) {
+                    continue;
+                }
+            }
             $observedStart = $rows->min('window_start');
             $observedEnd = $rows->max('window_end');
             $serviceSamples = isset(ServiceConnectionRules::RULES[$rule->kind]) ? $rows->map(fn ($row) => ['row' => $row, 'sample' => app(ServiceConnectionRules::class)->sample($rule->kind, $row->evidence)])->filter(fn ($entry) => $entry['sample'] !== null)->sortByDesc(fn ($entry) => $entry['sample']['tcp_attempts']) : collect();
             $serviceSample = $serviceSamples->first();
             $value = $serviceSample ? $serviceSample['sample']['tcp_attempts'] : match ($rule->kind) {
-                'udp_flow_burst' => (int) $rows->max(fn ($m) => ($m->evidence['udp_stats_version'] ?? 0) === 1 ? ($m->evidence['udp_flows_out'] ?? 0) : 0),
-                'udp_packet_rate' => (int) ($rows->sum(fn ($m) => ($m->evidence['udp_stats_version'] ?? 0) === 1 ? ($m->evidence['udp_packets_out'] ?? 0) : 0) / max(1, $rows->filter(fn ($m) => ($m->evidence['udp_stats_version'] ?? 0) === 1)->sum(fn ($m) => $m->window_start->diffInSeconds($m->window_end)))),
-                'horizontal_scan' => (int) $rows->max(fn ($m) => $m->evidence['unique_targets'] ?? 0),
+                'udp_flow_burst' => (int) $rows->max(fn ($m) => $m->evidence['udp_non_dns_flows_out'] ?? 0),
+                'udp_packet_rate' => (int) ($rows->sum(fn ($m) => $m->evidence['udp_non_dns_packets_out'] ?? 0) / max(1, $rows->sum(fn ($m) => $m->window_start->diffInSeconds($m->window_end)))),
                 'vertical_scan' => (int) $rows->max(fn ($m) => $m->evidence['max_ports_per_target'] ?? 0),
-                'suspected_bruteforce' => (int) $rows->max(fn ($m) => $m->evidence['auth_attempts'] ?? 0),
                 'single_target_attempts' => (int) $rows->max(fn ($m) => $m->evidence['max_attempts_per_target'] ?? 0),
                 'tcp_connection_burst' => (int) $rows->sum('tcp_attempts'),
                 'egress_mbps' => (int) ($rows->sum('bytes_out') * 8 / max(1, $rows->sum(fn ($m) => $m->window_start->diffInSeconds($m->window_end))) / 1000000),
@@ -168,22 +172,19 @@ class Analyzer
                 continue;
             }
             $title = match ($rule->kind) {
-                'horizontal_scan' => '疑似对外横向扫描','vertical_scan' => '疑似对外端口扫描','suspected_bruteforce' => '疑似认证服务高频连接',
+                'vertical_scan' => '疑似对外端口扫描',
                 'single_target_attempts' => '单目标高频连接','tcp_connection_burst' => 'TCP 连接突增',default => '出站流量超出阈值'
             };
             $note = match ($rule->kind) {
-                'horizontal_scan', 'vertical_scan' => '仅当前观察节点；跨窗口取最大值，目标/端口数是保守下界',
-                'suspected_bruteforce' => '按单目标认证端口连接计数，不代表登录失败或密码爆破已发生',
+                'vertical_scan' => '仅当前观察节点；跨窗口取最大值，目标/端口数是保守下界',
                 'single_target_attempts' => '按单目标 TCP 发起计数，可能是正常重连；不代表登录失败',
                 'tcp_connection_burst' => '按窗口累积 TCP 发起计数，可能包含正常高并发连接',
                 default => '按当前观察节点估算的出站速率',
             };
             $sample = match ($rule->kind) {
-                'udp_flow_burst' => $rows->filter(fn ($row) => ($row->evidence['udp_stats_version'] ?? 0) === 1)->sortByDesc(fn ($row) => $row->evidence['udp_flows_out'] ?? 0)->first(),
-                'udp_packet_rate' => $rows->filter(fn ($row) => ($row->evidence['udp_stats_version'] ?? 0) === 1)->sortByDesc(fn ($row) => ($row->evidence['udp_packets_out'] ?? 0) / max(1, $row->window_start->diffInSeconds($row->window_end)))->first(),
-                'horizontal_scan' => $rows->sortByDesc(fn ($row) => $row->evidence['unique_targets'] ?? 0)->first(),
+                'udp_flow_burst' => $rows->sortByDesc(fn ($row) => $row->evidence['udp_non_dns_flows_out'] ?? 0)->first(),
+                'udp_packet_rate' => $rows->sortByDesc(fn ($row) => ($row->evidence['udp_non_dns_packets_out'] ?? 0) / max(1, $row->window_start->diffInSeconds($row->window_end)))->first(),
                 'vertical_scan' => $rows->sortByDesc(fn ($row) => $row->evidence['max_ports_per_target'] ?? 0)->first(),
-                'suspected_bruteforce' => $rows->sortByDesc(fn ($row) => $row->evidence['auth_attempts'] ?? 0)->first(),
                 'single_target_attempts' => $rows->sortByDesc(fn ($row) => $row->evidence['max_attempts_per_target'] ?? 0)->first(),
                 default => $rows->last(),
             };
@@ -192,7 +193,9 @@ class Analyzer
             }
             $sampleEvidence = $serviceSample ? $serviceSample['sample'] : ($sample?->evidence ?? []);
             if (str_starts_with($rule->kind, 'udp_')) {
-                $udp = $sampleEvidence['udp_endpoints'] ?? [];
+                $udp = $sampleEvidence['udp_non_dns_endpoints'] ?? [];
+                $sampleEvidence['udp_endpoints'] = $udp;
+                $sampleEvidence['udp_excluded_destination_ports'] = [53];
                 $sampleEvidence['targets'] = array_values(array_unique(array_column($udp, 'peer_ip')));
                 $sampleEvidence['ports'] = array_values(array_unique(array_column($udp, 'peer_port')));
                 $sampleEvidence['target_endpoints'] = [];

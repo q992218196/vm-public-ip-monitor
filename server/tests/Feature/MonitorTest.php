@@ -23,6 +23,60 @@ class MonitorTest extends TestCase
 {
     use RefreshDatabase;
 
+    public function test_retired_rules_are_removed_and_stale_configurations_do_not_detect(): void
+    {
+        $this->seed(MonitorSeeder::class);
+        $this->assertDatabaseMissing('rules', ['kind' => 'horizontal_scan']);
+        $this->assertDatabaseMissing('rules', ['kind' => 'suspected_bruteforce']);
+        foreach (['horizontal_scan', 'suspected_bruteforce'] as $kind) {
+            Rule::create(['name' => 'Retired rule', 'kind' => $kind, 'threshold' => 1, 'severity' => 'high']);
+        }
+        $node = $this->node();
+        $payload = $this->payload();
+        $payload['metrics'][0]['auth_attempts'] = 100;
+        $this->upload($node, $payload)->assertOk();
+        ProcessBatch::dispatchSync(Batch::firstOrFail()->id);
+        $this->assertDatabaseMissing('alerts', ['kind' => 'horizontal_scan']);
+        $this->assertDatabaseMissing('alerts', ['kind' => 'suspected_bruteforce']);
+        $this->assertDatabaseCount('traffic_metrics', 1);
+        $migration = require database_path('migrations/2026_10_03_160000_remove_retired_connection_rules.php');
+        $migration->up();
+        $migration->up();
+        $this->assertDatabaseMissing('rules', ['kind' => 'horizontal_scan']);
+        $this->assertDatabaseMissing('rules', ['kind' => 'suspected_bruteforce']);
+        $this->assertDatabaseHas('rules', ['kind' => 'smb_connections']);
+    }
+
+    public function test_dns_and_legacy_udp_windows_never_trigger_udp_quantity_rules(): void
+    {
+        $this->seed(MonitorSeeder::class);
+        Rule::whereIn('kind', ['udp_flow_burst', 'udp_packet_rate'])->update(['threshold' => 1]);
+        $node = $this->node();
+        foreach ([false, true] as $filtered) {
+            $payload = $this->payload();
+            $payload['metrics'][0] = array_replace($payload['metrics'][0], [
+                'packets_out' => 10000, 'packets_in' => 0, 'bytes_out' => 400000, 'bytes_in' => 0,
+                'udp_stats_version' => 1, 'udp_flows_out' => 2000, 'udp_packets_out' => 10000, 'udp_packets_in' => 0,
+                'udp_bytes_out' => 400000, 'udp_bytes_in' => 0,
+                'udp_endpoints' => [['peer_ip' => '1.1.1.1', 'peer_port' => 53, 'flows' => 2000, 'packets_out' => 10000, 'packets_in' => 0, 'bytes_out' => 400000, 'bytes_in' => 0]],
+            ]);
+            if ($filtered) {
+                $payload['metrics'][0] += ['udp_filter_version' => 1, 'udp_non_dns_flows_out' => 0, 'udp_non_dns_packets_out' => 0];
+            }
+            $this->upload($node, $payload)->assertOk();
+            ProcessBatch::dispatchSync(Batch::where('batch_id', $payload['batch_id'])->firstOrFail()->id);
+        }
+        $this->assertDatabaseMissing('alerts', ['kind' => 'udp_flow_burst']);
+        $this->assertDatabaseMissing('alerts', ['kind' => 'udp_packet_rate']);
+        $this->assertDatabaseCount('traffic_metrics', 2);
+        $payload['batch_id'] = Str::uuid()->toString();
+        $payload['metrics'][0]['udp_non_dns_packets_out'] = 10001;
+        $this->upload($node, $payload)->assertUnprocessable();
+        $payload['metrics'][0]['udp_non_dns_packets_out'] = 0;
+        unset($payload['metrics'][0]['udp_non_dns_flows_out']);
+        $this->upload($node, $payload)->assertUnprocessable();
+    }
+
     private string $token = 'abcdefghijklmnopqrstuvwxyz0123456789abcdef';
 
     private function node(array $cidrs = ['203.0.113.0/24', '2001:db8::/48']): Node
@@ -95,6 +149,7 @@ class MonitorTest extends TestCase
         $this->seed(MonitorSeeder::class);
         $n = $this->node();
         $p = $this->payload();
+        $p['metrics'][0]['max_ports_per_target'] = 50;
         $this->upload($n, $p)->assertOk()->assertJson(['accepted' => true, 'duplicate' => false]);
         $this->upload($n, $p)->assertOk()->assertJson(['duplicate' => true]);
         $this->assertDatabaseCount('batches', 1);
@@ -103,7 +158,7 @@ class MonitorTest extends TestCase
         ProcessBatch::dispatchSync(Batch::first()->id);
         $this->assertDatabaseCount('traffic_metrics', 1);
         $this->assertDatabaseCount('websites', 1);
-        $this->assertDatabaseHas('alerts', ['kind' => 'horizontal_scan']);
+        $this->assertDatabaseHas('alerts', ['kind' => 'vertical_scan']);
         $this->assertNull(Batch::first()->payload);
     }
 
@@ -125,6 +180,7 @@ class MonitorTest extends TestCase
         $this->seed(MonitorSeeder::class);
         $node = $this->node();
         $payload = $this->payload();
+        $payload['metrics'][0]['max_ports_per_target'] = 50;
         $payload['health'] = ['version' => '1.0.0', 'captured' => 10000, 'kernel_drops' => 0, 'state_dropped' => 0, 'decode_skipped' => 0];
         $payload['metrics'][0] += ['connection_stats_version' => 1, 'synack_replies' => 100, 'completed_handshakes' => 90, 'rst_replies' => 10, 'mature_attempts' => 110, 'mature_no_reply' => 10,
             'port_scan_targets' => [['peer_ip' => '192.0.2.1', 'port_count' => 2, 'ports' => [22, 443], 'truncated' => false]]];
@@ -136,7 +192,7 @@ class MonitorTest extends TestCase
         $this->upload($node, $invalid)->assertUnprocessable();
         $this->upload($node, $payload)->assertOk();
         ProcessBatch::dispatchSync(Batch::firstOrFail()->id);
-        $alert = Alert::where('kind', 'horizontal_scan')->firstOrFail();
+        $alert = Alert::where('kind', 'vertical_scan')->firstOrFail();
         $this->assertSame('medium', $alert->severity);
         $this->assertSame('paired_transport', $alert->evidence['confidence']);
         $this->assertSame(10000, $alert->evidence['sample']['capture_quality']['captured']);
@@ -169,63 +225,6 @@ class MonitorTest extends TestCase
         $this->assertSame($end->copy()->subSeconds(30)->toIso8601String(), $evidence['sample_window_start']);
     }
 
-    public function test_horizontal_scan_with_many_replied_bidirectional_connections_is_review_level(): void
-    {
-        $this->seed(MonitorSeeder::class);
-        $node = $this->node();
-        $payload = $this->payload();
-        $payload['metrics'][0] = array_replace($payload['metrics'][0], [
-            'bytes_out' => 3492528, 'bytes_in' => 3657616,
-            'tcp_attempts' => 113, 'unique_targets' => 112,
-            'max_ports_per_target' => 1, 'max_attempts_per_target' => 2,
-            'synack_replies' => 100,
-        ]);
-        $this->upload($node, $payload)->assertOk();
-        ProcessBatch::dispatchSync(Batch::first()->id);
-        $alert = Alert::where('kind', 'horizontal_scan')->firstOrFail();
-        $this->assertSame('medium', $alert->severity);
-        $this->assertSame('limited_behavior', $alert->evidence['confidence']);
-        $this->assertSame(100, $alert->evidence['sample']['synack_replies']);
-    }
-
-    public function test_horizontal_scan_without_paired_evidence_requires_review(): void
-    {
-        $this->seed(MonitorSeeder::class);
-        $node = $this->node();
-        $payload = $this->payload();
-        $payload['metrics'][0]['synack_replies'] = 0;
-        $this->upload($node, $payload)->assertOk();
-        ProcessBatch::dispatchSync(Batch::first()->id);
-        $this->assertSame('medium', Alert::where('kind', 'horizontal_scan')->firstOrFail()->severity);
-    }
-
-    public function test_replied_web_fanout_with_hotspot_is_not_high_scan_and_can_be_reassessed(): void
-    {
-        $this->seed(MonitorSeeder::class);
-        $node = $this->node();
-        foreach ([[1313, 1301, 232, 6], [386, 383, 123, 203]] as [$attempts, $replies, $targets, $hotspot]) {
-            $payload = $this->payload();
-            $payload['metrics'][0] = array_replace($payload['metrics'][0], [
-                'tcp_attempts' => $attempts, 'synack_replies' => $replies, 'unique_targets' => $targets,
-                'max_attempts_per_target' => $hotspot, 'max_ports_per_target' => 1, 'ports' => [443],
-            ]);
-            $this->upload($node, $payload)->assertOk();
-            ProcessBatch::dispatchSync(Batch::where('batch_id', $payload['batch_id'])->firstOrFail()->id);
-            $alert = Alert::where('kind', 'horizontal_scan')->firstOrFail();
-            $this->assertSame('medium', $alert->severity);
-            $this->assertSame('多目标连接（待复核）', $alert->title);
-            $this->assertNull($alert->evidence['connection_analysis']['completion_ratio']);
-        }
-        $this->assertDatabaseHas('alerts', ['kind' => 'single_target_attempts']);
-        $alert->update(['severity' => 'high']);
-        $this->artisan('monitor:reassess-scans')->assertSuccessful();
-        $alert->refresh();
-        $this->assertSame('medium', $alert->severity);
-        $alert->update(['status' => 'resolved', 'severity' => 'high']);
-        $this->artisan('monitor:reassess-scans')->assertSuccessful();
-        $this->assertSame('high', $alert->fresh()->severity);
-    }
-
     public function test_inconsistent_handshake_counts_do_not_imply_success(): void
     {
         $assessment = app(ScanAssessment::class)->assess(['tcp_attempts' => 100, 'synack_replies' => 101, 'max_ports_per_target' => 1]);
@@ -254,25 +253,6 @@ class MonitorTest extends TestCase
         $this->assertFalse(Schema::hasTable('password_reset_tokens'));
     }
 
-    public function test_sparse_single_port_fanout_does_not_imply_attack_from_missing_replies(): void
-    {
-        $this->seed(MonitorSeeder::class);
-        $node = $this->node();
-        $payload = $this->payload();
-        $payload['metrics'][0] = array_replace($payload['metrics'][0], [
-            'bytes_out' => 2097780, 'bytes_in' => 2142215,
-            'tcp_attempts' => 103, 'unique_targets' => 102,
-            'max_ports_per_target' => 1, 'max_attempts_per_target' => 2,
-            'synack_replies' => 13,
-        ]);
-        $this->upload($node, $payload)->assertOk();
-        ProcessBatch::dispatchSync(Batch::firstOrFail()->id);
-        $alert = Alert::where('kind', 'horizontal_scan')->firstOrFail();
-        $this->assertSame('medium', $alert->severity);
-        $this->assertSame('limited_behavior', $alert->evidence['confidence']);
-        $this->assertSame(13, $alert->evidence['connection_analysis']['synack_replies']);
-    }
-
     public function test_legacy_ip_exclusion_requires_target_scope_and_preserves_metrics(): void
     {
         $this->seed(MonitorSeeder::class);
@@ -285,7 +265,7 @@ class MonitorTest extends TestCase
         $payload['metrics'][0]['max_ports_per_target'] = 50;
         $this->upload($node, $payload)->assertOk();
         ProcessBatch::dispatchSync(Batch::firstOrFail()->id);
-        $this->assertDatabaseHas('alerts', ['kind' => 'horizontal_scan']);
+        $this->assertDatabaseMissing('alerts', ['kind' => 'horizontal_scan']);
         $this->assertDatabaseHas('alerts', ['kind' => 'vertical_scan']);
         $this->assertDatabaseCount('traffic_metrics', 1);
     }
@@ -328,7 +308,7 @@ class MonitorTest extends TestCase
         ]];
         $this->upload($node, $payload)->assertOk();
         ProcessBatch::dispatchSync(Batch::firstOrFail()->id);
-        $this->assertDatabaseCount('alerts', 8);
+        $this->assertDatabaseCount('alerts', 6);
         foreach (Alert::all() as $alert) {
             Exclusion::create(['node_id' => $node->id, 'cidr' => '203.0.113.10/32',
                 'kind' => $alert->kind, 'reason' => '业务复核', 'expires_at' => now()->addDays(30)]);
@@ -336,8 +316,8 @@ class MonitorTest extends TestCase
         $payload['batch_id'] = Str::uuid()->toString();
         $this->upload($node, $payload)->assertOk();
         ProcessBatch::dispatchSync(Batch::where('batch_id', $payload['batch_id'])->firstOrFail()->id);
-        $this->assertDatabaseCount('alerts', 8);
-        $this->assertSame(16, (int) Alert::sum('occurrences'));
+        $this->assertDatabaseCount('alerts', 6);
+        $this->assertSame(12, (int) Alert::sum('occurrences'));
         $this->assertDatabaseCount('traffic_metrics', 2);
         $this->assertDatabaseCount('protocol_observations', 4);
         $this->assertDatabaseCount('websites', 1);
@@ -346,7 +326,7 @@ class MonitorTest extends TestCase
         $payload['batch_id'] = Str::uuid()->toString();
         $this->upload($otherNode, $payload)->assertOk();
         ProcessBatch::dispatchSync(Batch::where('batch_id', $payload['batch_id'])->firstOrFail()->id);
-        $this->assertSame(8, Alert::where('node_id', $otherNode->id)->count());
+        $this->assertSame(6, Alert::where('node_id', $otherNode->id)->count());
     }
 
     public function test_node_health_whitelist_is_scoped_by_node_kind_and_expiry(): void
@@ -356,11 +336,12 @@ class MonitorTest extends TestCase
         $exclusion = Exclusion::create(['node_id' => $node->id, 'cidr' => null,
             'kind' => 'capture_degraded', 'reason' => '维护', 'expires_at' => now()->addDays(30)]);
         $payload = $this->payload();
+        $payload['metrics'][0]['max_ports_per_target'] = 50;
         $payload['health']['kernel_drops'] = 1;
         $this->upload($node, $payload)->assertOk();
         ProcessBatch::dispatchSync(Batch::firstOrFail()->id);
         $this->assertDatabaseMissing('alerts', ['kind' => 'capture_degraded']);
-        $this->assertDatabaseHas('alerts', ['kind' => 'horizontal_scan']);
+        $this->assertDatabaseHas('alerts', ['kind' => 'vertical_scan']);
         $this->assertSame(1, $node->fresh()->health['kernel_drops']);
         $node->update(['last_seen_at' => now()->subHour()]);
         $this->artisan('monitor:maintain')->assertSuccessful();
@@ -680,10 +661,12 @@ class MonitorTest extends TestCase
         $this->assertDatabaseMissing('alerts', ['kind' => 'udp_flow_burst']);
         $payload = $this->payload();
         $payload['metrics'][0] = array_replace($payload['metrics'][0], [
-            'udp_stats_version' => 1, 'udp_flows_out' => 3, 'udp_packets_out' => 600, 'udp_packets_in' => 20,
-            'udp_bytes_out' => 24000, 'udp_bytes_in' => 800, 'udp_flows_capped' => false, 'udp_endpoints_truncated' => false,
-            'packets_out' => 600, 'packets_in' => 20, 'bytes_out' => 24000, 'bytes_in' => 800,
-            'udp_endpoints' => [['peer_ip' => '198.51.100.1', 'peer_port' => 53, 'flows' => 3, 'packets_out' => 600, 'packets_in' => 20, 'bytes_out' => 24000, 'bytes_in' => 800]],
+            'udp_stats_version' => 1, 'udp_flows_out' => 1003, 'udp_packets_out' => 10600, 'udp_packets_in' => 20,
+            'udp_filter_version' => 1, 'udp_non_dns_flows_out' => 3, 'udp_non_dns_packets_out' => 600,
+            'udp_bytes_out' => 424000, 'udp_bytes_in' => 800, 'udp_flows_capped' => false, 'udp_endpoints_truncated' => false,
+            'packets_out' => 10600, 'packets_in' => 20, 'bytes_out' => 424000, 'bytes_in' => 800,
+            'udp_endpoints' => [['peer_ip' => '198.51.100.1', 'peer_port' => 53, 'flows' => 1000, 'packets_out' => 10000, 'packets_in' => 0, 'bytes_out' => 400000, 'bytes_in' => 0]],
+            'udp_non_dns_endpoints' => [['peer_ip' => '198.51.100.2', 'peer_port' => 443, 'flows' => 3, 'packets_out' => 600, 'packets_in' => 20, 'bytes_out' => 24000, 'bytes_in' => 800]],
         ]);
         $this->upload($node, $payload)->assertOk();
         ProcessBatch::dispatchSync(Batch::latest('id')->first()->id);
@@ -692,14 +675,22 @@ class MonitorTest extends TestCase
             $this->assertSame($value, $alert->evidence['value']);
             $this->assertSame('low', $alert->severity);
             $this->assertSame('UDP', $alert->evidence['sample']['transport']);
-            $this->assertSame([53], $alert->evidence['sample']['ports']);
+            $this->assertSame([443], $alert->evidence['sample']['ports']);
+            $this->assertSame([53], $alert->evidence['sample']['udp_excluded_destination_ports']);
+            $this->assertSame(10600, $alert->evidence['sample']['udp_packets_out']);
             $this->assertSame([], $alert->evidence['sample']['outbound_endpoints']);
             $this->assertStringContainsString('不能直接判断攻击', $alert->evidence['note']);
         }
         $payload['batch_id'] = Str::uuid()->toString();
-        $payload['metrics'][0]['udp_flows_out'] = 601;
+        $payload['metrics'][0]['udp_flows_out'] = 10601;
         $this->upload($node, $payload)->assertUnprocessable();
-        $payload['metrics'][0]['udp_flows_out'] = 3;
+        $payload['metrics'][0]['udp_flows_out'] = 1003;
+        $invalid = $payload;
+        $invalid['metrics'][0]['udp_non_dns_endpoints'][0]['peer_port'] = 53;
+        $this->upload($node, $invalid)->assertUnprocessable();
+        $invalid = $payload;
+        $invalid['metrics'][0]['udp_non_dns_flows_out'] = 601;
+        $this->upload($node, $invalid)->assertUnprocessable();
         $payload['metrics'][0]['udp_endpoints'] = array_fill(0, 9, $payload['metrics'][0]['udp_endpoints'][0]);
         $this->upload($node, $payload)->assertUnprocessable();
     }

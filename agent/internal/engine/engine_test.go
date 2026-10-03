@@ -291,6 +291,70 @@ func TestUDPStateCapDoesNotStopPacketCountingOrConsumeTCPStates(t *testing.T) {
 		t.Fatalf("UDP cap interferes with counting/TCP: %+v", m)
 	}
 }
+func TestUDPRulesExcludeDestination53OnlyAndReset(t *testing.T) {
+	for _, addresses := range [][2]string{{"203.0.113.1", "192.0.2.1"}, {"2001:db8::1", "2001:db9::1"}} {
+		now := time.Now()
+		e := New(cfg(), now)
+		send := func(sp, dp uint16, iface string) {
+			p := udpFrame(addresses[0], addresses[1], sp, dp, []byte("test"))
+			e.Process(p, len(p), iface, now)
+		}
+		send(40000, 53, "a")
+		send(40000, 53, "a")
+		send(40001, 53, "a")
+		send(40000, 443, "a")
+		send(40000, 443, "b") // Duplicate seen on another interface.
+		send(40000, 443, "a")
+		send(53, 40002, "a") // A DNS server reply is not a destination-53 query.
+		m := e.Snapshot(now.Add(30 * time.Second)).Metrics[0]
+		if m.UDPFilterVersion != 1 || m.UDPFlowsOut != 4 || m.UDPPacketsOut != 6 || m.UDPNonDNSFlowsOut != 2 || m.UDPNonDNSPacketsOut != 3 || len(m.UDPNonDNSEndpoints) != 2 {
+			t.Fatalf("destination-53 filter/dedup: %+v", m)
+		}
+		for _, endpoint := range m.UDPNonDNSEndpoints {
+			if endpoint.PeerPort == 53 {
+				t.Fatal("DNS query leaked into rule evidence")
+			}
+		}
+		now = now.Add(31 * time.Second)
+		send(40000, 53, "a")
+		m = e.Snapshot(now.Add(30 * time.Second)).Metrics[0]
+		if m.UDPNonDNSFlowsOut != 0 || m.UDPNonDNSPacketsOut != 0 || len(m.UDPNonDNSEndpoints) != 0 || m.UDPPacketsOut != 1 {
+			t.Fatalf("filtered counters did not reset: %+v", m)
+		}
+	}
+}
+
+func TestUDPDNSCapDoesNotHideNonDNSPacketRate(t *testing.T) {
+	now := time.Now()
+	c := cfg()
+	c.MaxFlows = 1
+	e := New(c, now)
+	for _, port := range []uint16{53, 443, 443} {
+		p := udpFrame("203.0.113.1", "192.0.2.1", 40000, port, nil)
+		e.Process(p, len(p), "a", now)
+	}
+	m := e.Snapshot(now.Add(30 * time.Second)).Metrics[0]
+	if !m.UDPFlowsCapped || m.UDPNonDNSFlowsOut != 0 || m.UDPNonDNSPacketsOut != 2 || m.UDPPacketsOut != 3 {
+		t.Fatalf("capped flows must remain a lower bound; packet rate must continue: %+v", m)
+	}
+}
+func TestUDPNonDNSEvidenceSurvivesDNSHeavyTopSamples(t *testing.T) {
+	now := time.Now()
+	e := New(cfg(), now)
+	for i := 1; i <= 10; i++ {
+		peer := fmt.Sprintf("192.0.2.%d", i)
+		p := udpFrame("203.0.113.1", peer, 40000, 53, nil)
+		for j := 0; j < 3; j++ {
+			e.Process(p, len(p), "a", now)
+		}
+	}
+	p := udpFrame("203.0.113.1", "192.0.2.100", 40000, 443, nil)
+	e.Process(p, len(p), "a", now)
+	m := e.Snapshot(now.Add(30 * time.Second)).Metrics[0]
+	if len(m.UDPEndpoints) != 8 || len(m.UDPNonDNSEndpoints) != 1 || m.UDPNonDNSEndpoints[0].PeerPort != 443 || m.UDPNonDNSFlowsOut != 1 || m.UDPNonDNSPacketsOut != 1 {
+		t.Fatalf("raw DNS top samples must not hide filtered evidence: %+v", m)
+	}
+}
 func TestVPNRequiresMatchingBidirectionalHandshake(t *testing.T) {
 	now := time.Now()
 	e := New(cfg(), now)

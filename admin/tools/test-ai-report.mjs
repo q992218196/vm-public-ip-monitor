@@ -112,6 +112,9 @@ try {
         sample: {
           transport: "UDP",
           observed_seconds: 30,
+          udp_filter_version: 1,
+          udp_non_dns_flows_out: 1,
+          udp_non_dns_packets_out: 200,
           udp_flows_out: 2,
           udp_packets_out: 600,
           udp_packets_in: 20,
@@ -120,9 +123,9 @@ try {
           udp_endpoints: [
             {
               peer_ip: "198.51.100.1",
-              peer_port: 53,
-              flows: 2,
-              packets_out: 600,
+              peer_port: 443,
+              flows: 1,
+              packets_out: 200,
               packets_in: 20,
               bytes_out: 24000,
               bytes_in: 800,
@@ -133,6 +136,8 @@ try {
     }),
   );
   await page.getByText("UDP 出站流数", { exact: true }).waitFor();
+  await page.getByText("计入规则的流数／包数", { exact: true }).waitFor();
+  assert.ok((await page.locator("body").textContent()).includes("1 / 200（排除目标端口 53）"));
   assert.equal(await page.getByText("完整握手", { exact: true }).count(), 0);
   assert.equal(
     await page.getByText("198.51.100.1", { exact: true }).count(),

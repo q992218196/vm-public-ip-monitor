@@ -10,6 +10,10 @@ type UDPEndpoint struct {
 	BytesIn    uint64 `json:"bytes_in"`
 }
 type Metric struct {
+	UDPFilterVersion         int                `json:"udp_filter_version"`
+	UDPNonDNSFlowsOut        uint64             `json:"udp_non_dns_flows_out"`
+	UDPNonDNSPacketsOut      uint64             `json:"udp_non_dns_packets_out"`
+	UDPNonDNSEndpoints       []UDPEndpoint      `json:"udp_non_dns_endpoints,omitempty"`
 	UDPStatsVersion          int                `json:"udp_stats_version"`
 	UDPFlowsOut              uint64             `json:"udp_flows_out"`
 	UDPFlowsCapped           bool               `json:"udp_flows_capped"`

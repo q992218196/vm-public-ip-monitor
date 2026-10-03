@@ -506,7 +506,7 @@ class Monitor extends Backend
             if (isset($data['name']) && (trim((string) $data['name']) === '' || mb_strlen((string) $data['name']) > 255)) {
                 $this->error('规则名称无效');
             }
-            if (isset($data['kind']) && ! in_array($data['kind'], ['horizontal_scan', 'vertical_scan', 'suspected_bruteforce', 'ssh_connections', 'smb_connections', 'rdp_connections', 'ftp_connections', 'udp_flow_burst', 'udp_packet_rate', 'single_target_attempts', 'tcp_connection_burst', 'egress_mbps', 'vpn_protocol', 'proxy_suspect'], true)) {
+            if (isset($data['kind']) && ! in_array($data['kind'], ['vertical_scan', 'ssh_connections', 'smb_connections', 'rdp_connections', 'ftp_connections', 'udp_flow_burst', 'udp_packet_rate', 'single_target_attempts', 'tcp_connection_burst', 'egress_mbps', 'vpn_protocol', 'proxy_suspect'], true)) {
                 $this->error('规则类型无效');
             }
             if (isset($data['severity']) && ! in_array($data['severity'], ['low', 'medium', 'high'], true)) {
