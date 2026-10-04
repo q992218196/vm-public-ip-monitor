@@ -695,6 +695,79 @@ class MonitorTest extends TestCase
         $this->upload($node, $payload)->assertUnprocessable();
     }
 
+    public function test_udp_rate_records_weighted_rule_average_separately_from_the_fastest_sample(): void
+    {
+        $this->freezeTime();
+        $this->seed(MonitorSeeder::class);
+        Rule::where('kind', 'udp_packet_rate')->update(['threshold' => 10000, 'window_seconds' => 60]);
+        $node = $this->node();
+        foreach ([217716, 406944] as $index => $packets) {
+            $payload = $this->payload();
+            $payload['window_start'] = now()->subSeconds(60 - $index * 30)->toIso8601String();
+            $payload['window_end'] = now()->subSeconds(30 - $index * 30)->toIso8601String();
+            $payload['metrics'][0] = array_replace($payload['metrics'][0], [
+                'udp_stats_version' => 1, 'udp_filter_version' => 1,
+                'udp_flows_out' => 351, 'udp_non_dns_flows_out' => 351,
+                'udp_packets_out' => $packets, 'udp_non_dns_packets_out' => $packets, 'udp_packets_in' => 20,
+                'udp_bytes_out' => $packets * 100, 'udp_bytes_in' => 800,
+                'packets_out' => $packets, 'packets_in' => 20, 'bytes_out' => $packets * 100, 'bytes_in' => 800,
+                'udp_flows_capped' => false, 'udp_endpoints_truncated' => true,
+                'udp_endpoints' => [],
+                'udp_non_dns_endpoints' => [['peer_ip' => '198.51.100.2', 'peer_port' => 63845, 'flows' => 1, 'packets_out' => 100, 'packets_in' => 20, 'bytes_out' => 10000, 'bytes_in' => 800]],
+            ]);
+            $this->upload($node, $payload)->assertOk();
+            ProcessBatch::dispatchSync(Batch::latest('id')->firstOrFail()->id);
+            if ($index === 0) {
+                $this->assertDatabaseMissing('alerts', ['kind' => 'udp_packet_rate']);
+            }
+        }
+        $evidence = Alert::where('kind', 'udp_packet_rate')->firstOrFail()->evidence;
+        $this->assertSame(10411, $evidence['value']);
+        $this->assertSame(624660, $evidence['udp_rule_statistics']['packets_out']);
+        $this->assertEquals(60, $evidence['udp_rule_statistics']['observed_seconds']);
+        $this->assertSame('mean_observed_packet_rate', $evidence['udp_rule_statistics']['count_basis']);
+        $this->assertSame([53], $evidence['udp_rule_statistics']['excluded_destination_ports']);
+        $this->assertSame(2, $evidence['rule_window_count']);
+        $this->assertEquals(60, $evidence['rule_observed_span_seconds']);
+        $this->assertEquals(30, $evidence['sample']['observed_seconds']);
+        $this->assertSame(406944, $evidence['sample']['udp_non_dns_packets_out']);
+        $this->assertSame('bounded_endpoint_samples', $evidence['sample']['target_count_basis']);
+        $this->assertStringContainsString('不是逐秒值或瞬时峰值', $evidence['note']);
+    }
+
+    public function test_udp_flow_rule_uses_a_single_window_maximum_not_a_sum_or_rate(): void
+    {
+        $this->freezeTime();
+        $this->seed(MonitorSeeder::class);
+        Rule::where('kind', 'udp_flow_burst')->update(['threshold' => 1000, 'window_seconds' => 60]);
+        $node = $this->node();
+        foreach ([1056, 1001] as $index => $flows) {
+            $payload = $this->payload();
+            $payload['window_start'] = now()->subSeconds(60 - $index * 30)->toIso8601String();
+            $payload['window_end'] = now()->subSeconds(30 - $index * 30)->toIso8601String();
+            $payload['metrics'][0] = array_replace($payload['metrics'][0], [
+                'udp_stats_version' => 1, 'udp_filter_version' => 1,
+                'udp_flows_out' => $flows, 'udp_non_dns_flows_out' => $flows,
+                'udp_packets_out' => 24325, 'udp_non_dns_packets_out' => 24325, 'udp_packets_in' => 100,
+                'udp_bytes_out' => 2432500, 'udp_bytes_in' => 10000,
+                'packets_out' => 24325, 'packets_in' => 100, 'bytes_out' => 2432500, 'bytes_in' => 10000,
+                'udp_flows_capped' => false, 'udp_endpoints_truncated' => true, 'udp_endpoints' => [],
+                'udp_non_dns_endpoints' => [],
+            ]);
+            $this->upload($node, $payload)->assertOk();
+            ProcessBatch::dispatchSync(Batch::latest('id')->firstOrFail()->id);
+        }
+        $evidence = Alert::where('kind', 'udp_flow_burst')->firstOrFail()->evidence;
+        $this->assertSame(1056, $evidence['value']);
+        $this->assertSame(1056, $evidence['udp_rule_statistics']['flows_max']);
+        $this->assertSame('max_window_distinct_five_tuples', $evidence['udp_rule_statistics']['count_basis']);
+        $this->assertSame(1056, $evidence['sample']['udp_non_dns_flows_out']);
+        $this->assertEquals(30, $evidence['sample']['observed_seconds']);
+        $this->assertSame(2, $evidence['rule_window_count']);
+        $this->assertSame([], $evidence['sample']['udp_endpoints']);
+        $this->assertStringContainsString('不是跨窗口合计、每秒流数或登录次数', $evidence['note']);
+    }
+
     public function test_service_connection_rules_use_destination_samples_and_keep_login_outcomes_unknown(): void
     {
         $this->seed(MonitorSeeder::class);

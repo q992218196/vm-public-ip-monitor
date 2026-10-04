@@ -149,19 +149,28 @@ class Analyzer
         foreach ($this->rules as $rule) {
             $cutoff = $batch->window_end->copy()->subSeconds($rule->window_seconds);
             $rows = $history->filter(fn ($row) => $row->window_end->gt($cutoff));
+            $udpRuleStatistics = [];
             if (in_array($rule->kind, ['udp_flow_burst', 'udp_packet_rate'], true)) {
                 $rows = $rows->filter(fn ($row) => ($row->evidence['udp_filter_version'] ?? 0) === 1);
                 if ($rows->isEmpty()) {
                     continue;
                 }
+                $udpRuleStatistics = [
+                    'version' => 1,
+                    'count_basis' => $rule->kind === 'udp_packet_rate' ? 'mean_observed_packet_rate' : 'max_window_distinct_five_tuples',
+                    'packets_out' => $rows->sum(fn ($row) => $row->evidence['udp_non_dns_packets_out'] ?? 0),
+                    'observed_seconds' => $rows->sum(fn ($row) => $row->window_start->diffInSeconds($row->window_end)),
+                    'flows_max' => (int) $rows->max(fn ($row) => $row->evidence['udp_non_dns_flows_out'] ?? 0),
+                    'excluded_destination_ports' => [53],
+                ];
             }
             $observedStart = $rows->min('window_start');
             $observedEnd = $rows->max('window_end');
             $serviceSamples = isset(ServiceConnectionRules::RULES[$rule->kind]) ? $rows->map(fn ($row) => ['row' => $row, 'sample' => app(ServiceConnectionRules::class)->sample($rule->kind, $row->evidence)])->filter(fn ($entry) => $entry['sample'] !== null)->sortByDesc(fn ($entry) => $entry['sample']['tcp_attempts']) : collect();
             $serviceSample = $serviceSamples->first();
             $value = $serviceSample ? $serviceSample['sample']['tcp_attempts'] : match ($rule->kind) {
-                'udp_flow_burst' => (int) $rows->max(fn ($m) => $m->evidence['udp_non_dns_flows_out'] ?? 0),
-                'udp_packet_rate' => (int) ($rows->sum(fn ($m) => $m->evidence['udp_non_dns_packets_out'] ?? 0) / max(1, $rows->sum(fn ($m) => $m->window_start->diffInSeconds($m->window_end)))),
+                'udp_flow_burst' => $udpRuleStatistics['flows_max'],
+                'udp_packet_rate' => (int) ($udpRuleStatistics['packets_out'] / max(1, $udpRuleStatistics['observed_seconds'])),
                 'vertical_scan' => (int) $rows->max(fn ($m) => $m->evidence['max_ports_per_target'] ?? 0),
                 'single_target_attempts' => (int) $rows->max(fn ($m) => $m->evidence['max_attempts_per_target'] ?? 0),
                 'tcp_connection_burst' => (int) $rows->sum('tcp_attempts'),
@@ -204,6 +213,7 @@ class Analyzer
                 $sampleEvidence['port_scan_targets'] = [];
                 unset($sampleEvidence['egress_target_count']);
                 $sampleEvidence['unique_targets'] = count($sampleEvidence['targets']);
+                $sampleEvidence['target_count_basis'] = 'bounded_endpoint_samples';
                 $sampleEvidence['cardinality_capped'] = $sampleEvidence['udp_flows_capped'] ?? false;
                 $sampleEvidence['outbound_samples_truncated'] = $sampleEvidence['udp_endpoints_truncated'] ?? true;
                 $sampleEvidence['endpoint_samples_truncated'] = $sampleEvidence['outbound_samples_truncated'];
@@ -221,6 +231,12 @@ class Analyzer
                 $confidence = $assessment['confidence'];
                 $note = $assessment['note'];
                 $analysis = ['connection_analysis' => $assessment['connection_analysis']];
+            }
+            if ($udpRuleStatistics) {
+                $analysis['udp_rule_statistics'] = $udpRuleStatistics;
+                $note .= $rule->kind === 'udp_packet_rate'
+                    ? '。规则命中值是计入窗口的出站包总数除以实际观察秒数后向下取整，不是逐秒值或瞬时峰值；详情样本单独展示包速率最高的窗口'
+                    : '。规则命中值是单个采集窗口的不同五元组数最大值，不是跨窗口合计、每秒流数或登录次数；目标列表只是有界样本';
             }
             $this->alert($node, $asset, $rule->kind, $severity, $title, ['rule_id' => $rule->id, 'value' => $value, 'threshold' => $rule->threshold, 'window_seconds' => $rule->window_seconds,
                 'rule_observed_start' => $observedStart?->toIso8601String(), 'rule_observed_end' => $observedEnd?->toIso8601String(),

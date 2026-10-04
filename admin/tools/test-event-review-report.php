@@ -59,6 +59,16 @@ if ($ordered[0]['kind'] !== 'smb_connections' || $ordered[2]['status'] !== 'reso
 }
 echo "Service headline and review evidence priority passed.\n";
 
+$rdpAlert = ['title' => 'RDP 高频连接', 'kind' => 'rdp_connections', 'status' => 'open', 'evidence' => []];
+$rdpReport = EventReviewReport::build($event + ['kinds' => '["rdp_connections"]'], [$rdpAlert], [$row]);
+$fallbackReport = EventReviewReport::build($event, [$rdpAlert], [$row]);
+$mixedRdpReport = EventReviewReport::build($event + ['kinds' => ['rdp_connections', 'smb_connections']], [$rdpAlert], [$row]);
+if ($rdpReport['event']['kinds'] !== ['rdp_connections'] || $fallbackReport['event']['kinds'] !== ['rdp_connections']
+    || $mixedRdpReport['event']['kinds'] !== ['rdp_connections', 'smb_connections']) {
+    throw new RuntimeException('Report kinds must distinguish RDP-only events from mixed events without losing unreturned rules');
+}
+echo "RDP-only report selection preserves mixed event evidence.\n";
+
 $udpRow = $row;
 $udpRow['evidence'] = ['udp_stats_version' => 1, 'udp_flows_out' => 2, 'udp_packets_out' => 20, 'udp_packets_in' => 3, 'udp_bytes_out' => 2000, 'udp_bytes_in' => 300, 'udp_flows_capped' => true, 'udp_endpoints' => [['peer_ip' => '192.0.2.1', 'peer_port' => 53, 'flows' => 2, 'packets_out' => 20, 'packets_in' => 3, 'bytes_out' => 2000, 'bytes_in' => 300]]];
 $udp = EventReviewReport::build($event, $alerts, [$udpRow, $udpRow, $old]);

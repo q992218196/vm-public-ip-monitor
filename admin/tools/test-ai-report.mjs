@@ -12,7 +12,7 @@ let server, browser;
 try {
   await writeFile(
     fixturePath,
-    '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><style>body{margin:0;padding:24px;background:#f4f6fa;font:14px system-ui;--el-text-color-primary:#303133;--el-border-color:#ddd;--el-fill-color-light:#f5f7fa;--el-fill-color-lighter:#fafafa;--el-color-primary:#409eff}#app{max-width:900px;margin:auto;background:white;padding:20px;box-sizing:border-box}</style></head><body><div id="app"></div><script type="module">import {createApp, reactive, h} from "vue";import ElementPlus from "element-plus";import "element-plus/dist/index.css";import {createPinia} from "pinia";import {createRouter,createMemoryHistory} from "vue-router";import Monitor from "/src/views/backend/monitor/index.vue";const router=createRouter({history:createMemoryHistory(),routes:[{path:"/rules",component:{render:()=>null}}]});await router.push("/rules");import Events from "/src/views/backend/monitor/events.vue";import AiReport from "/src/views/backend/monitor/AiReport.vue";import TrafficEvidence from "/src/views/backend/monitor/TrafficEvidence.vue";import SiteReport from "/src/views/backend/monitor/SiteReport.vue";const state=reactive({content:"",record:{},view:"ai"});createApp({setup:()=>()=>state.view==="rules"?h(Monitor):state.view==="events"?h(Events):state.view==="udp"?h(TrafficEvidence,{record:state.record}):state.view==="site"?h(SiteReport,{record:state.record}):h(AiReport,{content:state.content})}).use(createPinia()).use(router).use(ElementPlus).mount("#app");window.showReport=(text)=>{state.view="ai";state.content=text};window.showEvidence=(view,record)=>{state.view=view;state.record=record};window.ready=true;</script></body></html>',
+    '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><style>body{margin:0;padding:24px;background:#f4f6fa;font:14px system-ui;--el-text-color-primary:#303133;--el-border-color:#ddd;--el-fill-color-light:#f5f7fa;--el-fill-color-lighter:#fafafa;--el-color-primary:#409eff}#app{max-width:900px;margin:auto;background:white;padding:20px;box-sizing:border-box}</style></head><body><div id="app"></div><script type="module">import {createApp, reactive, h} from "vue";import ElementPlus from "element-plus";import "element-plus/dist/index.css";import {createPinia} from "pinia";import {createRouter,createMemoryHistory} from "vue-router";import Monitor from "/src/views/backend/monitor/index.vue";const router=createRouter({history:createMemoryHistory(),routes:[{path:"/rules",component:{render:()=>null}}]});await router.push("/rules");import Events from "/src/views/backend/monitor/events.vue";import AiReport from "/src/views/backend/monitor/AiReport.vue";import TrafficEvidence from "/src/views/backend/monitor/TrafficEvidence.vue";import SiteReport from "/src/views/backend/monitor/SiteReport.vue";import EventReviewReport from "/src/views/backend/monitor/EventReviewReport.vue";const state=reactive({content:"",record:{},view:"ai"});createApp({setup:()=>()=>state.view==="rules"?h(Monitor):state.view==="events"?h(Events):state.view==="udp"?h(TrafficEvidence,{record:state.record}):state.view==="site"?h(SiteReport,{record:state.record}):state.view==="review"?h(EventReviewReport,{report:state.record}):h(AiReport,{content:state.content})}).use(createPinia()).use(router).use(ElementPlus).mount("#app");window.showReport=(text)=>{state.view="ai";state.content=text};window.showEvidence=(view,record)=>{state.view=view;state.record=record};window.ready=true;</script></body></html>',
   );
   server = await createServer({
     root: webRoot,
@@ -108,7 +108,10 @@ try {
   await page.evaluate(() =>
     window.showEvidence("udp", {
       title: "UDP 出站包速率提醒",
+      kind: "udp_packet_rate",
       evidence: {
+        value: 6, threshold: 5, window_seconds: 60,
+        udp_rule_statistics: {version: 1, packets_out: 200, observed_seconds: 30},
         sample: {
           transport: "UDP",
           observed_seconds: 30,
@@ -135,7 +138,7 @@ try {
       },
     }),
   );
-  await page.getByText("UDP 出站流数", { exact: true }).waitFor();
+  await page.getByText("样本 UDP 出站流数", { exact: true }).waitFor();
   await page.getByText("计入规则的流数／包数", { exact: true }).waitFor();
   assert.ok((await page.locator("body").textContent()).includes("1 / 200（排除目标端口 53）"));
   assert.equal(await page.getByText("完整握手", { exact: true }).count(), 0);
@@ -143,6 +146,53 @@ try {
     await page.getByText("198.51.100.1", { exact: true }).count(),
     1,
   );
+  let udpText = await page.locator("body").textContent();
+  assert.ok(udpText.includes("200 个出站包 ÷ 30 秒") && udpText.includes("6.7 包/秒（排除目标端口 53）"));
+  await page.evaluate(() => window.showEvidence("udp", {
+    title: "UDP 出站包速率提醒", kind: "udp_packet_rate",
+    evidence: {value: 10411, threshold: 10000, window_seconds: 60,
+      sample_window_start: "2026-10-04T06:19:57Z", sample_window_end: "2026-10-04T06:20:27Z",
+      sample: {transport: "UDP", observed_seconds: 30, udp_packets_out: 406944, udp_flows_out: 351}}
+  }));
+  await page.getByText("规则平均包速率／阈值", {exact: true}).waitFor();
+  udpText = await page.locator("body").textContent();
+  assert.ok(udpText.includes("10411 / 10000 包/秒") && udpText.includes("13564.8 包/秒（历史原始 UDP 计数）"));
+  assert.ok(udpText.includes("旧记录未保存规则出站包总数和实际观察秒数，无法复算"));
+  assert.ok(udpText.includes("30 秒；"));
+  await page.evaluate(() => window.showEvidence("udp", {
+    title: "UDP 出站流数量提醒", kind: "udp_flow_burst",
+    evidence: {value: 1056, threshold: 1000, window_seconds: 60,
+      sample: {transport: "UDP", observed_seconds: 30, udp_packets_out: 24325, udp_flows_out: 1056}}
+  }));
+  await page.getByText("规则最大窗口流数／阈值", {exact: true}).waitFor();
+  udpText = await page.locator("body").textContent();
+  assert.ok(udpText.includes("1056 / 1000 流") && udpText.includes("流数量取评估范围内单个采集窗口的最大值"));
+  assert.ok(udpText.includes("表格流数之和不代表全量流数"));
+  await page.evaluate(() => window.showEvidence("udp", {
+    title: "远程桌面 RDP 高频连接", kind: "rdp_connections", ip: "203.0.113.10",
+    evidence: {value: 317, threshold: 60, sample: {tcp_attempts: 317, completed_handshakes: 317, rst_replies: 3},
+      connection_analysis: {conclusion: "连接数量或带宽阈值只能证明活跃程度", completion_ratio: 1}}
+  }));
+  await page.getByText("登录失败次数", {exact: true}).waitFor();
+  assert.equal(await page.getByText("不可观测", {exact: true}).count(), 1);
+  assert.equal(await page.getByText("样本 TCP 建连尝试", {exact: true}).count(), 0);
+  assert.equal(await page.getByText("完整握手", {exact: true}).count(), 0);
+  assert.equal(await page.getByText("配对 RST", {exact: true}).count(), 0);
+  assert.ok(!(await page.locator("body").textContent()).includes("317"));
+  await page.evaluate(() => window.showEvidence("review", {
+    event: {id: 1, ip: "203.0.113.10", kinds: ["rdp_connections"]}, timeline: [], totals: {},
+    reasons: [], normal_explanations: [], targets: [], port_targets: [], request_hints: [], evidence_gaps: [], next_steps: []
+  }));
+  await page.getByRole("heading", {name: "IP 审核报告", exact: true}).waitFor();
+  assert.equal(await page.getByText("登录失败次数", {exact: true}).count(), 1);
+  assert.equal(await page.getByText("TCP 发起", {exact: true}).count(), 0);
+  assert.equal(await page.getByText("主要目标连接样本", {exact: true}).count(), 0);
+  await page.evaluate(() => window.showEvidence("review", {
+    event: {id: 2, ip: "203.0.113.10", kinds: ["rdp_connections", "smb_connections"]}, timeline: [], totals: {},
+    reasons: [], normal_explanations: [], targets: [], port_targets: [], request_hints: [], evidence_gaps: [], next_steps: []
+  }));
+  await page.getByText("主要目标连接样本", {exact: true}).waitFor();
+  assert.equal(await page.getByText("TCP 发起", {exact: true}).count(), 1);
   await page.evaluate(() => window.showEvidence("udp", {
     title: "TCP 连接数量提醒", kind: "tcp_connection_burst",
     evidence: {value: 3226, threshold: 2000, window_seconds: 60, rule_observed_span_seconds: 61, rule_window_count: 2,

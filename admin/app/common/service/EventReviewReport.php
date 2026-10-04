@@ -25,6 +25,10 @@ class EventReviewReport
 
     public static function build(array $event, array $alerts, array $metrics): array
     {
+        $eventKinds = self::decode($event['kinds'] ?? []);
+        if (! $eventKinds) {
+            $eventKinds = array_values(array_unique(array_column($alerts, 'kind')));
+        }
         $capped = count($metrics) > 120;
         $metrics = array_reverse(array_slice($metrics, 0, 120));
         $timeline = [];
@@ -162,7 +166,7 @@ class EventReviewReport
         $gaps[] = '载荷包含可能的重传；观察时长仅限发起连接前 60 秒，不是完整连接寿命。HTTPS 路径和正文不可见';
         $labels = ['behavior_notice' => '一般行为提醒', 'needs_review' => '疑似异常，待复核', 'strong_anomaly' => '强异常证据，优先复核'];
 
-        return ['version' => 1, 'generated_at' => gmdate('c'), 'event' => array_intersect_key($event, array_flip(['id', 'ip', 'node_name', 'title', 'status', 'severity', 'first_seen_at', 'last_seen_at', 'review_notes', 'reopen_reason'])),
+        return ['version' => 1, 'generated_at' => gmdate('c'), 'event' => array_intersect_key($event, array_flip(['id', 'ip', 'node_name', 'title', 'status', 'severity', 'first_seen_at', 'last_seen_at', 'review_notes', 'reopen_reason'])) + ['kinds' => $eventKinds],
             'category' => $category, 'conclusion' => $labels[$category] ?? $labels['needs_review'], 'reasons' => array_map(fn ($v) => mb_substr($v, 0, 512), array_slice(array_values(array_unique($reasons)), 0, 16)),
             'normal_explanations' => array_map(fn ($v) => mb_substr($v, 0, 512), array_slice(array_values(array_unique($explanations)), 0, 8)), 'evidence_gaps' => array_map(fn ($v) => mb_substr($v, 0, 512), array_slice(array_values(array_unique($gaps)), 0, 16)),
             'next_steps' => ['核对目标与域名是否符合客户申报业务', '根据时间趋势核查是否持续扩散；证据不足可继续观察或定向抓包', '认证失败及应用攻击需要服务日志；需要时手动提交 AI 辅助分析'],
