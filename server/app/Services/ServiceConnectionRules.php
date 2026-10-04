@@ -33,8 +33,10 @@ class ServiceConnectionRules
         $ports = array_values(array_unique(array_column($endpoints, 'peer_port')));
         $sample = ['tcp_attempts' => $attempts, 'targets' => [$target], 'ports' => $ports, 'unique_targets' => 1, 'target_endpoints' => array_map(fn ($port) => (str_contains($target, ':') ? '['.$target.']' : $target).':'.$port, $ports), 'max_attempts_per_target' => $attempts, 'outbound_endpoints' => $endpoints,
             'completed_handshakes' => array_sum(array_column($endpoints, 'completed_handshakes')), 'rst_replies' => array_sum(array_column($endpoints, 'rst_replies')), 'synack_replies' => array_sum(array_column($endpoints, 'synack_replies')),
+            'connection_stats_version' => ($evidence['connection_stats_version'] ?? 0) === 1 && count(array_filter($endpoints, fn ($endpoint) => isset($endpoint['completed_handshakes'], $endpoint['rst_replies'], $endpoint['synack_replies']))) === count($endpoints) ? 1 : 0,
+            'count_basis' => 'deduplicated_tcp_syn_attempts',
             'outbound_samples_truncated' => $evidence['outbound_samples_truncated'] ?? true, 'capture_quality' => $evidence['capture_quality'] ?? [], 'cardinality_capped' => $evidence['cardinality_capped'] ?? false,
-            'service' => $definition['name'], 'protocol_basis' => 'common destination ports only; actual service may differ', 'login_result' => 'not visible in aggregate traffic', 'counting_note' => 'Per-target connection count from bounded endpoint samples; lower bound, not login attempts/failures'];
+            'service' => $definition['name'], 'protocol_basis' => 'common destination ports only; actual service may differ', 'login_result' => 'not visible in aggregate traffic', 'counting_note' => 'Per-target outgoing SYN attempts, retransmissions deduplicated; completed_handshakes counts observed three-way handshakes; bounded lower bounds, not post-connect packets or login attempts/failures'];
 
         return $sample;
     }

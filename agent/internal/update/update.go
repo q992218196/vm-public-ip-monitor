@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -30,8 +31,31 @@ type instruction struct {
 	Path    string `json:"path"`
 }
 
+type httpError struct {
+	stage  string
+	status int
+}
+
+func (e httpError) Error() string { return fmt.Sprintf("update %s HTTP %d", e.stage, e.status) }
+
+// Network failures retry promptly; invalid binaries retain a longer cooldown.
+func RetryDelay(err error, failures int) time.Duration {
+	var network net.Error
+	var status httpError
+	transient := errors.As(err, &network) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)
+	if errors.As(err, &status) {
+		transient = status.status == 429 || status.status >= 500
+	}
+	if !transient {
+		return 10 * time.Minute
+	}
+	return time.Duration(1<<min(max(failures-1, 0), 3)) * 15 * time.Second
+}
+
 func CheckAndApply(ctx context.Context, c config.Config, currentVersion string) (bool, error) {
-	client := &http.Client{Timeout: 60 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	transport := &http.Transport{Proxy: http.ProxyFromEnvironment, DialContext: (&net.Dialer{Timeout: 10 * time.Second, FallbackDelay: 300 * time.Millisecond}).DialContext, TLSHandshakeTimeout: 10 * time.Second, ResponseHeaderTimeout: 15 * time.Second, IdleConnTimeout: 15 * time.Second}
+	defer transport.CloseIdleConnections()
+	client := &http.Client{Transport: transport, Timeout: 20 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	base := strings.TrimRight(c.ServerURL, "/")
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/api/v1/agent/update?version="+url.QueryEscape(currentVersion), nil)
 	if err != nil {
@@ -45,7 +69,7 @@ func CheckAndApply(ctx context.Context, c config.Config, currentVersion string) 
 	}
 	defer res.Body.Close()
 	if res.StatusCode != http.StatusOK {
-		return false, fmt.Errorf("update control HTTP %d", res.StatusCode)
+		return false, httpError{stage: "control", status: res.StatusCode}
 	}
 	var inst instruction
 	if err := json.NewDecoder(io.LimitReader(res.Body, 2048)).Decode(&inst); err != nil {
@@ -77,7 +101,9 @@ func CheckAndApply(ctx context.Context, c config.Config, currentVersion string) 
 		f.Close()
 		return false, err
 	}
-	response, err := client.Do(download)
+	downloadClient := *client
+	downloadClient.Timeout = 3 * time.Minute
+	response, err := downloadClient.Do(download)
 	if err != nil {
 		f.Close()
 		return false, err
@@ -85,7 +111,7 @@ func CheckAndApply(ctx context.Context, c config.Config, currentVersion string) 
 	if response.StatusCode != http.StatusOK {
 		response.Body.Close()
 		f.Close()
-		return false, fmt.Errorf("update download HTTP %d", response.StatusCode)
+		return false, httpError{stage: "download", status: response.StatusCode}
 	}
 	h := sha256.New()
 	n, copyErr := io.Copy(io.MultiWriter(f, h), io.LimitReader(response.Body, maxBinaryBytes+1))

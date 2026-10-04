@@ -121,11 +121,19 @@ class AuthenticationEvidenceTest extends TestCase
         $this->assertSame(80, $sample['tcp_attempts']);
         $this->assertSame(2, $sample['completed_handshakes']);
         $this->assertSame(['[2001:db8::1]:22'], $sample['target_endpoints']);
-        $this->assertArrayNotHasKey('connection_stats_version', $sample);
+        $this->assertSame(0, $sample['connection_stats_version']);
         $this->assertNull($helper->sample('smb_connections', ['outbound_endpoints' => []]));
         $assessment = app(ConnectionAssessment::class)->assess('ssh_connections', $sample, 60);
         $this->assertSame('medium', $assessment['severity']);
         $this->assertSame('limited_behavior', $assessment['confidence']);
         $this->assertStringContainsString('不代表已观察登录失败', $assessment['note']);
+        $paired = $helper->sample('ssh_connections', ['completed_handshakes' => 9999, 'connection_stats_version' => 1, 'outbound_endpoints' => [
+            ['peer_ip' => '192.0.2.1', 'peer_port' => 443, 'attempts' => 9900, 'completed_handshakes' => 9900, 'synack_replies' => 9900, 'rst_replies' => 0],
+            ['peer_ip' => '2001:db8::1', 'peer_port' => 22, 'attempts' => 80, 'completed_handshakes' => 2, 'synack_replies' => 3, 'rst_replies' => 1],
+        ]]);
+        $assessment = app(ConnectionAssessment::class)->assess('ssh_connections', $paired, 60);
+        $this->assertSame(2, $assessment['connection_analysis']['completed_handshakes']);
+        $this->assertSame(0.025, $assessment['connection_analysis']['completion_ratio']);
+        $this->assertNull($assessment['connection_analysis']['mature_no_reply']);
     }
 }

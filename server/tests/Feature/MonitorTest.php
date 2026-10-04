@@ -717,6 +717,27 @@ class MonitorTest extends TestCase
         $this->assertDatabaseCount('monitor_events', 1);
     }
 
+    public function test_service_handshakes_are_paired_without_inventing_target_no_reply_counts(): void
+    {
+        $this->seed(MonitorSeeder::class);
+        $node = $this->node();
+        $payload = $this->payload();
+        $payload['metrics'][0] += ['connection_stats_version' => 1, 'synack_replies' => 317, 'completed_handshakes' => 317, 'rst_replies' => 3, 'mature_attempts' => 317, 'mature_no_reply' => 0];
+        $payload['metrics'][0]['tcp_attempts'] = 317;
+        $payload['metrics'][0]['outbound_endpoints'] = [['peer_ip' => '43.128.8.64', 'peer_port' => 3389, 'attempts' => 317, 'synack_replies' => 317, 'completed_handshakes' => 317, 'rst_replies' => 3, 'payload_out' => 424670, 'payload_in' => 355694]];
+        $payload['health'] = ['version' => '1.3.0', 'captured' => 782815, 'kernel_drops' => 84, 'decode_skipped' => 6973, 'state_dropped' => 0];
+        $this->upload($node, $payload)->assertOk();
+        ProcessBatch::dispatchSync(Batch::firstOrFail()->id);
+        $evidence = Alert::where('kind', 'rdp_connections')->firstOrFail()->evidence;
+        $this->assertSame(317, $evidence['value']);
+        $this->assertSame(317, $evidence['connection_analysis']['completed_handshakes']);
+        $this->assertEquals(1.0, $evidence['connection_analysis']['completion_ratio']);
+        $this->assertSame(3, $evidence['connection_analysis']['rst_replies']);
+        $this->assertNull($evidence['connection_analysis']['mature_no_reply']);
+        $this->assertSame('paired_transport', $evidence['confidence']);
+        $this->assertSame('deduplicated_tcp_syn_attempts', $evidence['sample']['count_basis']);
+    }
+
     public function test_worker_completion_preserves_administrator_origin_registration_and_previous_dns(): void
     {
         config(['monitor.worker_token' => $this->token]);

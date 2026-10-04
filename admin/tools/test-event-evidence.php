@@ -210,3 +210,15 @@ foreach ([['name', 'asc', ['Sort A', 'Sort B', 'Sort C']], ['name', 'desc', ['So
     }
 }
 echo "Node names and numeric versions sort across server results; unknown versions remain last.\n";
+
+$db->exec("UPDATE nodes SET health='{\"version\":\"1.3.0\",\"update_error\":\"dial tcp: timeout\"}',health_observed_at='2026-10-04 01:00:00',agent_update_requested_at='2026-10-04 02:00:00',agent_desired_version='1.3.1' WHERE name='Sort A'");
+$rows = $ok($request('index', ['resource' => 'nodes', 'search' => 'Sort A'], false, true, 'Monitor'))['list'];
+if ($rows[0]['agent_update_error'] !== null) {
+    throw new RuntimeException('An error older than the new update request must not override waiting status');
+}
+$db->exec("UPDATE nodes SET health_observed_at='2026-10-04 02:01:00' WHERE name='Sort A'");
+$rows = $ok($request('index', ['resource' => 'nodes', 'search' => 'Sort A'], false, true, 'Monitor'))['list'];
+if ($rows[0]['agent_update_error'] !== 'dial tcp: timeout') {
+    throw new RuntimeException('Current update failures must remain visible');
+}
+echo "Update requests fence stale errors while preserving current failures.\n";

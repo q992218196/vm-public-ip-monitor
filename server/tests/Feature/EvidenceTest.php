@@ -25,6 +25,34 @@ class EvidenceTest extends TestCase
 {
     use RefreshDatabase;
 
+    public function test_alert_clear_preview_preserves_data_and_force_clears_only_alert_evidence(): void
+    {
+        Storage::fake('local');
+        $event = $this->event();
+        $path = 'packet-evidence/'.Str::uuid().'.pcap';
+        Storage::disk('local')->put($path, 'pcap');
+        Storage::disk('local')->put('packet-evidence/keep.txt', 'unrelated');
+        Storage::disk('local')->put('other/keep.pcap', 'unrelated');
+        $capture = PacketCapture::create(['event_id' => $event->id, 'node_id' => $event->node_id, 'ip' => '203.0.113.10', 'status' => 'uploaded', 'path' => $path]);
+        AiAnalysis::create(['event_id' => $event->id, 'capture_id' => $capture->id, 'requested_by' => 2, 'config_snapshot' => [], 'status' => 'completed']);
+        app(Analyzer::class)->alert(Node::findOrFail($event->node_id), IpAsset::findOrFail($event->ip_asset_id), 'tcp_connection_burst', 'low', '连接提醒', [], now());
+        $this->artisan('monitor:clear-alerts')->assertSuccessful();
+        $this->assertDatabaseCount('monitor_events', 1);
+        $this->assertDatabaseCount('alerts', 1);
+        Storage::disk('local')->assertExists($path);
+        $this->artisan('monitor:clear-alerts --force')->assertSuccessful();
+        foreach (['alerts', 'monitor_events', 'packet_captures', 'ai_analyses'] as $table) {
+            $this->assertDatabaseCount($table, 0);
+        }
+        $this->assertDatabaseCount('nodes', 1);
+        $this->assertDatabaseCount('ip_assets', 1);
+        $this->assertDatabaseHas('audit_logs', ['action' => 'alerts_cleared']);
+        Storage::disk('local')->assertMissing($path);
+        Storage::disk('local')->assertExists('packet-evidence/keep.txt');
+        Storage::disk('local')->assertExists('other/keep.pcap');
+        $this->artisan('monitor:clear-alerts --force')->assertSuccessful();
+    }
+
     private string $token = 'test-only-node-token-abcdefghijklmnopqrstuvwxyz';
 
     private function event(): MonitorEvent

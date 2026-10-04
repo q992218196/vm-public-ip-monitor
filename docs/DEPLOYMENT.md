@@ -96,7 +96,7 @@ docker compose -f compose.yml -f compose.buildadmin.yml --profile screenshots up
 
 后台强制刷新，然后在“采集节点”确认最近上报持续更新。规则初始化只新增缺失规则，保留已修改阈值。
 
-本版 Agent 为 **1.3.0**：先升级主控，再在采集节点下发更新。新版本补全每目标最多 128 个端口的业务范围，减少白名单因截断反复失效。先更新主控，再更新节点，重新审核业务白名单；旧节点的截断数据仍要求复核。Agent 1.3.0 为两个 UDP 规则提供排除目标端口 53 后的独立计数；旧节点继续正常上报，但暂不参与这两个规则，升级后自动恢复。
+本版 Agent 为 **1.3.1**：先升级主控，再在采集节点下发更新。新版本补全每目标最多 128 个端口的业务范围，减少白名单因截断反复失效。先更新主控，再更新节点，重新审核业务白名单；旧节点的截断数据仍要求复核。Agent 1.3.0 为两个 UDP 规则提供排除目标端口 53 后的独立计数；旧节点继续正常上报，但暂不参与这两个规则，升级后自动恢复。
 
 ## 网站验证与截图
 
@@ -163,7 +163,7 @@ du -sh /home/vm-monitor
 
 ### 更新 Agent
 
-主控发布二进制后，在“采集节点”下发单节点或批量更新，先试点一台。节点一般每分钟检查一次，校验并自检后更新，后台显示当前版本和更新错误。
+主控发布二进制后，在“采集节点”下发单节点或批量更新，先试点一台。Agent 1.3.1 启动时立即检查，正常每分钟轮询；暂时性网络错误按 15、30、60、120 秒退避重试，二进制校验失败或无权限保留 10 分钟间隔。下载最长允许 3 分钟，仍限制文件大小和 SHA-256 校验。后台显示当前版本及自动重试状态；重新下发后，上一次指令之前的错误不再覆盖新状态。旧 Agent 仍按原来的 10 分钟间隔重试；急需恢复时可执行下面的手动更新命令。
 
 节点需要立即检查已下发更新时执行：
 
@@ -186,11 +186,30 @@ bash /home/vm-monitor/bin/uninstall.sh
 
 ## 告警与证据
 
+### 清空告警中心
+
+更新主控后，先预览数量：
+
+```sh
+cd /home/vm-monitor-src/deploy
+docker compose -f compose.yml -f compose.buildadmin.yml run --rm --no-deps app php artisan monitor:clear-alerts
+```
+
+需要实际清空时执行以下命令。**永久删除所有告警、事件、关联抓包及 AI 报告**；保留节点、网站、规则、白名单和原始流量窗口。执行期间暂停采集 API 与分析服务，避免并发生成记录；节点暂时无法上报的数据会保留在本地缓冲中。
+
+```sh
+docker compose -f compose.yml -f compose.buildadmin.yml stop app queue scheduler ai-queue
+docker compose -f compose.yml -f compose.buildadmin.yml run --rm --no-deps app php artisan monitor:clear-alerts --force
+docker compose -f compose.yml -f compose.buildadmin.yml up -d app queue scheduler ai-queue
+```
+
+完成后刷新后台。检测仍会继续，新的命中会生成新告警；已存在的流量窗口也可能参与之后的规则评估。无需重建数据库或删除 Redis。
+
 ### 检测与审核
 
 同一节点、公网 IP 的持续规则命中归并成事件。详情先看本地 IP 报告：目标、端口、连接状态、双向流量、时间趋势、采集质量和证据缺口。纯数量提醒、疑似异常和强异常证据分别分级，不将连接数量直接当作攻击结论。
 
-常见服务规则包括 SSH、SMB、RDP、FTP 高频连接。明文 FTP、SMB2 的可见认证响应可以在 PCAP 中辅助核查；加密 SSH、RDP/NLA 等登录结果需服务日志，不能仅凭端口认定爆破。
+常见服务规则包括 SSH、SMB、RDP、FTP 高频连接。规则计数是目标级 TCP 建连尝试（主动 SYN 有界去重），不是连接后交互或登录次数；完整三次握手数另列。跨窗口取最大值，详情样本为 30 秒时，317 次是该 30 秒样本内的发起数，不是配置 60 秒内的总和。明文 FTP、SMB2 的可见认证响应可以在 PCAP 中辅助核查；加密 SSH、RDP/NLA 等登录结果需服务日志，不能仅凭端口认定爆破。
 
 主要告警按级别、证据结论、规则具体程度依次选择：同等级、同结论时，SMB／SSH／RDP／FTP 服务规则优先于泛化的多目标、多端口和连接数量提醒。其他命中仍在详情保留；显示优先级不提高风险级别，也不代表已确认违规。升级时执行数据库迁移，会同步修正已有事件的主标题，保留审核状态和原始证据。
 
@@ -255,7 +274,7 @@ docker compose -f compose.yml -f compose.buildadmin.yml --profile https ps
 tail -n 40 /home/vm-monitor-server/nginx-logs/error.log
 tail -n 40 /home/vm-monitor-server/storage/logs/php-fpm.log
 tail -n 40 /home/vm-monitor-server/worker/worker.log
-curl -sS -o /dev/null -w 'Agent API: %{http_code}\n' 'https://vm-monitor.lcayun.cn/api/v1/agent/update?version=1.3.0'
+curl -sS -o /dev/null -w 'Agent API: %{http_code}\n' 'https://vm-monitor.lcayun.cn/api/v1/agent/update?version=1.3.1'
 ```
 
 无 Agent 令牌的最后一项正常应为 **401**。示例域名和自定义目录请替换。BuildAdmin 日志在 `buildadmin/runtime`；节点日志在宿主机的 `data_dir/logs/agent.log`。

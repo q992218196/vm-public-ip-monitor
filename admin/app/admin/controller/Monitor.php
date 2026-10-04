@@ -18,7 +18,7 @@ class Monitor extends Backend
     }
 
     private const TABLES = [
-        'nodes' => ['name', 'id', 'enabled', 'cidrs', 'last_seen_at', 'health', 'agent_desired_version', 'agent_update_requested_at'],
+        'nodes' => ['name', 'id', 'enabled', 'cidrs', 'last_seen_at', 'health', 'health_observed_at', 'agent_desired_version', 'agent_update_requested_at'],
         'ips' => ['ip', 'id', 'version', 'label', 'first_seen_at', 'last_seen_at'],
         'websites' => ['id', 'ip_asset_id', 'host', 'port', 'scheme', 'status', 'ownership_status', 'title', 'description', 'category', 'manual_category', 'last_probed_at', 'last_seen_at'],
         'alerts' => ['id', 'node_id', 'ip_asset_id', 'title', 'kind', 'severity', 'status', 'occurrences', 'last_seen_at'],
@@ -137,6 +137,9 @@ class Monitor extends Backend
                 $row['kernel_drops'] = $row['health']['kernel_drops'] ?? null;
                 $row['agent_version'] = $row['health']['version'] ?? null;
                 $row['agent_update_error'] = $row['health']['update_error'] ?? null;
+                if (! empty($row['agent_update_requested_at']) && (empty($row['health_observed_at']) || strtotime($row['health_observed_at']) < strtotime($row['agent_update_requested_at']))) {
+                    $row['agent_update_error'] = null;
+                }
             }
         }
         unset($row);

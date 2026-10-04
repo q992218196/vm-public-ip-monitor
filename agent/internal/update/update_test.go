@@ -2,14 +2,54 @@ package update
 
 import (
 	"context"
+	"errors"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 	"vm-monitor/agent/internal/config"
 )
+
+func TestRetryDelaySeparatesTransientFailuresFromInvalidBinaries(t *testing.T) {
+	for _, err := range []error{&net.DNSError{Err: "temporary", IsTemporary: true}, context.DeadlineExceeded, io.ErrUnexpectedEOF, httpError{"control", 502}, httpError{"download", 429}} {
+		for i, want := range []time.Duration{15 * time.Second, 30 * time.Second, time.Minute, 2 * time.Minute, 2 * time.Minute} {
+			if got := RetryDelay(err, i+1); got != want {
+				t.Fatalf("%v attempt %d: delay %v instead of %v", err, i+1, got, want)
+			}
+		}
+	}
+	for _, err := range []error{errors.New("invalid update digest"), httpError{"control", 401}} {
+		if RetryDelay(err, 1) != 10*time.Minute {
+			t.Fatalf("nontransient failures must retain cooldown: %v", err)
+		}
+	}
+}
+
+func TestTemporaryControlFailureCanRecoverWithoutRestart(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if requests == 1 {
+			w.WriteHeader(502)
+			return
+		}
+		w.Write([]byte(`{"update":false}`))
+	}))
+	defer server.Close()
+	c := config.Config{ServerURL: server.URL, Token: "secret", NodeID: "node-1", DataDir: t.TempDir()}
+	_, err := CheckAndApply(context.Background(), c, "1.3.0")
+	if err == nil || RetryDelay(err, 1) != 15*time.Second {
+		t.Fatalf("expected retryable 502: %v", err)
+	}
+	if applied, err := CheckAndApply(context.Background(), c, "1.3.0"); applied || err != nil {
+		t.Fatalf("poll did not recover: %v", err)
+	}
+}
 
 func TestUpdateOnlyUsesFixedDownloadAndVerifiesDigest(t *testing.T) {
 	for _, tc := range []struct {

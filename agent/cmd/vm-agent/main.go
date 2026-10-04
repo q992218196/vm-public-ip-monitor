@@ -131,34 +131,35 @@ func run() error {
 	var updateError string
 	go func() {
 		// Polling happens outside packet capture and uses a bounded download.
-		ticker := time.NewTicker(time.Minute)
-		defer ticker.Stop()
-		nextAttempt := time.Time{}
+		timer := time.NewTimer(0)
+		defer timer.Stop()
+		failures := 0
 		for {
 			select {
 			case <-ctx.Done():
 				return
-			case <-ticker.C:
-				if time.Now().Before(nextAttempt) {
-					continue
-				}
+			case <-timer.C:
 				applied, err := update.CheckAndApply(ctx, c, version)
 				if err != nil {
-					log.Printf("update: %v", err)
+					failures++
+					delay := update.RetryDelay(err, failures)
+					log.Printf("update: %v; retry in %s", err, delay)
 					updateMu.Lock()
 					updateError = err.Error()
 					if len(updateError) > 255 {
 						updateError = updateError[:255]
 					}
 					updateMu.Unlock()
-					nextAttempt = time.Now().Add(10 * time.Minute)
+					timer.Reset(delay)
 				} else if applied {
 					updated <- struct{}{}
 					return
 				} else {
+					failures = 0
 					updateMu.Lock()
 					updateError = ""
 					updateMu.Unlock()
+					timer.Reset(time.Minute)
 				}
 			}
 		}

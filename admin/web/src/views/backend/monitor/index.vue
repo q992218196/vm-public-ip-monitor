@@ -631,14 +631,14 @@ function onSelectionChange(items: any[]) {
 function agentUpdateStatus(row: any): string {
     if (!row.agent_desired_version) return '未下发'
     if (row.agent_version === row.agent_desired_version) return '已更新'
-    if (row.agent_update_error) return '失败：' + String(row.agent_update_error).slice(0, 80)
+    if (row.agent_update_error) return '未完成，将自动重试：' + String(row.agent_update_error).slice(0, 80)
     if (!row.agent_version || /^0\.[0-3]\./.test(String(row.agent_version))) return '需先手动安装新版'
     return '等待节点领取 ' + row.agent_desired_version
 }
 function agentUpdateTag(row: any): 'success' | 'warning' | 'danger' | 'info' {
     if (!row.agent_desired_version) return 'info'
     if (row.agent_version === row.agent_desired_version) return 'success'
-    return row.agent_update_error ? 'danger' : 'warning'
+    return 'warning'
 }
 async function loadAgentRelease() {
     try {

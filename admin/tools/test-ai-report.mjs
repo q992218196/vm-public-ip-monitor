@@ -151,7 +151,7 @@ try {
       sample: {tcp_attempts: 2226, synack_replies: 1650, unique_targets: 256, cardinality_capped: true},
       connection_analysis: {completion_ratio: 0.216}}
   }));
-  await page.getByText("样本 TCP 发起", {exact: true}).waitFor();
+  await page.getByText("样本 TCP 建连尝试", {exact: true}).waitFor();
   const tcpText = await page.locator(".el-descriptions").textContent();
   assert.ok(tcpText.includes("3226 / 2000") && tcpText.includes("2226"));
   assert.ok(tcpText.includes("61 秒跨度 / 2 个采集窗口") && tcpText.includes("30 秒；"));

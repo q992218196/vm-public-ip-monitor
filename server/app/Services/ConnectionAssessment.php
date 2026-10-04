@@ -29,14 +29,15 @@ class ConnectionAssessment
         $resets = $sample['rst_replies'] ?? null;
         $mature = $sample['mature_attempts'] ?? null;
         $missing = $sample['mature_no_reply'] ?? null;
-        $paired = ($sample['connection_stats_version'] ?? 0) === 1 && $attempts > 0 && is_int($completed) && is_int($resets) && is_int($mature) && is_int($missing)
-            && min($completed, $resets, $mature, $missing) >= 0 && max($completed, $resets, $mature) <= $attempts && $missing <= $mature;
+        $service = isset(ServiceConnectionRules::RULES[$kind]);
+        $paired = ($sample['connection_stats_version'] ?? 0) === 1 && $attempts > 0 && is_int($completed) && is_int($resets)
+            && min($completed, $resets) >= 0 && max($completed, $resets) <= $attempts
+            && ($service && $mature === null && $missing === null || is_int($mature) && is_int($missing) && min($mature, $missing) >= 0 && $mature <= $attempts && $missing <= $mature);
         $qualityGood = $this->qualityGood($sample);
         $titles = ['horizontal_scan' => '多目标连接（待复核）', 'vertical_scan' => '多端口连接（待复核）', 'suspected_bruteforce' => '认证服务重复连接（待复核）', 'single_target_attempts' => '单目标高频连接提醒', 'tcp_connection_burst' => 'TCP 连接数量提醒', 'egress_mbps' => '出站带宽提醒'];
         foreach (ServiceConnectionRules::RULES as $serviceKind => $definition) {
             $titles[$serviceKind] = $definition['name'].'（待复核）';
         }
-        $service = isset(ServiceConnectionRules::RULES[$kind]);
         $scan = in_array($kind, ['horizontal_scan', 'vertical_scan'], true);
         $severity = $scan || $service || $kind === 'suspected_bruteforce' ? 'medium' : 'low';
         $category = $severity === 'low' ? 'behavior_notice' : 'needs_review';
@@ -46,6 +47,7 @@ class ConnectionAssessment
         }
         if ($service) {
             $reasons[] = '仅统计有界目标样本中最活跃目标的连接下界，跨窗口取最大值；常见端口只提示服务类型，不代表已观察登录失败或爆破';
+            $reasons[] = '规则计数是主动 TCP 建连尝试（SYN 有界去重），连接后的数据交互不增加次数；完整握手数另列，未成功的发起仍保留用于扫描核查';
         }
         $sustained = count(array_filter($windows, fn ($window) => $this->rejectionPattern($window, $kind, $threshold)));
         if ($scan && $paired && $qualityGood && $sustained >= 2 && $this->rejectionPattern($sample, $kind, $threshold)) {

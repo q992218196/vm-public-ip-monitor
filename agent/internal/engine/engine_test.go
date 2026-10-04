@@ -91,6 +91,13 @@ func TestPairedHandshakeResetsAndMatureNoReplyAreWindowBounded(t *testing.T) {
 		send(vm, peer, 40000, 443, 101, 999, 16, 3)
 		send(vm, peer, 40000, 443, 101, 201, 16, 4)
 		send(vm, peer, 40000, 443, 101, 201, 16, 5)
+		payload := frame(vm, peer, 40000, 443, 101, 24, "normal post-connect traffic")
+		tcpOffset := 34
+		if netip.MustParseAddr(vm).Is6() {
+			tcpOffset = 54
+		}
+		binary.BigEndian.PutUint32(payload[tcpOffset+8:], 201)
+		e.Process(payload, len(payload), "a", now.Add(5*time.Second))
 		send(peer, vm, 443, 40000, 201, 101, 20, 6)
 		send(peer, vm, 443, 40000, 201, 101, 20, 7)
 		send(vm, peer, 40001, 22, 300, 0, 2, 0)

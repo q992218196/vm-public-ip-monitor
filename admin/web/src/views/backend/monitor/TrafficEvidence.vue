@@ -46,7 +46,7 @@
                 <el-descriptions-item label="样本目标数"
                     >{{ sample.unique_targets ?? '—' }}{{ sample.cardinality_capped ? '（计数可能截断）' : '' }}</el-descriptions-item
                 >
-                <el-descriptions-item label="样本 TCP 发起">{{ sample.tcp_attempts ?? '—' }}</el-descriptions-item>
+                <el-descriptions-item label="样本 TCP 建连尝试">{{ sample.tcp_attempts ?? '—' }}</el-descriptions-item>
                 <el-descriptions-item label="SYN-ACK 回复">{{ sample.synack_replies ?? '未采集' }}</el-descriptions-item>
                 <el-descriptions-item label="握手回复比例">{{ replyRatio }}</el-descriptions-item>
                 <el-descriptions-item label="完整握手">{{ sample.completed_handshakes ?? '未采集' }} · {{ completionRatio }}</el-descriptions-item>
