@@ -9,6 +9,7 @@ use App\Models\Exclusion;
 use App\Models\Node;
 use App\Models\ProtocolObservation;
 use App\Models\Rule;
+use App\Models\TrafficMetric;
 use App\Models\Website;
 use App\Services\ProbeQueue;
 use App\Services\ScanAssessment;
@@ -102,6 +103,89 @@ class MonitorTest extends TestCase
         $this->assertDatabaseCount('batches', 0);
         $n->update(['enabled' => false]);
         $this->upload($n, $this->payload())->assertUnauthorized();
+    }
+
+    public function test_subsecond_agent_windows_preserve_precision_and_still_detect(): void
+    {
+        $this->freezeTime();
+        $node = $this->node();
+        Rule::create(['name' => 'TCP reminder', 'kind' => 'tcp_connection_burst', 'threshold' => 1]);
+        Rule::create(['name' => 'UDP rate reminder', 'kind' => 'udp_packet_rate', 'threshold' => 180]);
+        $payload = $this->payload();
+        $second = now()->utc()->format('Y-m-d\TH:i:s');
+        $payload['window_start'] = $second.'.100000123Z';
+        $payload['window_end'] = $second.'.900000987Z';
+        $payload['metrics'][0] = array_replace($payload['metrics'][0], [
+            'udp_stats_version' => 1, 'udp_filter_version' => 1, 'udp_flows_out' => 1, 'udp_non_dns_flows_out' => 1,
+            'udp_packets_out' => 150, 'udp_non_dns_packets_out' => 150, 'udp_packets_in' => 0,
+            'udp_bytes_out' => 6000, 'udp_bytes_in' => 0, 'packets_out' => 270, 'bytes_out' => 10000,
+        ]);
+        $this->upload($node, $payload)->assertOk();
+        $batch = Batch::firstOrFail();
+        $this->assertSame('100000', $batch->window_start->format('u'));
+        $this->assertSame('900000', $batch->window_end->format('u'));
+        ProcessBatch::dispatchSync($batch->id);
+        $metric = TrafficMetric::firstOrFail();
+        $this->assertEqualsWithDelta(0.8, $metric->window_start->diffInSeconds($metric->window_end), 0.000001);
+        $alert = Alert::where('kind', 'tcp_connection_burst')->firstOrFail();
+        $this->assertSame(120, $alert->evidence['value']);
+        $this->assertEquals(0.8, $alert->evidence['rule_observed_span_seconds']);
+        $udp = Alert::where('kind', 'udp_packet_rate')->firstOrFail();
+        $this->assertSame(187, $udp->evidence['value']);
+        $this->assertEquals(0.8, $udp->evidence['udp_rule_statistics']['observed_seconds']);
+        $payload['batch_id'] = Str::uuid()->toString();
+        $payload['window_start'] = $payload['window_end'];
+        $this->upload($node, $payload)->assertUnprocessable()->assertJsonValidationErrors('window_end');
+        $payload['window_end'] = $second.'.100000123Z';
+        $this->upload($node, $payload)->assertUnprocessable()->assertJsonValidationErrors('window_end');
+        $this->assertDatabaseCount('batches', 1);
+    }
+
+    public function test_capture_quality_rule_can_select_nodes_disable_and_set_threshold(): void
+    {
+        $this->seed(MonitorSeeder::class);
+        $included = $this->node();
+        $excluded = $this->node();
+        $rule = Rule::where('kind', 'capture_degraded')->firstOrFail();
+        $rule->update(['node_ids' => [$included->id], 'threshold' => 5, 'severity' => 'low', 'cooldown_seconds' => 300]);
+        foreach ([$included, $excluded] as $node) {
+            $payload = $this->payload();
+            $payload['metrics'] = [];
+            $payload['sites'] = [];
+            $payload['health'] += ['state_dropped' => 2, 'spool_dropped' => 0];
+            $payload['health']['kernel_drops'] = 3;
+            $this->upload($node, $payload)->assertOk();
+            ProcessBatch::dispatchSync(Batch::where('batch_id', $payload['batch_id'])->firstOrFail()->id);
+        }
+        $alert = Alert::where('kind', 'capture_degraded')->firstOrFail();
+        $this->assertSame($included->id, $alert->node_id);
+        $this->assertSame('low', $alert->severity);
+        $this->assertSame(5, $alert->evidence['value']);
+        $this->assertSame(5, $alert->evidence['threshold']);
+        $this->assertDatabaseMissing('alerts', ['kind' => 'capture_degraded', 'node_id' => $excluded->id]);
+        $this->assertSame(3, $excluded->fresh()->health['kernel_drops']);
+        $rule->update(['enabled' => false]);
+        $payload['batch_id'] = Str::uuid()->toString();
+        $this->upload($included, $payload)->assertOk();
+        ProcessBatch::dispatchSync(Batch::where('batch_id', $payload['batch_id'])->firstOrFail()->id);
+        $this->assertSame(1, $alert->fresh()->occurrences);
+        $rule->update(['enabled' => true, 'threshold' => 6]);
+        $payload['batch_id'] = Str::uuid()->toString();
+        $this->upload($included, $payload)->assertOk();
+        ProcessBatch::dispatchSync(Batch::where('batch_id', $payload['batch_id'])->firstOrFail()->id);
+        $this->assertSame(1, $alert->fresh()->occurrences);
+        $rule->update(['threshold' => 1, 'node_ids' => null]);
+        $payload['batch_id'] = Str::uuid()->toString();
+        $this->upload($excluded, $payload)->assertOk();
+        ProcessBatch::dispatchSync(Batch::where('batch_id', $payload['batch_id'])->firstOrFail()->id);
+        $this->assertDatabaseHas('alerts', ['kind' => 'capture_degraded', 'node_id' => $excluded->id]);
+        $rule->update(['node_ids' => []]);
+        $payload['batch_id'] = Str::uuid()->toString();
+        $this->upload($included, $payload)->assertOk();
+        ProcessBatch::dispatchSync(Batch::where('batch_id', $payload['batch_id'])->firstOrFail()->id);
+        $this->assertSame(1, $alert->fresh()->occurrences);
+        $this->seed(MonitorSeeder::class);
+        $this->assertSame([], $rule->fresh()->node_ids);
     }
 
     public function test_agent_update_requires_node_token_and_returns_only_assigned_release(): void

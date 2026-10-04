@@ -100,6 +100,8 @@
                         <el-tag v-else-if="column.key === 'enabled'" :type="enabledState(scope.row.enabled) ? 'success' : 'info'">{{
                             enabledState(scope.row.enabled) ? '启用' : '停用'
                         }}</el-tag>
+                        <span v-else-if="column.key === 'node_scope'">{{ ruleNodeScope(scope.row) }}</span>
+                        <span v-else-if="column.key === 'window_seconds' && scope.row.kind === 'capture_degraded'">每采集窗口</span>
                         <el-tag
                             v-else-if="column.key === 'agent_update_status'"
                             :type="agentUpdateTag(scope.row)"
@@ -265,12 +267,25 @@
         >
             <el-skeleton v-if="editorLoading" :rows="6" animated />
             <el-form v-else label-position="top" @submit.prevent="save">
-                <el-form-item v-for="field in definition.edit || []" :key="field.key" :label="field.label">
+                <el-form-item v-for="field in editorFields" :key="field.key" :label="field.label">
                     <el-switch v-if="field.type === 'switch'" v-model="form[field.key]" />
                     <el-select v-else-if="field.type === 'select'" v-model="form[field.key]" clearable filterable style="width: 100%">
                         <el-option v-for="item in field.options" :key="item.value" :label="item.label" :value="item.value" />
                     </el-select>
                     <el-select v-else-if="field.type === 'node'" v-model="form[field.key]" clearable filterable style="width: 100%">
+                        <el-option v-for="node in nodes" :key="node.id" :label="node.name" :value="node.id" />
+                    </el-select>
+                    <el-radio-group v-else-if="field.type === 'node-scope'" v-model="form.node_scope">
+                        <el-radio value="all">全部节点</el-radio><el-radio value="selected">指定节点</el-radio>
+                    </el-radio-group>
+                    <el-select
+                        v-else-if="field.type === 'multi-node'"
+                        v-model="form.node_ids"
+                        multiple
+                        filterable
+                        style="width: 100%"
+                        placeholder="选择启用此规则的节点"
+                    >
                         <el-option v-for="node in nodes" :key="node.id" :label="node.name" :value="node.id" />
                     </el-select>
                     <el-date-picker
@@ -287,6 +302,12 @@
                         :rows="field.type === 'textarea' ? 5 : undefined"
                     />
                 </el-form-item>
+                <el-alert
+                    v-if="resource === 'rules' && form.kind === 'capture_degraded'"
+                    type="info"
+                    :closable="false"
+                    title="按每个采集窗口的内核丢包、状态丢弃与上报缓存丢弃之和判断。只在选定节点生成质量告警；关闭告警仍保留节点健康数据。"
+                />
             </el-form>
             <template #footer
                 ><el-button @click="editorOpen = false">取消</el-button
@@ -453,6 +474,7 @@ const definitions: Record<string, Definition> = {
             col('severity', '级别'),
             col('threshold', '阈值'),
             col('window_seconds', '窗口秒'),
+            col('node_scope', '适用节点'),
             col('enabled', '启用'),
         ],
         edit: [
@@ -473,6 +495,7 @@ const definitions: Record<string, Definition> = {
                     egress_mbps: '出站 Mbps',
                     vpn_protocol: 'VPN 双向握手',
                     proxy_suspect: '疑似加密代理',
+                    capture_degraded: '采集覆盖下降',
                 }),
             },
             { ...col('threshold', '阈值'), type: 'number' },
@@ -480,6 +503,8 @@ const definitions: Record<string, Definition> = {
             { ...col('cooldown_seconds', '告警合并窗口秒'), type: 'number' },
             { ...col('severity', '级别'), type: 'select', options: options({ low: '低', medium: '中', high: '高' }) },
             { ...col('node_id', '适用节点'), type: 'node' },
+            { ...col('node_scope', '启用范围'), type: 'node-scope' },
+            { ...col('node_ids', '指定节点（可多选）'), type: 'multi-node' },
             { ...col('enabled', '启用'), type: 'switch' },
         ],
     },
@@ -607,6 +632,20 @@ const editorOpen = ref(false)
 const editorLoading = ref(false)
 const editingId = ref<number | string | null>(null)
 const form = reactive<Record<string, any>>({})
+const editorFields = computed(() =>
+    (definition.value.edit || [])
+        .filter((field) => {
+            if (resource.value !== 'rules') return true
+            if (form.kind !== 'capture_degraded') return !['node_scope', 'node_ids'].includes(field.key)
+            if (['node_id', 'window_seconds'].includes(field.key)) return false
+            return field.key !== 'node_ids' || form.node_scope === 'selected'
+        })
+        .map((field) =>
+            resource.value === 'rules' && form.kind === 'capture_degraded' && field.key === 'threshold'
+                ? { ...field, label: '每采集窗口丢弃计数阈值' }
+                : field
+        )
+)
 const bulkOpen = ref(false)
 const bulkStatus = ref('acknowledged')
 const resolution = ref('')
@@ -760,6 +799,13 @@ function display(value: any): string {
 function enabledState(value: unknown): boolean {
     return [true, 1, '1', 't', 'true'].includes(value as string | number | boolean)
 }
+function ruleNodeScope(row: any): string {
+    const name = (id: string) => nodes.value.find((node) => node.id === id)?.name || id
+    if (row.kind !== 'capture_degraded') return row.node_id ? name(row.node_id) : '全部节点'
+    const ids = row.node_ids
+    if (ids === null || ids === undefined) return row.node_id ? name(row.node_id) : '全部节点'
+    return ids.length ? '指定节点：' + ids.map(name).join('、') : '未选择节点（不生成告警）'
+}
 const timeColumns = ['last_seen_at', 'first_seen_at', 'last_probed_at', 'window_start', 'window_end', 'created_at', 'updated_at', 'expires_at']
 function isTimeColumn(key: string): boolean {
     return timeColumns.includes(key)
@@ -813,6 +859,7 @@ async function fetchDetail() {
 async function openEditor(row?: any) {
     editingId.value = row?.id || null
     Object.keys(form).forEach((key) => delete form[key])
+    if (resource.value === 'rules') Object.assign(form, { node_scope: 'all', node_ids: [] })
     editorOpen.value = true
     editorLoading.value = !!row
     try {
@@ -835,6 +882,10 @@ async function openEditor(row?: any) {
                 }
                 form[field.key] = value
             }
+            if (resource.value === 'rules') {
+                form.node_ids = record.node_ids || (record.node_id ? [record.node_id] : [])
+                form.node_scope = (record.node_ids !== null && record.node_ids !== undefined) || record.node_id ? 'selected' : 'all'
+            }
         } else {
             if (resource.value === 'exclusions') Object.assign(form, { max_value: 200, allowed_severity: 'medium' })
             form.enabled = true
@@ -856,6 +907,17 @@ async function openEditor(row?: any) {
 }
 async function save() {
     const data = { ...form }
+    if (resource.value === 'rules') {
+        if (data.kind === 'capture_degraded') {
+            if (data.node_scope === 'selected' && (!Array.isArray(data.node_ids) || !data.node_ids.length)) {
+                ElMessage.warning('请选择至少一个适用节点，或改为全部节点')
+                return
+            }
+            data.node_ids = data.node_scope === 'selected' ? data.node_ids : null
+            data.node_id = null
+        } else data.node_ids = null
+        delete data.node_scope
+    }
     if (resource.value === 'exclusions') {
         data.target_cidrs = String(data.target_cidrs || '')
             .split(/[\s,，]+/)

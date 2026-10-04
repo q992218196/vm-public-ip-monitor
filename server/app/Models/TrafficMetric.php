@@ -10,6 +10,8 @@ class TrafficMetric extends Model
 
     protected $guarded = [];
 
+    protected $dateFormat = 'Y-m-d H:i:s.u';
+
     protected function casts(): array
     {
         return ['evidence' => 'array', 'window_start' => 'datetime', 'window_end' => 'datetime'];

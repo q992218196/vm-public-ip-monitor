@@ -84,7 +84,7 @@ docker compose -f compose.yml -f compose.buildadmin.yml run --rm --no-deps app p
 docker compose -f compose.yml -f compose.buildadmin.yml run --rm --no-deps app php artisan db:seed --class=MonitorSeeder --force
 docker compose -f compose.yml -f compose.buildadmin.yml up -d --no-deps --force-recreate app web queue scheduler ai-queue buildadmin-app buildadmin-web
 docker compose -f compose.yml -f compose.buildadmin.yml exec buildadmin-app php think migrate:run
-docker compose -f compose.yml -f compose.buildadmin.yml --profile https up -d --no-deps --force-recreate https
+docker compose -f compose.yml -f compose.buildadmin.yml --profile https up -d --no-deps https
 ```
 
 如果已启用网站 worker，**也要更新它**：
@@ -95,6 +95,8 @@ docker compose -f compose.yml -f compose.buildadmin.yml --profile screenshots up
 ```
 
 后台强制刷新，然后在“采集节点”确认最近上报持续更新。规则初始化只新增缺失规则，保留已修改阈值。
+
+升级不强制重建已运行的 HTTPS 入口，避免无必要的 443 中断；如果修改了 Caddy 配置，可执行 `docker compose -f compose.yml -f compose.buildadmin.yml exec https caddy reload --config /etc/caddy/Caddyfile` 平滑重载。应用容器替换期间仍可能短暂出现 502，Agent 会保留普通上报批次并自动重试，入口恢复后无需逐个重启节点。
 
 本版 Agent 为 **1.3.1**：先升级主控，再在采集节点下发更新。新版本补全每目标最多 128 个端口的业务范围，减少白名单因截断反复失效。先更新主控，再更新节点，重新审核业务白名单；旧节点的截断数据仍要求复核。Agent 1.3.0 为两个 UDP 规则提供排除目标端口 53 后的独立计数；旧节点继续正常上报，但暂不参与这两个规则，升级后自动恢复。
 
@@ -207,7 +209,9 @@ docker compose -f compose.yml -f compose.buildadmin.yml up -d app queue schedule
 
 ### 检测与审核
 
-同一节点、公网 IP 的持续规则命中归并成事件。详情先看本地 IP 报告：目标、端口、连接状态、双向流量、时间趋势、采集质量和证据缺口。纯数量提醒、疑似异常和强异常证据分别分级，不将连接数量直接当作攻击结论。
+同一节点、公网 IP 的持续规则命中归并成事件。“事件报告与证据”先显示规则证据（主要告警优先），随后是 PCAP 留存和手动 AI，IP 审核报告放在底部。报告包含目标、端口、连接状态、双向流量、时间趋势、采集质量和证据缺口。纯数量提醒、疑似异常和强异常证据分别分级，不将连接数量直接当作攻击结论。
+
+**“采集覆盖下降”可在检测规则中配置。** 编辑系统默认的同名规则，选择全部节点或指定节点（支持多选），设置阈值、级别、告警合并窗口和启用开关。阈值是当前采集窗口内核丢包、状态丢弃及上报缓存丢弃计数之和，默认 1；不使用流量规则的评估窗口累积计数。升级后默认保持全部节点启用；关闭或排除节点只停止生成该质量告警，节点健康数据仍保留，既有告警不会自动删除。
 
 常见服务规则包括 SSH、SMB、RDP、FTP 高频连接。规则计数是目标级 TCP 建连尝试（主动 SYN 有界去重），不是连接后交互或登录次数；完整三次握手数另列。跨窗口取最大值，详情样本为 30 秒时，317 次是该 30 秒样本内的发起数，不是配置 60 秒内的总和。明文 FTP、SMB2 的可见认证响应可以在 PCAP 中辅助核查；加密 SSH、RDP/NLA 等登录结果需服务日志，不能仅凭端口认定爆破。
 
@@ -265,6 +269,7 @@ AI 报告优先回答本次抓包窗口该 IP 是否有对外攻击证据，分�
 | --- | --- |
 | 后台打不开／登录失败 | 域名、80/443、`https`、`buildadmin-web`、`buildadmin-app`、MySQL |
 | Agent HTTP 502 | `app`、`web`、`https`，查看 nginx 和 PHP 日志；不要删除节点缓存 |
+| Agent connection refused | 当时无法连接主控 443；检查 HTTPS 入口是否正在重建、是否运行以及网络连接，重启 Agent 不会修复主控入口 |
 | Agent HTTP 429 | 上报限流或主控积压，检查分析队列和数据库；批次会保留重试 |
 | Agent HTTP 422 | 日志中的校验字段、CIDR 和采集时间；被丢弃批次不能通过重启恢复 |
 | worker 权限错误 | worker 数据目录属主，按启用步骤重新设置 |
@@ -282,5 +287,7 @@ curl -sS -o /dev/null -w 'Agent API: %{http_code}\n' 'https://vm-monitor.lcayun.
 ```
 
 无 Agent 令牌的最后一项正常应为 **401**。示例域名和自定义目录请替换。BuildAdmin 日志在 `buildadmin/runtime`；节点日志在宿主机的 `data_dir/logs/agent.log`。
+
+更新退出前的最后一个采集窗口可能不足一秒。本版主控按小数秒比较并保存窗口时间，避免有效短窗口被误拒绝；时间相等或倒退仍拒绝。日志中已经被 HTTP 422 丢弃的旧批次无法恢复。出现 `started 1.3.1` 表示该进程已启动此版本；后台显示的当前版本还要等待下一次成功上报。
 
 管理员邮箱和密码在右上角“个人资料”修改；其他账号在“管理员管理”维护。只读人员分配“监控只读”分组。

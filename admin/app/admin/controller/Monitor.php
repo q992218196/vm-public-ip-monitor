@@ -22,7 +22,7 @@ class Monitor extends Backend
         'ips' => ['ip', 'id', 'version', 'label', 'first_seen_at', 'last_seen_at'],
         'websites' => ['id', 'ip_asset_id', 'host', 'port', 'scheme', 'status', 'ownership_status', 'title', 'description', 'category', 'manual_category', 'last_probed_at', 'last_seen_at'],
         'alerts' => ['id', 'node_id', 'ip_asset_id', 'title', 'kind', 'severity', 'status', 'occurrences', 'last_seen_at'],
-        'rules' => ['id', 'name', 'kind', 'threshold', 'window_seconds', 'cooldown_seconds', 'severity', 'node_id', 'enabled'],
+        'rules' => ['id', 'name', 'kind', 'threshold', 'window_seconds', 'cooldown_seconds', 'severity', 'node_id', 'node_ids', 'enabled'],
         'exclusions' => ['id', 'cidr', 'kind', 'reason', 'node_id', 'expires_at'],
         'metrics' => ['id', 'node_id', 'ip_asset_id', 'bytes_out', 'bytes_in', 'tcp_attempts', 'window_start', 'window_end'],
         'tasks' => ['id', 'website_id', 'status', 'attempts', 'last_error', 'updated_at'],
@@ -130,6 +130,9 @@ class Monitor extends Backend
         }
         $rows = $query->field($fields)->order($sort, $direction)->order('m.id', 'desc')->page($page, $limit)->select()->toArray();
         foreach ($rows as &$row) {
+            if ($resource === 'rules') {
+                $row['node_ids'] = $this->decode($row['node_ids'] ?? null);
+            }
             if ($resource === 'nodes') {
                 $row['cidrs'] = $this->decode($row['cidrs'] ?? null);
                 $row['health'] = $this->decode($row['health'] ?? null);
@@ -171,7 +174,14 @@ class Monitor extends Backend
         $severity = (string) $this->request->get('severity', '');
         $search = trim((string) $this->request->get('search', ''));
         $review = (string) $this->request->get('review', '');
-        if ($node !== '' && in_array($resource, ['alerts', 'metrics', 'protocols', 'rules', 'exclusions'], true)) {
+        if ($node !== '' && $resource === 'rules') {
+            $query->where(function ($scope) use ($node) {
+                $scope->where('m.node_id', $node)->whereOr(function ($quality) use ($node) {
+                    $quality->where('m.kind', 'capture_degraded')->whereNull('m.node_id')
+                        ->whereRaw('(m.node_ids IS NULL OR m.node_ids::jsonb @> ?::jsonb)', [json_encode([$node])]);
+                });
+            });
+        } elseif ($node !== '' && in_array($resource, ['alerts', 'metrics', 'protocols', 'exclusions'], true)) {
             $query->where('m.node_id', $node);
         }
         if ($ip !== '' && filter_var($ip, FILTER_VALIDATE_IP)) {
@@ -383,7 +393,7 @@ class Monitor extends Backend
         $data = $this->request->post('data/a', []);
         $allowed = match ($resource) {
             'ips' => ['label', 'notes'], 'websites' => ['manual_category'],
-            'rules' => ['name', 'kind', 'enabled', 'severity', 'threshold', 'window_seconds', 'cooldown_seconds', 'node_id'],
+            'rules' => ['name', 'kind', 'enabled', 'severity', 'threshold', 'window_seconds', 'cooldown_seconds', 'node_id', 'node_ids'],
             'exclusions' => ['cidr', 'kind', 'reason', 'expires_at', 'node_id', 'target_cidrs', 'allowed_ports', 'max_value', 'allowed_severity'],
             'nodes' => ['name', 'enabled', 'cidrs', 'settings', 'notes'],
         };
@@ -419,6 +429,9 @@ class Monitor extends Backend
         }
         if (isset($data['settings'])) {
             $data['settings'] = json_encode($data['settings']);
+        }
+        if (isset($data['node_ids'])) {
+            $data['node_ids'] = json_encode($data['node_ids']);
         }
         $data['updated_at'] = gmdate('Y-m-d H:i:s');
         if ($id === '') {
@@ -509,8 +522,35 @@ class Monitor extends Backend
             if (isset($data['name']) && (trim((string) $data['name']) === '' || mb_strlen((string) $data['name']) > 255)) {
                 $this->error('规则名称无效');
             }
-            if (isset($data['kind']) && ! in_array($data['kind'], ['vertical_scan', 'ssh_connections', 'smb_connections', 'rdp_connections', 'ftp_connections', 'udp_flow_burst', 'udp_packet_rate', 'single_target_attempts', 'tcp_connection_burst', 'egress_mbps', 'vpn_protocol', 'proxy_suspect'], true)) {
+            if (isset($data['kind']) && ! in_array($data['kind'], ['vertical_scan', 'ssh_connections', 'smb_connections', 'rdp_connections', 'ftp_connections', 'udp_flow_burst', 'udp_packet_rate', 'single_target_attempts', 'tcp_connection_burst', 'egress_mbps', 'vpn_protocol', 'proxy_suspect', 'capture_degraded'], true)) {
                 $this->error('规则类型无效');
+            }
+            $scope = $creating ? $data : array_replace($this->db()->table('rules')->where('id', $id)->find() ?: [], $data);
+            if (($scope['kind'] ?? '') === 'capture_degraded') {
+                if (array_key_exists('node_ids', $data) && $data['node_ids'] !== null && ! is_array($data['node_ids'])) {
+                    $this->error('适用节点必须是列表或全部节点');
+                }
+                $targets = $this->decode($scope['node_ids'] ?? null);
+                if ($targets !== null) {
+                    if (! is_array($targets) || ! array_is_list($targets) || count($targets) > 500) {
+                        $this->error('适用节点列表无效');
+                    }
+                    foreach ($targets as $target) {
+                        if (! is_string($target) || ! preg_match('/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i', $target)) {
+                            $this->error('适用节点 ID 无效');
+                        }
+                    }
+                    $targets = array_values(array_unique(array_map('strtolower', $targets)));
+                    if ($targets && (int) $this->db()->table('nodes')->whereIn('id', $targets)->count() !== count($targets)) {
+                        $this->error('指定节点不存在');
+                    }
+                }
+                $data['node_ids'] = $targets;
+            } else {
+                if (! empty($data['node_ids'])) {
+                    $this->error('多选节点范围仅适用于采集覆盖下降规则');
+                }
+                $data['node_ids'] = null;
             }
             if (isset($data['severity']) && ! in_array($data['severity'], ['low', 'medium', 'high'], true)) {
                 $this->error('告警级别无效');

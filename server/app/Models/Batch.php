@@ -8,6 +8,8 @@ class Batch extends Model
 {
     protected $guarded = [];
 
+    protected $dateFormat = 'Y-m-d H:i:s.u';
+
     protected function casts(): array
     {
         return ['payload' => 'array', 'processed_at' => 'datetime', 'dispatched_at' => 'datetime', 'window_start' => 'datetime', 'window_end' => 'datetime'];

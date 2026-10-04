@@ -10,7 +10,7 @@ class Rule extends Model
 
     protected function casts(): array
     {
-        return ['enabled' => 'boolean'];
+        return ['enabled' => 'boolean', 'node_ids' => 'array'];
     }
 
     public function node()

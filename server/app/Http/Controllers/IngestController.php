@@ -17,7 +17,7 @@ class IngestController extends Controller
         abort_if(strlen($r->getContent()) > 8 * 1024 * 1024, 413);
         $v = $r->validate([
             'batch_id' => 'required|string|regex:/^[a-zA-Z0-9-]{16,64}$/',
-            'window_start' => 'required|date', 'window_end' => 'required|date|after:window_start',
+            'window_start' => 'required|date', 'window_end' => 'required|date',
             'health' => 'required|array', 'health.version' => 'required|string|max:32',
             'health.update_error' => 'sometimes|string|max:255',
             'health.interfaces' => 'sometimes|array|max:8', 'health.interfaces.*' => 'string|max:64',
@@ -90,6 +90,9 @@ class IngestController extends Controller
         ]);
         $start = CarbonImmutable::parse($v['window_start']);
         $end = CarbonImmutable::parse($v['window_end']);
+        if (! $end->isAfter($start)) {
+            throw ValidationException::withMessages(['window_end' => '窗口结束时间必须晚于开始时间（按小数秒比较）']);
+        }
         if ($end->isAfter(now()->addMinutes(5)) || $start->isBefore(now()->subDays(14)) || $start->diffInSeconds($end) > 600) {
             throw ValidationException::withMessages(['window_start' => '窗口必须在过去14天内、长度不超过600秒，未来偏差不超过5分钟']);
         }

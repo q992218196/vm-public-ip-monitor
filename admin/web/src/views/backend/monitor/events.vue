@@ -132,14 +132,6 @@
                         ><el-button type="primary" :loading="capturing" :disabled="!detail.event.ip" @click="capture">申请定向抓包</el-button>
                     </div>
                     <p>抓包只记录申请后的流量：最长 60 秒、32 MiB；同一节点同时采集一个 IP。原始文件可能包含明文请求数据，下载仅限管理员。</p>
-                    <div v-loading="reviewReportLoading">
-                        <EventReviewReport v-if="reviewReport" :report="reviewReport" /><el-alert
-                            v-if="reviewReportError"
-                            :title="reviewReportError"
-                            type="error"
-                            :closable="false"
-                        />
-                    </div>
                     <h3>规则证据（主要告警优先）</h3>
                     <el-collapse
                         ><el-collapse-item v-for="alert in detail.alerts" :key="alert.id" :name="alert.id" :title="alert.title"
@@ -195,6 +187,14 @@
                             ></el-table-column
                         ></el-table
                     >
+                    <div v-loading="reviewReportLoading">
+                        <EventReviewReport v-if="reviewReport" :report="reviewReport" /><el-alert
+                            v-if="reviewReportError"
+                            :title="reviewReportError"
+                            type="error"
+                            :closable="false"
+                        />
+                    </div>
                 </template>
             </div>
         </el-drawer>

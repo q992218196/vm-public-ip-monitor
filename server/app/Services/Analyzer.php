@@ -114,8 +114,16 @@ class Analyzer
             $this->alert($node, $asset, 'proxy_suspect', $proxyRule->severity, '疑似加密代理样态（未确认协议）', $evidence, $at, $proxyRule->cooldown_seconds, $salt);
         }
         $h = $p['health'];
-        if (($h['kernel_drops'] ?? 0) + ($h['state_dropped'] ?? 0) + ($h['spool_dropped'] ?? 0) > 0) {
-            $this->alert($node, null, 'capture_degraded', 'medium', '采集覆盖下降', $h, $at, 600);
+        $captureRule = $this->rules->where('kind', 'capture_degraded')
+            ->filter(fn ($rule) => $rule->node_ids === null || in_array($node->id, $rule->node_ids, true))
+            ->sortByDesc(fn ($rule) => $rule->node_id !== null)->first();
+        $drops = ($h['kernel_drops'] ?? 0) + ($h['state_dropped'] ?? 0) + ($h['spool_dropped'] ?? 0);
+        if ($captureRule && $drops >= $captureRule->threshold) {
+            $this->alert($node, null, 'capture_degraded', $captureRule->severity, '采集覆盖下降', [
+                ...$h,
+                'rule_id' => $captureRule->id, 'value' => $drops, 'threshold' => $captureRule->threshold,
+                'note' => '阈值为当前采集窗口的内核丢包、状态丢弃和上报缓存丢弃之和；属于节点采集质量，不代表 VM 违规。',
+            ], $at, $captureRule->cooldown_seconds);
         }
     }
 
@@ -142,11 +150,12 @@ class Analyzer
 
     private function detect(Node $node, IpAsset $asset, Batch $batch): void
     {
-        if ($this->rules->isEmpty()) {
+        $trafficRules = $this->rules->where('kind', '!=', 'capture_degraded');
+        if ($trafficRules->isEmpty()) {
             return;
         }
-        $history = TrafficMetric::where('node_id', $node->id)->where('ip_asset_id', $asset->id)->where('window_end', '>', $batch->window_end->copy()->subSeconds($this->rules->max('window_seconds')))->where('window_end', '<=', $batch->window_end)->orderBy('window_end')->get();
-        foreach ($this->rules as $rule) {
+        $history = TrafficMetric::where('node_id', $node->id)->where('ip_asset_id', $asset->id)->where('window_end', '>', $batch->window_end->copy()->subSeconds($trafficRules->max('window_seconds'))->format('Y-m-d H:i:s.u'))->where('window_end', '<=', $batch->window_end->format('Y-m-d H:i:s.u'))->orderBy('window_end')->get();
+        foreach ($trafficRules as $rule) {
             $cutoff = $batch->window_end->copy()->subSeconds($rule->window_seconds);
             $rows = $history->filter(fn ($row) => $row->window_end->gt($cutoff));
             $udpRuleStatistics = [];
@@ -170,7 +179,7 @@ class Analyzer
             $serviceSample = $serviceSamples->first();
             $value = $serviceSample ? $serviceSample['sample']['tcp_attempts'] : match ($rule->kind) {
                 'udp_flow_burst' => $udpRuleStatistics['flows_max'],
-                'udp_packet_rate' => (int) ($udpRuleStatistics['packets_out'] / max(1, $udpRuleStatistics['observed_seconds'])),
+                'udp_packet_rate' => (int) ($udpRuleStatistics['packets_out'] / max(0.000001, $udpRuleStatistics['observed_seconds'])),
                 'vertical_scan' => (int) $rows->max(fn ($m) => $m->evidence['max_ports_per_target'] ?? 0),
                 'single_target_attempts' => (int) $rows->max(fn ($m) => $m->evidence['max_attempts_per_target'] ?? 0),
                 'tcp_connection_burst' => (int) $rows->sum('tcp_attempts'),
@@ -192,7 +201,7 @@ class Analyzer
             };
             $sample = match ($rule->kind) {
                 'udp_flow_burst' => $rows->sortByDesc(fn ($row) => $row->evidence['udp_non_dns_flows_out'] ?? 0)->first(),
-                'udp_packet_rate' => $rows->sortByDesc(fn ($row) => ($row->evidence['udp_non_dns_packets_out'] ?? 0) / max(1, $row->window_start->diffInSeconds($row->window_end)))->first(),
+                'udp_packet_rate' => $rows->sortByDesc(fn ($row) => ($row->evidence['udp_non_dns_packets_out'] ?? 0) / max(0.000001, $row->window_start->diffInSeconds($row->window_end)))->first(),
                 'vertical_scan' => $rows->sortByDesc(fn ($row) => $row->evidence['max_ports_per_target'] ?? 0)->first(),
                 'single_target_attempts' => $rows->sortByDesc(fn ($row) => $row->evidence['max_attempts_per_target'] ?? 0)->first(),
                 default => $rows->last(),

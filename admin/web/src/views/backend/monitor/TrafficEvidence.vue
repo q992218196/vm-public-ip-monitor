@@ -13,6 +13,17 @@
                 均不能替代登录结果。
             </p>
         </template>
+        <template v-else-if="record.kind === 'capture_degraded'">
+            <el-descriptions :column="2" border>
+                <el-descriptions-item label="丢弃计数／阈值"
+                    >{{ evidence.value ?? '旧记录未保存' }} / {{ evidence.threshold ?? '旧记录未保存' }}</el-descriptions-item
+                >
+                <el-descriptions-item label="内核丢包">{{ evidence.kernel_drops ?? '未采集' }}</el-descriptions-item>
+                <el-descriptions-item label="状态丢弃">{{ evidence.state_dropped ?? '未采集' }}</el-descriptions-item>
+                <el-descriptions-item label="上报缓存丢弃">{{ evidence.spool_dropped ?? '未采集' }}</el-descriptions-item>
+            </el-descriptions>
+            <p>这是单个采集窗口的节点质量提醒，不代表 VM 违规。在“检测规则 → 采集覆盖下降”选择启用节点、阈值和级别；不提供白名单入口。</p>
+        </template>
         <template v-else-if="sample.transport === 'UDP'">
             <el-descriptions :column="2" border>
                 <el-descriptions-item label="公网 IP">{{ record.ip || sample.ip || '—' }}</el-descriptions-item>
@@ -150,7 +161,7 @@ const udpCalculation = computed(() => {
         stats.observed_seconds <= 0
     )
         return '旧记录未保存规则出站包总数和实际观察秒数，无法复算；不使用配置秒数推算。'
-    return `规则计入 ${stats.packets_out} 个出站包 ÷ ${stats.observed_seconds} 秒实际观察时间 = ${(stats.packets_out / Math.max(1, stats.observed_seconds)).toFixed(1)} 包/秒，命中值向下取整（排除目标端口 53）。`
+    return `规则计入 ${stats.packets_out} 个出站包 ÷ ${stats.observed_seconds} 秒实际观察时间 = ${(stats.packets_out / stats.observed_seconds).toFixed(1)} 包/秒，命中值向下取整（排除目标端口 53）。`
 })
 const ruleCoverage = computed(() => {
     const e = evidence.value

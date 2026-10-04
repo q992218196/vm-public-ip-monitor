@@ -6,6 +6,7 @@ if (getenv('MONITOR_DB_DATABASE') !== 'monitor_test' || ! getenv('TEST_ADMIN_TOK
 }
 $db = new PDO('pgsql:host=127.0.0.1;dbname=monitor_test', getenv('MONITOR_DB_USERNAME'), getenv('MONITOR_DB_PASSWORD'), [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
 $db->exec(<<<'SQL'
+CREATE TABLE rules (id bigserial primary key,name text,kind text,enabled boolean default true,severity text default 'medium',threshold integer,window_seconds integer default 60,cooldown_seconds integer default 600,node_id uuid,node_ids jsonb,created_at timestamp,updated_at timestamp);
 ALTER TABLE alerts ADD COLUMN event_id bigint, ADD COLUMN first_seen_at timestamp;
 CREATE TABLE monitor_events (id bigserial primary key,node_id uuid,ip_asset_id bigint,active_key text,title text,severity text,status text default 'open',kinds jsonb,quality jsonb,occurrences bigint default 1,review_notes text,first_seen_at timestamp,last_seen_at timestamp,created_at timestamp,updated_at timestamp);
 ALTER TABLE monitor_events ADD COLUMN behavior jsonb, ADD COLUMN review_context jsonb, ADD COLUMN reopen_reason text, ADD COLUMN assessment_category text default 'needs_review';
@@ -222,3 +223,39 @@ if ($rows[0]['agent_update_error'] !== 'dial tcp: timeout') {
     throw new RuntimeException('Current update failures must remain visible');
 }
 echo "Update requests fence stale errors while preserving current failures.\n";
+
+$qualityNodes = ['00000000-0000-4000-8000-000000000001', '00000000-0000-4000-8000-000000000002'];
+$db->prepare('INSERT INTO nodes(id,name,enabled,cidrs) VALUES (?, ?, true, ?) ON CONFLICT(id) DO NOTHING')->execute([$qualityNodes[1], 'Quality node two', '[]']);
+$qualityData = ['name' => '采集覆盖下降', 'kind' => 'capture_degraded', 'threshold' => 10, 'severity' => 'medium', 'enabled' => true, 'node_ids' => $qualityNodes];
+$qualityId = $ok($request('save', ['resource' => 'rules', 'data' => $qualityData], true, false, 'Monitor'))['id'];
+$qualityRule = $ok($request('detail', ['resource' => 'rules', 'id' => $qualityId], false, false, 'Monitor'))['record'];
+if ($qualityRule['node_ids'] !== $qualityNodes || $qualityRule['node_id'] !== null) {
+    throw new RuntimeException('Capture quality rule loses multi-node selection');
+}
+$scopedRules = $ok($request('index', ['resource' => 'rules', 'node' => $qualityNodes[1]], false, false, 'Monitor'))['list'];
+if (count($scopedRules) !== 1 || $scopedRules[0]['node_ids'] !== $qualityNodes) {
+    throw new RuntimeException('Rules node filter misses multi-node scope');
+}
+$invalidScope = $qualityData;
+$invalidScope['node_ids'] = ['00000000-0000-4000-8000-999999999999'];
+if (($request('save', ['resource' => 'rules', 'id' => $qualityId, 'data' => $invalidScope], true, false, 'Monitor')['code'] ?? null) === 1) {
+    throw new RuntimeException('Unknown nodes allowed in capture quality scope');
+}
+$invalidScope['node_ids'] = ['not-a-uuid'];
+if (($request('save', ['resource' => 'rules', 'id' => $qualityId, 'data' => $invalidScope], true, false, 'Monitor')['code'] ?? null) === 1) {
+    throw new RuntimeException('Invalid node IDs allowed in capture quality scope');
+}
+$invalidScope = $qualityData;
+$invalidScope['kind'] = 'ssh_connections';
+if (($request('save', ['resource' => 'rules', 'id' => $qualityId, 'data' => $invalidScope], true, false, 'Monitor')['code'] ?? null) === 1) {
+    throw new RuntimeException('Multi-node quality scope applied to unrelated rule types');
+}
+if (($request('save', ['resource' => 'rules', 'id' => $qualityId, 'data' => ['enabled' => false]], true, true, 'Monitor')['code'] ?? null) !== 403) {
+    throw new RuntimeException('Viewer can disable capture quality rules');
+}
+$ok($request('save', ['resource' => 'rules', 'id' => $qualityId, 'data' => ['enabled' => false, 'node_ids' => null]], true, false, 'Monitor'));
+$qualityRule = $ok($request('detail', ['resource' => 'rules', 'id' => $qualityId], false, false, 'Monitor'))['record'];
+if ($qualityRule['node_ids'] !== null || ! in_array($qualityRule['enabled'], [false, 'f', 0, '0'], true)) {
+    throw new RuntimeException('Capture quality scope cannot restore all nodes or disable');
+}
+echo "Capture quality rules enforce multi-node scope, validation and administrator permissions.\n";

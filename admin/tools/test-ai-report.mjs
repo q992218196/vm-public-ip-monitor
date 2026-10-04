@@ -237,6 +237,9 @@ try {
   const eventFixture = {id: 933, title: "SMB 服务高频连接（待复核）", ip: "103.123.132.239", node_name: "TW 2", severity: "medium", status: "open", kinds: ["horizontal_scan", "smb_connections"], quality: {}, first_seen_at: "2026-10-03 07:01:48", last_seen_at: "2026-10-03 07:02:48"};
   const captureFixture = {id: "test-pcap", status: "uploaded", bytes: 4, metadata: {}, created_at: "2026-10-03 07:01:48"};
   let requestedMode = null;
+  const nodeFixtures = [{id: "00000000-0000-4000-8000-000000000001", name: "HK 1"}, {id: "00000000-0000-4000-8000-000000000002", name: "TW 2"}];
+  const qualityRule = {id: 4, name: "采集覆盖下降", kind: "capture_degraded", threshold: 1, window_seconds: 60, cooldown_seconds: 600, severity: "medium", enabled: true, node_id: null, node_ids: null};
+  let savedQualityRule = null;
   await page.route("**/admin/**", async route => {
     const url = new URL(route.request().url());
     const action = url.pathname.split("/").at(-1);
@@ -244,13 +247,15 @@ try {
     if (action === "index" && url.pathname.includes("/Monitor/")) data = {list: [
       {id: 1, name: "高规则", kind: "horizontal_scan", threshold: 100, window_seconds: 60, severity: "high", enabled: true},
       {id: 2, name: "中规则", kind: "smb_connections", threshold: 60, window_seconds: 60, severity: "medium", enabled: false},
-      {id: 3, name: "低规则", kind: "tcp_connection_burst", threshold: 2000, window_seconds: 60, severity: "low", enabled: "f"}
+      {id: 3, name: "低规则", kind: "tcp_connection_burst", threshold: 2000, window_seconds: 60, severity: "low", enabled: "f"}, qualityRule
     ], super: true};
     else if (action === "index") data = {list: [eventFixture], super: true};
-    else if (action === "nodes") data = {list: [], super: true};
+    else if (action === "nodes") data = {list: nodeFixtures, super: true};
     else if (action === "count") data = {total: 1};
+    else if (action === "detail" && url.pathname.includes("/Monitor/")) data = {record: qualityRule};
     else if (action === "detail" || action === "progress") data = {event: eventFixture, alerts: [], captures: [captureFixture], analyses: [], ai: {enabled: true, endpoint: "https://api.deepseek.com/chat/completions", model: "deepseek-flash"}};
-    else if (action === "reviewReport") data = {report: null};
+    else if (action === "reviewReport") data = {report: {event: eventFixture, conclusion: "疑似异常，待复核", category: "needs_review", scope: "Current observed windows only", totals: {attempts: 10, paired_windows: 1, paired_attempts: 10, completed: 8}, timeline: [], reasons: [], normal_explanations: [], targets: [], port_targets: [], request_hints: [], evidence_gaps: [], next_steps: []}};
+    else if (action === "save") {savedQualityRule = route.request().postDataJSON().data; data = {id: 4};}
     else if (action === "whitelistPreview") data = {target_ports: {"112.121.183.102": [11000,11001,11002], "43.128.8.64": [3389]}, fingerprint: "reviewed-profile"};
     else if (action === "requestAi") requestedMode = route.request().postDataJSON().evidence_mode;
     else if (action === "download") {
@@ -269,6 +274,21 @@ try {
   assert.equal(await ruleRows.nth(1).locator(".el-tag--info").textContent(), "停用");
   assert.equal(await ruleRows.nth(2).locator(".el-tag--success").textContent(), "低");
   assert.equal(await ruleRows.nth(2).locator(".el-tag--info").textContent(), "停用");
+  assert.ok((await ruleRows.nth(3).textContent()).includes("全部节点"));
+  await ruleRows.nth(3).getByRole("button", {name: "编辑", exact: true}).click();
+  const qualityDialog = page.getByRole("dialog", {name: "编辑检测规则", exact: true});
+  await qualityDialog.getByText("每采集窗口丢弃计数阈值", {exact: true}).waitFor();
+  assert.equal(await qualityDialog.getByText("评估窗口秒", {exact: true}).count(), 0);
+  await qualityDialog.getByText("指定节点", {exact: true}).click();
+  const nodeSelect = qualityDialog.locator(".el-form-item").filter({hasText: "指定节点（可多选）"}).locator(".el-select");
+  await nodeSelect.click();
+  await page.getByRole("option", {name: "HK 1", exact: true}).click();
+  await page.getByRole("option", {name: "TW 2", exact: true}).click();
+  await qualityDialog.getByRole("button", {name: "保存", exact: true}).click();
+  await qualityDialog.waitFor({state: "hidden"});
+  assert.deepEqual(savedQualityRule.node_ids, nodeFixtures.map(node => node.id));
+  assert.equal(savedQualityRule.node_id, null);
+  assert.equal(savedQualityRule.kind, "capture_degraded");
   await page.evaluate(() => window.showEvidence("events", {}));
   await page.getByRole("button", {name: "加入白名单", exact: true}).first().waitFor();
   await page.getByRole("button", {name: "加入白名单", exact: true}).first().click();
@@ -281,6 +301,11 @@ try {
   assert.ok(countBox.y >= headlineBox.y + headlineBox.height, "Other rule hits must remain visible below the headline");
   await page.getByRole("button", {name: "共 2 类命中，查看全部", exact: true}).click();
   await page.getByRole("heading", {name: "SMB 服务高频连接（待复核） · 103.123.132.239", exact: true}).waitFor();
+  await page.getByRole("heading", {name: "IP 审核报告", exact: true}).waitFor();
+  const detailHeadings = await page.locator(".el-drawer h3").allTextContents();
+  assert.ok(detailHeadings.indexOf("规则证据（主要告警优先）") < detailHeadings.indexOf("PCAP 抓包留存"));
+  assert.ok(detailHeadings.indexOf("PCAP 抓包留存") < detailHeadings.indexOf("手动 AI 分析"));
+  assert.equal(detailHeadings.at(-1), "IP 审核报告");
   await page.getByRole("button", {name: "AI 分析", exact: true}).click();
   await page.getByText("逐包文本前 2 MiB", {exact: true}).click();
   await page.getByRole("button", {name: "提交分析", exact: true}).click();
