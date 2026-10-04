@@ -3,7 +3,7 @@
         <div class="heading">
             <div>
                 <h2>告警中心</h2>
-                <p>同节点、IP 的持续行为合并为事件。证据按需加载，抓包后可申请手动 AI 分析。</p>
+                <p>仅显示疑似异常、强异常及节点运行异常；一般流量活动在流量窗口查看。同节点、IP 的持续行为合并为事件。</p>
             </div>
             <div>
                 <el-button v-if="isAdmin && selected.length" type="primary" @click="openReview(selected)"
@@ -27,9 +27,7 @@
                     ><el-option label="高" value="high" /><el-option label="中" value="medium" /><el-option label="低" value="low"
                 /></el-select>
                 <el-select v-model="filters.assessment_category" placeholder="全部证据结论" clearable @change="search"
-                    ><el-option label="一般行为提醒" value="behavior_notice" /><el-option label="疑似异常，待复核" value="needs_review" /><el-option
-                        label="强异常证据，优先复核"
-                        value="strong_anomaly"
+                    ><el-option label="疑似异常，待复核" value="needs_review" /><el-option label="强异常证据，优先复核" value="strong_anomaly"
                 /></el-select>
                 <el-button type="primary" :loading="loading" @click="search">查询</el-button>
             </div>

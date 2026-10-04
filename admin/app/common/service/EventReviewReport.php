@@ -6,21 +6,29 @@ class EventReviewReport
 {
     public static function prioritize(array $alerts, string $title): array
     {
-        usort($alerts, function ($a, $b) use ($title) {
-            $score = fn ($row) => 10000 * (int) in_array($row['status'] ?? 'open', ['open', 'acknowledged'], true)
-                + 1000 * (['low' => 1, 'medium' => 2, 'high' => 3][$row['severity'] ?? ''] ?? 0)
-                + 100 * (['behavior_notice' => 1, 'needs_review' => 2, 'strong_anomaly' => 3][$row['assessment_category'] ?? ''] ?? 2)
-                + (int) (($row['title'] ?? '') === $title);
+        $ranked = array_map(fn ($row) => ['alert' => $row, 'score' => 100000 * (int) ! self::isBehaviorNotice($row)
+            + 10000 * (int) in_array($row['status'] ?? 'open', ['open', 'acknowledged'], true)
+            + 1000 * (['low' => 1, 'medium' => 2, 'high' => 3][$row['severity'] ?? ''] ?? 0)
+            + 100 * (['behavior_notice' => 1, 'needs_review' => 2, 'strong_anomaly' => 3][$row['assessment_category'] ?? ''] ?? 2)
+            + (int) (($row['title'] ?? '') === $title)], $alerts);
+        usort($ranked, fn ($a, $b) => $b['score'] <=> $a['score']);
 
-            return $score($b) <=> $score($a);
-        });
-
-        return $alerts;
+        return array_column($ranked, 'alert');
     }
 
     private static function decode(mixed $value): array
     {
         return is_array($value) ? $value : (json_decode((string) $value, true) ?: []);
+    }
+
+    private static function isBehaviorNotice(array $alert): bool
+    {
+        if (in_array($alert['kind'] ?? '', ['udp_flow_burst', 'udp_packet_rate'], true)) {
+            return true;
+        }
+
+        return ($alert['assessment_category'] ?? null) === 'behavior_notice'
+            || (self::decode($alert['evidence'] ?? [])['connection_analysis']['category'] ?? null) === 'behavior_notice';
     }
 
     public static function build(array $event, array $alerts, array $metrics): array
@@ -40,6 +48,11 @@ class EventReviewReport
         $reasons = [];
         $gaps = [];
         $explanations = [];
+        $historicalNotices = array_filter($alerts, fn ($alert) => self::isBehaviorNotice($alert));
+        if ($historicalNotices) {
+            $gaps[] = '历史一般行为提醒保留原始证据，不参与本次自动评估或异常证据排序';
+            $alerts = array_filter($alerts, fn ($alert) => ! self::isBehaviorNotice($alert));
+        }
         if (in_array($event['status'], ['open', 'acknowledged'], true)) {
             $active = array_filter($alerts, fn ($alert) => in_array($alert['status'] ?? 'open', ['open', 'acknowledged'], true));
             if (count($active) !== count($alerts)) {
@@ -47,7 +60,7 @@ class EventReviewReport
             }
             $alerts = $active;
         }
-        $category = $alerts ? 'behavior_notice' : 'needs_review';
+        $category = ! $alerts && $historicalNotices ? 'behavior_notice' : 'needs_review';
         $rank = ['behavior_notice' => 1, 'needs_review' => 2, 'strong_anomaly' => 3];
         foreach (self::prioritize($alerts, $event['title'] ?? '') as $alert) {
             $e = self::decode($alert['evidence']);

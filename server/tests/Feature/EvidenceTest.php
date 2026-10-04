@@ -35,7 +35,7 @@ class EvidenceTest extends TestCase
         Storage::disk('local')->put('other/keep.pcap', 'unrelated');
         $capture = PacketCapture::create(['event_id' => $event->id, 'node_id' => $event->node_id, 'ip' => '203.0.113.10', 'status' => 'uploaded', 'path' => $path]);
         AiAnalysis::create(['event_id' => $event->id, 'capture_id' => $capture->id, 'requested_by' => 2, 'config_snapshot' => [], 'status' => 'completed']);
-        app(Analyzer::class)->alert(Node::findOrFail($event->node_id), IpAsset::findOrFail($event->ip_asset_id), 'tcp_connection_burst', 'low', '连接提醒', [], now());
+        app(Analyzer::class)->alert(Node::findOrFail($event->node_id), IpAsset::findOrFail($event->ip_asset_id), 'smb_connections', 'medium', '服务连接待复核', [], now());
         $this->artisan('monitor:clear-alerts')->assertSuccessful();
         $this->assertDatabaseCount('monitor_events', 1);
         $this->assertDatabaseCount('alerts', 1);

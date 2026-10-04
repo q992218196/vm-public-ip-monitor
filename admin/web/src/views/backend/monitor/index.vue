@@ -3,7 +3,9 @@
         <div class="monitor-heading">
             <div>
                 <h2>{{ definition.title }}</h2>
-                <p>监控数据按需读取，证据在打开单条详情时加载；时间按浏览器本地时区显示。</p>
+                <p v-if="resource === 'alerts'">仅显示疑似异常、强异常及节点运行异常；一般流量活动在流量窗口查看。</p>
+                <p v-else-if="resource === 'rules'">UDP 包数／流数量仅用于流量统计，不作为异常告警。时间按浏览器本地时区显示。</p>
+                <p v-else>监控数据按需读取，证据在打开单条详情时加载；时间按浏览器本地时区显示。</p>
             </div>
             <div class="monitor-heading-actions">
                 <el-button v-if="canCreate" type="primary" @click="openEditor()">新增</el-button>
@@ -223,6 +225,7 @@
                 <TrafficEvidence
                     v-if="detail && ((resource === 'alerts' && detail.evidence?.sample) || (resource === 'metrics' && detail.evidence))"
                     :record="detail"
+                    :window-statistics="resource === 'metrics'"
                 />
                 <el-descriptions v-if="['alerts', 'protocols'].includes(resource) && detail?.evidence?.candidate_protocols" :column="1" border>
                     <el-descriptions-item label="疑似代理协议候选">{{ detail.evidence.candidate_protocols.join('、') }}</el-descriptions-item>
@@ -488,8 +491,6 @@ const definitions: Record<string, Definition> = {
                     smb_connections: 'SMB 服务高频连接',
                     rdp_connections: 'RDP 服务高频连接',
                     ftp_connections: 'FTP 服务高频连接',
-                    udp_flow_burst: 'UDP 出站流数量',
-                    udp_packet_rate: 'UDP 出站包速率 PPS',
                     single_target_attempts: '单目标高频连接',
                     tcp_connection_burst: 'TCP 连接突增',
                     egress_mbps: '出站 Mbps',
@@ -536,8 +537,6 @@ const definitions: Record<string, Definition> = {
                     smb_connections: 'SMB 服务高频连接',
                     rdp_connections: 'RDP 服务高频连接',
                     ftp_connections: 'FTP 服务高频连接',
-                    udp_flow_burst: 'UDP 出站流数量',
-                    udp_packet_rate: 'UDP 出站包速率 PPS',
                     single_target_attempts: '单目标高频连接',
                     tcp_connection_burst: 'TCP 连接突增',
                     egress_mbps: '出站 Mbps',

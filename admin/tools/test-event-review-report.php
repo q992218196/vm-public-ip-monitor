@@ -77,6 +77,27 @@ if ($udp['udp_totals']['windows'] !== 2 || $udp['udp_totals']['flows'] !== 4 || 
 }
 echo "UDP windows and endpoint packet evidence remain separate from TCP.\n";
 
+$mixedNoticeAlerts = [
+    ['title' => 'Old high UDP notice', 'kind' => 'udp_packet_rate', 'severity' => 'high', 'assessment_category' => 'strong_anomaly', 'status' => 'open', 'evidence' => json_encode(['connection_analysis' => ['category' => 'strong_anomaly', 'reasons' => ['UDP legacy classification'], 'normal_explanations' => ['UDP legacy explanation'], 'evidence_gaps' => ['UDP legacy gap']]])],
+    ['title' => 'Old high TCP notice', 'kind' => 'tcp_connection_burst', 'severity' => 'high', 'assessment_category' => 'behavior_notice', 'status' => 'open', 'evidence' => ['connection_analysis' => ['category' => 'strong_anomaly', 'reasons' => ['TCP volume reminder']]]],
+    ['title' => 'Low proxy candidate', 'kind' => 'proxy_suspect', 'severity' => 'low', 'assessment_category' => 'needs_review', 'status' => 'open', 'evidence' => ['connection_analysis' => ['category' => 'needs_review', 'reasons' => ['Visible proxy candidate evidence']]]],
+];
+$noticeOrder = EventReviewReport::prioritize($mixedNoticeAlerts, 'Old high UDP notice');
+$mixedNoticeReport = EventReviewReport::build($event + ['title' => 'Low proxy candidate', 'kinds' => ['udp_packet_rate', 'tcp_connection_burst', 'proxy_suspect']], $mixedNoticeAlerts, [$row, $udpRow]);
+if ($noticeOrder[0]['kind'] !== 'proxy_suspect' || count($noticeOrder) !== 3 || $noticeOrder[1]['evidence'] !== $mixedNoticeAlerts[0]['evidence']
+    || $mixedNoticeReport['category'] !== 'needs_review' || $mixedNoticeReport['reasons'] !== ['Visible proxy candidate evidence']
+    || str_contains(json_encode($mixedNoticeReport), 'UDP legacy') || str_contains(json_encode($mixedNoticeReport), 'TCP volume reminder')
+    || ! str_contains(implode(' ', $mixedNoticeReport['evidence_gaps']), '历史一般行为提醒')
+    || $mixedNoticeReport['event']['kinds'] !== ['udp_packet_rate', 'tcp_connection_burst', 'proxy_suspect']
+    || $mixedNoticeReport['udp_totals']['packets_out'] !== 20 || $mixedNoticeReport['totals']['attempts'] !== 20) {
+    throw new RuntimeException('Historical volume-only rules must remain as evidence without outranking or reclassifying mixed security events');
+}
+$onlyNotices = EventReviewReport::build($event + ['kinds' => ['udp_packet_rate']], [$mixedNoticeAlerts[0]], [$udpRow]);
+if ($onlyNotices['category'] !== 'behavior_notice' || $onlyNotices['reasons'] !== [] || $onlyNotices['udp_totals']['packets_out'] !== 20) {
+    throw new RuntimeException('A retired UDP rule must not retain its stale strong-anomaly conclusion');
+}
+echo "Mixed reports prioritize actual anomaly evidence, omit historical volume-only conclusions and preserve original kinds/statistics.\n";
+
 $profile = BusinessScope::profile(
     [['port_scan_targets' => [['peer_ip' => '192.0.2.1', 'ports' => [11001, 11002]]]], ['port_scan_targets' => [['peer_ip' => '192.0.2.1', 'ports' => [11000]]]]],
     [['pcap_fully_read' => true, 'summary_capped' => false, 'peer_groups' => [['peer_ip' => '192.0.2.2', 'ports' => [3389]]]]],

@@ -12,7 +12,7 @@ let server, browser;
 try {
   await writeFile(
     fixturePath,
-    '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><style>body{margin:0;padding:24px;background:#f4f6fa;font:14px system-ui;--el-text-color-primary:#303133;--el-border-color:#ddd;--el-fill-color-light:#f5f7fa;--el-fill-color-lighter:#fafafa;--el-color-primary:#409eff}#app{max-width:900px;margin:auto;background:white;padding:20px;box-sizing:border-box}</style></head><body><div id="app"></div><script type="module">import {createApp, reactive, h} from "vue";import ElementPlus from "element-plus";import "element-plus/dist/index.css";import {createPinia} from "pinia";import {createRouter,createMemoryHistory} from "vue-router";import Monitor from "/src/views/backend/monitor/index.vue";const router=createRouter({history:createMemoryHistory(),routes:[{path:"/rules",component:{render:()=>null}}]});await router.push("/rules");import Events from "/src/views/backend/monitor/events.vue";import AiReport from "/src/views/backend/monitor/AiReport.vue";import TrafficEvidence from "/src/views/backend/monitor/TrafficEvidence.vue";import SiteReport from "/src/views/backend/monitor/SiteReport.vue";import EventReviewReport from "/src/views/backend/monitor/EventReviewReport.vue";const state=reactive({content:"",record:{},view:"ai"});createApp({setup:()=>()=>state.view==="rules"?h(Monitor):state.view==="events"?h(Events):state.view==="udp"?h(TrafficEvidence,{record:state.record}):state.view==="site"?h(SiteReport,{record:state.record}):state.view==="review"?h(EventReviewReport,{report:state.record}):h(AiReport,{content:state.content})}).use(createPinia()).use(router).use(ElementPlus).mount("#app");window.showReport=(text)=>{state.view="ai";state.content=text};window.showEvidence=(view,record)=>{state.view=view;state.record=record};window.ready=true;</script></body></html>',
+    '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><style>body{margin:0;padding:24px;background:#f4f6fa;font:14px system-ui;--el-text-color-primary:#303133;--el-border-color:#ddd;--el-fill-color-light:#f5f7fa;--el-fill-color-lighter:#fafafa;--el-color-primary:#409eff}#app{max-width:900px;margin:auto;background:white;padding:20px;box-sizing:border-box}</style></head><body><div id="app"></div><script type="module">import {createApp, reactive, h} from "vue";import ElementPlus from "element-plus";import "element-plus/dist/index.css";import {createPinia} from "pinia";import {createRouter,createMemoryHistory} from "vue-router";import Monitor from "/src/views/backend/monitor/index.vue";const router=createRouter({history:createMemoryHistory(),routes:[{path:"/rules",component:{render:()=>null}}]});await router.push("/rules");import Events from "/src/views/backend/monitor/events.vue";import AiReport from "/src/views/backend/monitor/AiReport.vue";import TrafficEvidence from "/src/views/backend/monitor/TrafficEvidence.vue";import SiteReport from "/src/views/backend/monitor/SiteReport.vue";import EventReviewReport from "/src/views/backend/monitor/EventReviewReport.vue";const state=reactive({content:"",record:{},view:"ai"});createApp({setup:()=>()=>state.view==="rules"?h(Monitor):state.view==="events"?h(Events):["udp","metrics"].includes(state.view)?h(TrafficEvidence,{record:state.record,windowStatistics:state.view==="metrics"}):state.view==="site"?h(SiteReport,{record:state.record}):state.view==="review"?h(EventReviewReport,{report:state.record}):h(AiReport,{content:state.content})}).use(createPinia()).use(router).use(ElementPlus).mount("#app");window.showReport=(text)=>{state.view="ai";state.content=text};window.showEvidence=(view,record)=>{state.view=view;state.record=record};window.ready=true;</script></body></html>',
   );
   server = await createServer({
     root: webRoot,
@@ -168,6 +168,26 @@ try {
   udpText = await page.locator("body").textContent();
   assert.ok(udpText.includes("1056 / 1000 流") && udpText.includes("流数量取评估范围内单个采集窗口的最大值"));
   assert.ok(udpText.includes("表格流数之和不代表全量流数"));
+  await page.evaluate(() => window.showEvidence("metrics", {
+    id: 1, ip: "203.0.113.10", window_start: "2026-10-04 06:31:27.000000", window_end: "2026-10-04 06:31:57.000000",
+    evidence: {udp_stats_version: 1, udp_filter_version: 1, udp_flows_out: 1056, udp_packets_out: 24325, udp_packets_in: 10350,
+      udp_bytes_out: 19810811, udp_bytes_in: 3192657, udp_non_dns_flows_out: 1000, udp_non_dns_packets_out: 23400,
+      tcp_attempts: 248, udp_endpoints_truncated: true,
+      udp_endpoints: [{peer_ip: "1.1.1.1", peer_port: 53, flows: 56, packets_out: 925, packets_in: 700, bytes_out: 60000, bytes_in: 200000}]}
+  }));
+  await page.getByRole("heading", {name: "UDP 流量统计", exact: true}).waitFor();
+  const metricText = await page.locator(".udp-statistics").textContent();
+  assert.ok(metricText.includes("810.8 包/秒") && metricText.includes("5.28 Mbps / 0.85 Mbps"));
+  assert.ok(metricText.includes("30 秒；") && metricText.includes("1,056（本窗口不同五元组）"));
+  assert.ok(metricText.includes("1,000 / 23,400") && metricText.includes("原始 UDP 总量包含 DNS"));
+  assert.ok(metricText.includes("1.1.1.1") && metricText.includes("不是瞬时峰值") && metricText.includes("样本数量不代表全部目标数"));
+  assert.equal(await page.getByText("规则命中／阈值", {exact: true}).count(), 0);
+  await page.evaluate(() => window.showEvidence("metrics", {
+    id: 2, ip: "203.0.113.10", window_start: "2026-10-04 06:31:27", window_end: "2026-10-04 06:31:27",
+    evidence: {udp_stats_version: 1, udp_flows_out: 10, udp_packets_out: 100, udp_packets_in: 0, udp_bytes_out: 10000, udp_bytes_in: 0}
+  }));
+  await page.getByRole("heading", {name: "UDP 流量统计", exact: true}).waitFor();
+  assert.ok((await page.locator(".udp-statistics").textContent()).includes("不可计算"));
   await page.evaluate(() => window.showEvidence("udp", {
     title: "远程桌面 RDP 高频连接", kind: "rdp_connections", ip: "203.0.113.10",
     evidence: {value: 317, threshold: 60, sample: {tcp_attempts: 317, completed_handshakes: 317, rst_replies: 3},
@@ -266,6 +286,7 @@ try {
   });
   await page.evaluate(() => window.showEvidence("rules", {}));
   await page.getByText("高规则", {exact: true}).waitFor();
+  await page.getByText("UDP 包数／流数量仅用于流量统计，不作为异常告警。时间按浏览器本地时区显示。", {exact: true}).waitFor();
   const ruleRows = page.locator(".el-table tbody tr");
   assert.ok((await page.locator(".el-table").textContent()).includes("级别"));
   assert.equal(await ruleRows.nth(0).locator(".el-tag--danger").textContent(), "高");
@@ -279,6 +300,11 @@ try {
   const qualityDialog = page.getByRole("dialog", {name: "编辑检测规则", exact: true});
   await qualityDialog.getByText("每采集窗口丢弃计数阈值", {exact: true}).waitFor();
   assert.equal(await qualityDialog.getByText("评估窗口秒", {exact: true}).count(), 0);
+  await qualityDialog.locator(".el-form-item").filter({hasText: "检测类型"}).locator(".el-select").click();
+  await page.getByRole("option", {name: "采集覆盖下降", exact: true}).waitFor();
+  assert.equal(await page.getByRole("option", {name: "UDP 出站流数量", exact: true}).count(), 0);
+  assert.equal(await page.getByRole("option", {name: "UDP 出站包速率 PPS", exact: true}).count(), 0);
+  await page.keyboard.press("Escape");
   await qualityDialog.getByText("指定节点", {exact: true}).click();
   const nodeSelect = qualityDialog.locator(".el-form-item").filter({hasText: "指定节点（可多选）"}).locator(".el-select");
   await nodeSelect.click();
@@ -290,6 +316,11 @@ try {
   assert.equal(savedQualityRule.node_id, null);
   assert.equal(savedQualityRule.kind, "capture_degraded");
   await page.evaluate(() => window.showEvidence("events", {}));
+  await page.getByText("仅显示疑似异常、强异常及节点运行异常；一般流量活动在流量窗口查看。同节点、IP 的持续行为合并为事件。", {exact: true}).waitFor();
+  await page.locator(".filters .el-select").last().click();
+  await page.getByRole("option", {name: "疑似异常，待复核", exact: true}).waitFor();
+  assert.equal(await page.getByRole("option", {name: "一般行为提醒", exact: true}).count(), 0);
+  await page.keyboard.press("Escape");
   await page.getByRole("button", {name: "加入白名单", exact: true}).first().waitFor();
   await page.getByRole("button", {name: "加入白名单", exact: true}).first().click();
   await page.getByText("112.121.183.102", {exact: true}).waitFor();

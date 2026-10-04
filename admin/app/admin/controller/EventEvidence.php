@@ -10,6 +10,7 @@ class EventEvidence extends Monitor
     private function query()
     {
         $q = $this->db()->table('monitor_events')->alias('e')->leftJoin('ip_assets i', 'i.id=e.ip_asset_id')->leftJoin('nodes n', 'n.id=e.node_id');
+        $this->notificationEvents($q);
         foreach (['status', 'severity', 'node_id', 'assessment_category'] as $key) {
             $value = (string) $this->request->get($key, '');
             if ($value !== '') {

@@ -66,14 +66,29 @@ class Monitor extends Backend
         ]);
     }
 
+    protected function notificationAlerts($query, string $alias = 'm'): void
+    {
+        $query->whereNotIn($alias.'.kind', ['new_website', 'udp_flow_burst', 'udp_packet_rate'])
+            ->whereRaw('COALESCE('.$alias.".assessment_category, 'needs_review') <> ?", ['behavior_notice']);
+    }
+
+    protected function notificationEvents($query, string $alias = 'e'): void
+    {
+        $kinds = 'COALESCE('.$alias.".kinds::jsonb, '[]'::jsonb)";
+        $query->whereRaw('COALESCE('.$alias.".assessment_category, 'needs_review') <> ?", ['behavior_notice'])
+            ->whereRaw('NOT ('.$kinds.' <@ ?::jsonb AND jsonb_array_length('.$kinds.') > 0)', [json_encode(['udp_flow_burst', 'udp_packet_rate'])]);
+    }
+
     public function overview(): void
     {
         $db = $this->db();
+        $events = $db->table('monitor_events')->alias('e')->where('e.status', 'open');
+        $this->notificationEvents($events);
         $this->success('', [
             'nodes' => $db->table('nodes')->where('enabled', true)->where('last_seen_at', '>', gmdate('Y-m-d H:i:s', time() - 300))->count(),
             'ips' => $db->table('ip_assets')->count(),
             'websites' => $db->table('websites')->whereIn('ownership_status', ['dns_match', 'manual', 'ip_only'])->count(),
-            'alerts' => $db->table('monitor_events')->where('status', 'open')->count(),
+            'alerts' => $events->count(),
             'batches' => $db->table('batches')->whereNull('processed_at')->count(),
         ]);
     }
@@ -92,7 +107,7 @@ class Monitor extends Backend
         $limit = max(10, min(500, (int) $this->request->get('limit', 25)));
         $query = $this->db()->table($table)->alias('m');
         if ($resource === 'alerts') {
-            $query->where('m.kind', '<>', 'new_website');
+            $this->notificationAlerts($query);
         }
         $fields = array_map(fn ($field) => 'm.'.$field, self::TABLES[$resource]);
         if (in_array($resource, ['alerts', 'websites', 'metrics', 'protocols'], true)) {
@@ -154,7 +169,7 @@ class Monitor extends Backend
         $resource = (string) $this->request->get('resource', '');
         $query = $this->db()->table($this->table($resource))->alias('m');
         if ($resource === 'alerts') {
-            $query->where('m.kind', '<>', 'new_website');
+            $this->notificationAlerts($query);
         }
         if (in_array($resource, ['alerts', 'websites', 'metrics', 'protocols'], true)) {
             $query->leftJoin('ip_assets i', 'i.id=m.ip_asset_id');
@@ -522,7 +537,7 @@ class Monitor extends Backend
             if (isset($data['name']) && (trim((string) $data['name']) === '' || mb_strlen((string) $data['name']) > 255)) {
                 $this->error('规则名称无效');
             }
-            if (isset($data['kind']) && ! in_array($data['kind'], ['vertical_scan', 'ssh_connections', 'smb_connections', 'rdp_connections', 'ftp_connections', 'udp_flow_burst', 'udp_packet_rate', 'single_target_attempts', 'tcp_connection_burst', 'egress_mbps', 'vpn_protocol', 'proxy_suspect', 'capture_degraded'], true)) {
+            if (isset($data['kind']) && ! in_array($data['kind'], ['vertical_scan', 'ssh_connections', 'smb_connections', 'rdp_connections', 'ftp_connections', 'single_target_attempts', 'tcp_connection_burst', 'egress_mbps', 'vpn_protocol', 'proxy_suspect', 'capture_degraded'], true)) {
                 $this->error('规则类型无效');
             }
             $scope = $creating ? $data : array_replace($this->db()->table('rules')->where('id', $id)->find() ?: [], $data);
@@ -897,7 +912,7 @@ class Monitor extends Backend
         while ($written < 50000) {
             $query = $this->db()->table($this->table($resource))->alias('m')->where('m.id', '>', $lastId);
             if ($resource === 'alerts') {
-                $query->where('m.kind', '<>', 'new_website');
+                $this->notificationAlerts($query);
             }
             $fields = array_map(fn ($name) => 'm.'.$name, array_filter(array_keys($columns), fn ($name) => ! in_array($name, ['ip', 'node_name'], true)));
             $fields[] = 'm.id AS export_id';

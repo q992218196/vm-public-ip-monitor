@@ -109,7 +109,7 @@ class MonitorTest extends TestCase
     {
         $this->freezeTime();
         $node = $this->node();
-        Rule::create(['name' => 'TCP reminder', 'kind' => 'tcp_connection_burst', 'threshold' => 1]);
+        Rule::create(['name' => 'Port anomaly', 'kind' => 'vertical_scan', 'threshold' => 1]);
         Rule::create(['name' => 'UDP rate reminder', 'kind' => 'udp_packet_rate', 'threshold' => 180]);
         $payload = $this->payload();
         $second = now()->utc()->format('Y-m-d\TH:i:s');
@@ -127,12 +127,11 @@ class MonitorTest extends TestCase
         ProcessBatch::dispatchSync($batch->id);
         $metric = TrafficMetric::firstOrFail();
         $this->assertEqualsWithDelta(0.8, $metric->window_start->diffInSeconds($metric->window_end), 0.000001);
-        $alert = Alert::where('kind', 'tcp_connection_burst')->firstOrFail();
-        $this->assertSame(120, $alert->evidence['value']);
+        $alert = Alert::where('kind', 'vertical_scan')->firstOrFail();
+        $this->assertSame(3, $alert->evidence['value']);
         $this->assertEquals(0.8, $alert->evidence['rule_observed_span_seconds']);
-        $udp = Alert::where('kind', 'udp_packet_rate')->firstOrFail();
-        $this->assertSame(187, $udp->evidence['value']);
-        $this->assertEquals(0.8, $udp->evidence['udp_rule_statistics']['observed_seconds']);
+        $this->assertDatabaseMissing('alerts', ['kind' => 'udp_packet_rate']);
+        $this->assertSame(150, $metric->evidence['udp_non_dns_packets_out']);
         $payload['batch_id'] = Str::uuid()->toString();
         $payload['window_start'] = $payload['window_end'];
         $this->upload($node, $payload)->assertUnprocessable()->assertJsonValidationErrors('window_end');
@@ -255,8 +254,9 @@ class MonitorTest extends TestCase
         $payload['metrics'][0]['max_attempts_per_target'] = 90;
         $this->upload($node, $payload)->assertOk();
         ProcessBatch::dispatchSync(Batch::first()->id);
-        $this->assertDatabaseHas('alerts', ['kind' => 'single_target_attempts']);
-        $this->assertDatabaseHas('alerts', ['kind' => 'tcp_connection_burst']);
+        $this->assertDatabaseMissing('alerts', ['kind' => 'single_target_attempts']);
+        $this->assertDatabaseMissing('alerts', ['kind' => 'tcp_connection_burst']);
+        $this->assertSame(1200, TrafficMetric::firstOrFail()->tcp_attempts);
     }
 
     public function test_new_agent_counters_are_validated_and_window_quality_is_saved_with_evidence(): void
@@ -296,6 +296,9 @@ class MonitorTest extends TestCase
             $payload['window_end'] = $end->copy()->addSeconds($offset)->toIso8601String();
             $payload['window_start'] = $end->copy()->addSeconds($offset - ($offset === -30 ? 31 : 30))->toIso8601String();
             $payload['metrics'][0]['tcp_attempts'] = $attempts;
+            $payload['metrics'][0] += ['connection_stats_version' => 1, 'synack_replies' => 0, 'completed_handshakes' => 0, 'rst_replies' => intdiv($attempts, 2) + 1, 'mature_attempts' => $attempts, 'mature_no_reply' => 0];
+            $payload['metrics'][0]['packets_in'] = $attempts;
+            $payload['metrics'][0]['packets_out'] = $attempts;
             $this->upload($node, $payload)->assertOk();
             ProcessBatch::dispatchSync(Batch::where('batch_id', $payload['batch_id'])->firstOrFail()->id);
         }
@@ -392,7 +395,7 @@ class MonitorTest extends TestCase
         ]];
         $this->upload($node, $payload)->assertOk();
         ProcessBatch::dispatchSync(Batch::firstOrFail()->id);
-        $this->assertDatabaseCount('alerts', 6);
+        $this->assertDatabaseCount('alerts', 3);
         foreach (Alert::all() as $alert) {
             Exclusion::create(['node_id' => $node->id, 'cidr' => '203.0.113.10/32',
                 'kind' => $alert->kind, 'reason' => '业务复核', 'expires_at' => now()->addDays(30)]);
@@ -400,8 +403,8 @@ class MonitorTest extends TestCase
         $payload['batch_id'] = Str::uuid()->toString();
         $this->upload($node, $payload)->assertOk();
         ProcessBatch::dispatchSync(Batch::where('batch_id', $payload['batch_id'])->firstOrFail()->id);
-        $this->assertDatabaseCount('alerts', 6);
-        $this->assertSame(12, (int) Alert::sum('occurrences'));
+        $this->assertDatabaseCount('alerts', 3);
+        $this->assertSame(6, (int) Alert::sum('occurrences'));
         $this->assertDatabaseCount('traffic_metrics', 2);
         $this->assertDatabaseCount('protocol_observations', 4);
         $this->assertDatabaseCount('websites', 1);
@@ -410,7 +413,7 @@ class MonitorTest extends TestCase
         $payload['batch_id'] = Str::uuid()->toString();
         $this->upload($otherNode, $payload)->assertOk();
         ProcessBatch::dispatchSync(Batch::where('batch_id', $payload['batch_id'])->firstOrFail()->id);
-        $this->assertSame(6, Alert::where('node_id', $otherNode->id)->count());
+        $this->assertSame(3, Alert::where('node_id', $otherNode->id)->count());
     }
 
     public function test_node_health_whitelist_is_scoped_by_node_kind_and_expiry(): void
@@ -733,7 +736,7 @@ class MonitorTest extends TestCase
         $this->assertSame('dns_mismatch', $site->fresh()->ownership_status);
     }
 
-    public function test_udp_rules_require_new_statistics_and_keep_transport_counts_separate(): void
+    public function test_udp_statistics_are_validated_and_preserved_without_quantity_alerts(): void
     {
         $this->seed(MonitorSeeder::class);
         Rule::where('kind', 'udp_flow_burst')->update(['threshold' => 2]);
@@ -754,17 +757,13 @@ class MonitorTest extends TestCase
         ]);
         $this->upload($node, $payload)->assertOk();
         ProcessBatch::dispatchSync(Batch::latest('id')->first()->id);
-        foreach (['udp_flow_burst' => 3, 'udp_packet_rate' => 20] as $kind => $value) {
-            $alert = Alert::where('kind', $kind)->firstOrFail();
-            $this->assertSame($value, $alert->evidence['value']);
-            $this->assertSame('low', $alert->severity);
-            $this->assertSame('UDP', $alert->evidence['sample']['transport']);
-            $this->assertSame([443], $alert->evidence['sample']['ports']);
-            $this->assertSame([53], $alert->evidence['sample']['udp_excluded_destination_ports']);
-            $this->assertSame(10600, $alert->evidence['sample']['udp_packets_out']);
-            $this->assertSame([], $alert->evidence['sample']['outbound_endpoints']);
-            $this->assertStringContainsString('不能直接判断攻击', $alert->evidence['note']);
-        }
+        $this->assertDatabaseMissing('alerts', ['kind' => 'udp_flow_burst']);
+        $this->assertDatabaseMissing('alerts', ['kind' => 'udp_packet_rate']);
+        $metric = TrafficMetric::latest('id')->firstOrFail();
+        $this->assertSame(10600, $metric->evidence['udp_packets_out']);
+        $this->assertSame(600, $metric->evidence['udp_non_dns_packets_out']);
+        $this->assertSame(3, $metric->evidence['udp_non_dns_flows_out']);
+        $this->assertSame(443, $metric->evidence['udp_non_dns_endpoints'][0]['peer_port']);
         $payload['batch_id'] = Str::uuid()->toString();
         $payload['metrics'][0]['udp_flows_out'] = 10601;
         $this->upload($node, $payload)->assertUnprocessable();
@@ -779,11 +778,11 @@ class MonitorTest extends TestCase
         $this->upload($node, $payload)->assertUnprocessable();
     }
 
-    public function test_udp_rate_records_weighted_rule_average_separately_from_the_fastest_sample(): void
+    public function test_large_udp_windows_keep_statistics_without_notifying(): void
     {
         $this->freezeTime();
         $this->seed(MonitorSeeder::class);
-        Rule::where('kind', 'udp_packet_rate')->update(['threshold' => 10000, 'window_seconds' => 60]);
+        Rule::create(['name' => 'Stale UDP rate rule', 'kind' => 'udp_packet_rate', 'threshold' => 10000, 'window_seconds' => 60]);
         $node = $this->node();
         foreach ([217716, 406944] as $index => $packets) {
             $payload = $this->payload();
@@ -805,25 +804,21 @@ class MonitorTest extends TestCase
                 $this->assertDatabaseMissing('alerts', ['kind' => 'udp_packet_rate']);
             }
         }
-        $evidence = Alert::where('kind', 'udp_packet_rate')->firstOrFail()->evidence;
-        $this->assertSame(10411, $evidence['value']);
-        $this->assertSame(624660, $evidence['udp_rule_statistics']['packets_out']);
-        $this->assertEquals(60, $evidence['udp_rule_statistics']['observed_seconds']);
-        $this->assertSame('mean_observed_packet_rate', $evidence['udp_rule_statistics']['count_basis']);
-        $this->assertSame([53], $evidence['udp_rule_statistics']['excluded_destination_ports']);
-        $this->assertSame(2, $evidence['rule_window_count']);
-        $this->assertEquals(60, $evidence['rule_observed_span_seconds']);
-        $this->assertEquals(30, $evidence['sample']['observed_seconds']);
-        $this->assertSame(406944, $evidence['sample']['udp_non_dns_packets_out']);
-        $this->assertSame('bounded_endpoint_samples', $evidence['sample']['target_count_basis']);
-        $this->assertStringContainsString('不是逐秒值或瞬时峰值', $evidence['note']);
+        $this->assertDatabaseMissing('alerts', ['kind' => 'udp_packet_rate']);
+        $this->assertDatabaseCount('monitor_events', 0);
+        $metrics = TrafficMetric::orderBy('window_start')->get();
+        $this->assertCount(2, $metrics);
+        $this->assertSame(217716, $metrics[0]->evidence['udp_non_dns_packets_out']);
+        $this->assertSame(406944, $metrics[1]->evidence['udp_non_dns_packets_out']);
+        $this->assertSame(63845, $metrics[1]->evidence['udp_non_dns_endpoints'][0]['peer_port']);
+        $this->assertEquals(30, $metrics[1]->window_start->diffInSeconds($metrics[1]->window_end));
     }
 
-    public function test_udp_flow_rule_uses_a_single_window_maximum_not_a_sum_or_rate(): void
+    public function test_udp_tuple_counts_remain_separate_per_window_without_notifications(): void
     {
         $this->freezeTime();
         $this->seed(MonitorSeeder::class);
-        Rule::where('kind', 'udp_flow_burst')->update(['threshold' => 1000, 'window_seconds' => 60]);
+        Rule::create(['name' => 'Stale UDP flow rule', 'kind' => 'udp_flow_burst', 'threshold' => 1000, 'window_seconds' => 60]);
         $node = $this->node();
         foreach ([1056, 1001] as $index => $flows) {
             $payload = $this->payload();
@@ -841,15 +836,12 @@ class MonitorTest extends TestCase
             $this->upload($node, $payload)->assertOk();
             ProcessBatch::dispatchSync(Batch::latest('id')->firstOrFail()->id);
         }
-        $evidence = Alert::where('kind', 'udp_flow_burst')->firstOrFail()->evidence;
-        $this->assertSame(1056, $evidence['value']);
-        $this->assertSame(1056, $evidence['udp_rule_statistics']['flows_max']);
-        $this->assertSame('max_window_distinct_five_tuples', $evidence['udp_rule_statistics']['count_basis']);
-        $this->assertSame(1056, $evidence['sample']['udp_non_dns_flows_out']);
-        $this->assertEquals(30, $evidence['sample']['observed_seconds']);
-        $this->assertSame(2, $evidence['rule_window_count']);
-        $this->assertSame([], $evidence['sample']['udp_endpoints']);
-        $this->assertStringContainsString('不是跨窗口合计、每秒流数或登录次数', $evidence['note']);
+        $this->assertDatabaseMissing('alerts', ['kind' => 'udp_flow_burst']);
+        $this->assertDatabaseCount('monitor_events', 0);
+        $metrics = TrafficMetric::orderBy('window_start')->get();
+        $this->assertCount(2, $metrics);
+        $this->assertSame(1056, $metrics[0]->evidence['udp_non_dns_flows_out']);
+        $this->assertSame(1001, $metrics[1]->evidence['udp_non_dns_flows_out']);
     }
 
     public function test_service_connection_rules_use_destination_samples_and_keep_login_outcomes_unknown(): void

@@ -150,7 +150,7 @@ class Analyzer
 
     private function detect(Node $node, IpAsset $asset, Batch $batch): void
     {
-        $trafficRules = $this->rules->where('kind', '!=', 'capture_degraded');
+        $trafficRules = $this->rules->where('kind', '!=', 'capture_degraded')->whereNotIn('kind', AlertNotificationPolicy::RETIRED_UDP_RULES);
         if ($trafficRules->isEmpty()) {
             return;
         }
@@ -158,28 +158,11 @@ class Analyzer
         foreach ($trafficRules as $rule) {
             $cutoff = $batch->window_end->copy()->subSeconds($rule->window_seconds);
             $rows = $history->filter(fn ($row) => $row->window_end->gt($cutoff));
-            $udpRuleStatistics = [];
-            if (in_array($rule->kind, ['udp_flow_burst', 'udp_packet_rate'], true)) {
-                $rows = $rows->filter(fn ($row) => ($row->evidence['udp_filter_version'] ?? 0) === 1);
-                if ($rows->isEmpty()) {
-                    continue;
-                }
-                $udpRuleStatistics = [
-                    'version' => 1,
-                    'count_basis' => $rule->kind === 'udp_packet_rate' ? 'mean_observed_packet_rate' : 'max_window_distinct_five_tuples',
-                    'packets_out' => $rows->sum(fn ($row) => $row->evidence['udp_non_dns_packets_out'] ?? 0),
-                    'observed_seconds' => $rows->sum(fn ($row) => $row->window_start->diffInSeconds($row->window_end)),
-                    'flows_max' => (int) $rows->max(fn ($row) => $row->evidence['udp_non_dns_flows_out'] ?? 0),
-                    'excluded_destination_ports' => [53],
-                ];
-            }
             $observedStart = $rows->min('window_start');
             $observedEnd = $rows->max('window_end');
             $serviceSamples = isset(ServiceConnectionRules::RULES[$rule->kind]) ? $rows->map(fn ($row) => ['row' => $row, 'sample' => app(ServiceConnectionRules::class)->sample($rule->kind, $row->evidence)])->filter(fn ($entry) => $entry['sample'] !== null)->sortByDesc(fn ($entry) => $entry['sample']['tcp_attempts']) : collect();
             $serviceSample = $serviceSamples->first();
             $value = $serviceSample ? $serviceSample['sample']['tcp_attempts'] : match ($rule->kind) {
-                'udp_flow_burst' => $udpRuleStatistics['flows_max'],
-                'udp_packet_rate' => (int) ($udpRuleStatistics['packets_out'] / max(0.000001, $udpRuleStatistics['observed_seconds'])),
                 'vertical_scan' => (int) $rows->max(fn ($m) => $m->evidence['max_ports_per_target'] ?? 0),
                 'single_target_attempts' => (int) $rows->max(fn ($m) => $m->evidence['max_attempts_per_target'] ?? 0),
                 'tcp_connection_burst' => (int) $rows->sum('tcp_attempts'),
@@ -200,8 +183,6 @@ class Analyzer
                 default => '按当前观察节点估算的出站速率',
             };
             $sample = match ($rule->kind) {
-                'udp_flow_burst' => $rows->sortByDesc(fn ($row) => $row->evidence['udp_non_dns_flows_out'] ?? 0)->first(),
-                'udp_packet_rate' => $rows->sortByDesc(fn ($row) => ($row->evidence['udp_non_dns_packets_out'] ?? 0) / max(0.000001, $row->window_start->diffInSeconds($row->window_end)))->first(),
                 'vertical_scan' => $rows->sortByDesc(fn ($row) => $row->evidence['max_ports_per_target'] ?? 0)->first(),
                 'single_target_attempts' => $rows->sortByDesc(fn ($row) => $row->evidence['max_attempts_per_target'] ?? 0)->first(),
                 default => $rows->last(),
@@ -210,26 +191,6 @@ class Analyzer
                 $sample = $serviceSample['row'];
             }
             $sampleEvidence = $serviceSample ? $serviceSample['sample'] : ($sample?->evidence ?? []);
-            if (str_starts_with($rule->kind, 'udp_')) {
-                $udp = $sampleEvidence['udp_non_dns_endpoints'] ?? [];
-                $sampleEvidence['udp_endpoints'] = $udp;
-                $sampleEvidence['udp_excluded_destination_ports'] = [53];
-                $sampleEvidence['targets'] = array_values(array_unique(array_column($udp, 'peer_ip')));
-                $sampleEvidence['ports'] = array_values(array_unique(array_column($udp, 'peer_port')));
-                $sampleEvidence['target_endpoints'] = [];
-                $sampleEvidence['outbound_endpoints'] = [];
-                $sampleEvidence['egress_target_samples'] = [];
-                $sampleEvidence['port_scan_targets'] = [];
-                unset($sampleEvidence['egress_target_count']);
-                $sampleEvidence['unique_targets'] = count($sampleEvidence['targets']);
-                $sampleEvidence['target_count_basis'] = 'bounded_endpoint_samples';
-                $sampleEvidence['cardinality_capped'] = $sampleEvidence['udp_flows_capped'] ?? false;
-                $sampleEvidence['outbound_samples_truncated'] = $sampleEvidence['udp_endpoints_truncated'] ?? true;
-                $sampleEvidence['endpoint_samples_truncated'] = $sampleEvidence['outbound_samples_truncated'];
-                $sampleEvidence['port_samples_truncated'] = $sampleEvidence['outbound_samples_truncated'];
-                $sampleEvidence['transport'] = 'UDP';
-                $sampleEvidence['observed_seconds'] = $sample->window_start->diffInSeconds($sample->window_end);
-            }
             $severity = $rule->severity;
             $confidence = 'behavioral';
             $analysis = [];
@@ -241,12 +202,6 @@ class Analyzer
                 $note = $assessment['note'];
                 $analysis = ['connection_analysis' => $assessment['connection_analysis']];
             }
-            if ($udpRuleStatistics) {
-                $analysis['udp_rule_statistics'] = $udpRuleStatistics;
-                $note .= $rule->kind === 'udp_packet_rate'
-                    ? '。规则命中值是计入窗口的出站包总数除以实际观察秒数后向下取整，不是逐秒值或瞬时峰值；详情样本单独展示包速率最高的窗口'
-                    : '。规则命中值是单个采集窗口的不同五元组数最大值，不是跨窗口合计、每秒流数或登录次数；目标列表只是有界样本';
-            }
             $this->alert($node, $asset, $rule->kind, $severity, $title, ['rule_id' => $rule->id, 'value' => $value, 'threshold' => $rule->threshold, 'window_seconds' => $rule->window_seconds,
                 'rule_observed_start' => $observedStart?->toIso8601String(), 'rule_observed_end' => $observedEnd?->toIso8601String(),
                 'rule_observed_span_seconds' => $observedStart && $observedEnd ? round($observedStart->diffInSeconds($observedEnd), 3) : null,
@@ -257,6 +212,9 @@ class Analyzer
 
     public function alert(Node $node, ?IpAsset $asset, string $kind, string $severity, string $title, array $evidence, $at, int $cooldown = 600, string $salt = ''): ?Alert
     {
+        if (! AlertNotificationPolicy::allows($kind, $evidence)) {
+            return null;
+        }
         if ($asset === null && Exclusion::where('node_id', $node->id)->whereNull('cidr')->where('kind', $kind)->where('expires_at', '>', $at)->exists()) {
             return null;
         }
@@ -306,7 +264,8 @@ class Analyzer
         }
 
         if (in_array($event->status, ['open', 'acknowledged'], true)) {
-            $ranked = Alert::where('event_id', $event->id)->whereIn('status', ['open', 'acknowledged'])->orderBy('id')->get(['kind', 'severity', 'title', 'assessment_category'])
+            $ranked = Alert::where('event_id', $event->id)->whereIn('status', ['open', 'acknowledged'])->where('assessment_category', '!=', 'behavior_notice')
+                ->whereNotIn('kind', AlertNotificationPolicy::RETIRED_UDP_RULES)->orderBy('id')->get(['kind', 'severity', 'title', 'assessment_category'])
                 ->sortByDesc(fn ($row) => EventPriority::rank($row->severity, $row->assessment_category, $row->kind))->first();
             if ($ranked) {
                 $event->update(['severity' => $ranked->severity, 'title' => $ranked->title, 'assessment_category' => $ranked->assessment_category]);

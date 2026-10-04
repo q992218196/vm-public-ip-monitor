@@ -8,9 +8,9 @@ $db = new PDO('pgsql:host=127.0.0.1;dbname=monitor_test', getenv('MONITOR_DB_USE
 $db->exec(<<<'SQL'
 CREATE TABLE rules (id bigserial primary key,name text,kind text,enabled boolean default true,severity text default 'medium',threshold integer,window_seconds integer default 60,cooldown_seconds integer default 600,node_id uuid,node_ids jsonb,created_at timestamp,updated_at timestamp);
 ALTER TABLE alerts ADD COLUMN event_id bigint, ADD COLUMN first_seen_at timestamp;
-CREATE TABLE monitor_events (id bigserial primary key,node_id uuid,ip_asset_id bigint,active_key text,title text,severity text,status text default 'open',kinds jsonb,quality jsonb,occurrences bigint default 1,review_notes text,first_seen_at timestamp,last_seen_at timestamp,created_at timestamp,updated_at timestamp);
+CREATE TABLE monitor_events (id bigserial primary key,node_id uuid,ip_asset_id bigint,active_key text,title text,severity text,status text default 'open',kinds json,quality jsonb,occurrences bigint default 1,review_notes text,first_seen_at timestamp,last_seen_at timestamp,created_at timestamp,updated_at timestamp);
 ALTER TABLE monitor_events ADD COLUMN behavior jsonb, ADD COLUMN review_context jsonb, ADD COLUMN reopen_reason text, ADD COLUMN assessment_category text default 'needs_review';
-ALTER TABLE alerts ADD COLUMN assessment_category text default 'needs_review';
+ALTER TABLE alerts ADD COLUMN IF NOT EXISTS assessment_category text default 'needs_review';
 CREATE TABLE traffic_metrics (id bigserial primary key,node_id uuid,ip_asset_id bigint,window_start timestamp,window_end timestamp,tcp_attempts bigint,bytes_in bigint,bytes_out bigint,evidence jsonb);
 CREATE TABLE packet_captures (id uuid primary key,event_id bigint,node_id uuid,ip text,status text default 'pending',source text default 'manual',lease_token text,lease_until timestamp,duration_seconds integer default 60,max_bytes integer default 33554432,snaplen integer default 2048,path text,sha256 text,bytes bigint default 0,metadata jsonb,summary jsonb,last_error text,created_at timestamp,updated_at timestamp);
 CREATE TABLE ai_settings (id integer primary key,endpoint text,model text,enabled boolean default false,api_key_cipher text,created_at timestamp,updated_at timestamp);
@@ -259,3 +259,69 @@ if ($qualityRule['node_ids'] !== null || ! in_array($qualityRule['enabled'], [fa
     throw new RuntimeException('Capture quality scope cannot restore all nodes or disable');
 }
 echo "Capture quality rules enforce multi-node scope, validation and administrator permissions.\n";
+
+// Notifications use only stored classifications and kinds; evidence remains accessible on demand.
+$notificationNode = $qualityNodes[0];
+$originalEventTotal = $ok($request('count'))['total'];
+$eventInsert = $db->prepare('INSERT INTO monitor_events(id,node_id,ip_asset_id,title,severity,status,kinds,assessment_category,first_seen_at,last_seen_at,created_at,updated_at) VALUES(?,?,1,?,?,\'open\',?,?,now(),now(),now(),now())');
+foreach ([
+    [301, 'UDP normal', 'low', ['udp_packet_rate'], 'behavior_notice'],
+    [302, 'UDP stale classification', 'high', ['udp_flow_burst'], 'strong_anomaly'],
+    [303, 'TCP volume only', 'medium', ['tcp_connection_burst'], 'behavior_notice'],
+    [304, 'Mixed proxy evidence', 'low', ['udp_packet_rate', 'proxy_suspect'], 'needs_review'],
+    [305, 'Low-severity proxy evidence', 'low', ['proxy_suspect'], 'needs_review'],
+    [306, 'Legacy unclassified evidence', 'medium', ['vpn_protocol'], null],
+] as [$eventId, $title, $severity, $kinds, $category]) {
+    $eventInsert->execute([$eventId, $notificationNode, 'Notification fixture '.$title, $severity, json_encode($kinds), $category]);
+}
+$alertInsert = $db->prepare('INSERT INTO alerts(id,event_id,node_id,ip_asset_id,title,kind,severity,status,occurrences,assessment_category,evidence,first_seen_at,last_seen_at,updated_at) VALUES(?,?,?,1,?,?,?,\'open\',1,?,?,now(),now(),now())');
+foreach ([
+    [500, 301, 'UDP normal', 'udp_packet_rate', 'low', 'behavior_notice'],
+    [501, 302, 'UDP stale classification', 'udp_flow_burst', 'high', 'strong_anomaly'],
+    [502, 303, 'TCP volume only', 'tcp_connection_burst', 'medium', 'behavior_notice'],
+    [503, 304, 'Mixed UDP history', 'udp_packet_rate', 'high', 'strong_anomaly'],
+    [504, 304, 'Mixed proxy evidence', 'proxy_suspect', 'low', 'needs_review'],
+    [505, 305, 'Low-severity proxy evidence', 'proxy_suspect', 'low', 'needs_review'],
+    [506, 306, 'Legacy unclassified evidence', 'vpn_protocol', 'medium', null],
+    [507, null, 'Retired website clue', 'new_website', 'medium', 'needs_review'],
+] as [$alertId, $eventId, $title, $kind, $severity, $category]) {
+    $alertInsert->execute([$alertId, $eventId, $notificationNode, 'Notification fixture '.$title, $kind, $severity, $category, json_encode(['note' => 'Preserved original evidence', 'padding' => str_repeat('e', 100000)])]);
+}
+$notificationQuery = ['search' => 'Notification fixture', 'limit' => 500];
+foreach ([false, true] as $viewer) {
+    $eventList = $ok($request('index', $notificationQuery, false, $viewer))['list'];
+    $eventIds = array_map('intval', array_column($eventList, 'id'));
+    sort($eventIds);
+    if ($eventIds !== [304, 305, 306] || $ok($request('count', $notificationQuery, false, $viewer))['total'] !== 3 || strlen(json_encode($eventList)) > 4096) {
+        throw new RuntimeException('Event notifications lose mixed/low-severity evidence or include volume-only notices');
+    }
+    if ($ok($request('index', $notificationQuery + ['assessment_category' => 'behavior_notice'], false, $viewer))['list'] !== [] || $ok($request('count', $notificationQuery + ['assessment_category' => 'behavior_notice'], false, $viewer))['total'] !== 0) {
+        throw new RuntimeException('A category filter bypasses notification-only policy');
+    }
+    $legacyQuery = $notificationQuery + ['resource' => 'alerts'];
+    $alertIds = array_map('intval', array_column($ok($request('index', $legacyQuery, false, $viewer, 'Monitor'))['list'], 'id'));
+    sort($alertIds);
+    if ($alertIds !== [504, 505, 506] || $ok($request('count', $legacyQuery, false, $viewer, 'Monitor'))['total'] !== 3) {
+        throw new RuntimeException('Legacy alert list/count includes retired UDP or behavior-only notices');
+    }
+}
+$db->exec('CREATE TABLE batches (id bigserial primary key,processed_at timestamp)');
+if ($ok($request('overview', [], false, false, 'Monitor'))['alerts'] !== $originalEventTotal + 3) {
+    throw new RuntimeException('Dashboard count disagrees with notification-only event list');
+}
+$mixedDetail = $ok($request('detail', ['id' => 304]));
+if (count($mixedDetail['alerts']) !== 2 || $mixedDetail['alerts'][0]['evidence']['note'] !== 'Preserved original evidence' || count($ok($request('detail', ['id' => 301]))['alerts']) !== 1) {
+    throw new RuntimeException('Hiding volume-only notifications deletes historical rule evidence');
+}
+$csvContext = stream_context_create(['http' => ['method' => 'GET', 'timeout' => 20, 'header' => ['server: true', 'batoken: '.getenv('TEST_ADMIN_TOKEN')]]]);
+$csv = file_get_contents('http://127.0.0.1:8099/admin/Monitor/export?'.http_build_query($notificationQuery + ['resource' => 'alerts']), false, $csvContext);
+$csvRows = array_map(fn ($line) => str_getcsv($line, escape: ''), explode("\n", trim(substr($csv, 3))));
+if (count($csvRows) !== 4 || array_column(array_slice($csvRows, 1), 2) !== ['proxy_suspect', 'proxy_suspect', 'vpn_protocol'] || str_contains($csv, 'UDP') || str_contains($csv, 'TCP volume')) {
+    throw new RuntimeException('CSV export disagrees with notification-only list and count');
+}
+foreach (['udp_flow_burst', 'udp_packet_rate'] as $retiredKind) {
+    if (($request('save', ['resource' => 'rules', 'data' => ['name' => 'Retired volume rule', 'kind' => $retiredKind, 'threshold' => 10000, 'severity' => 'low', 'enabled' => true]], true, false, 'Monitor')['code'] ?? null) === 1) {
+        throw new RuntimeException('Retired UDP quantity rule can be recreated');
+    }
+}
+echo "Notification lists, totals, dashboard and CSV exclude volume-only reminders; mixed and low-severity evidence remain visible, historical evidence survives, and UDP quantity rules cannot be recreated.\n";

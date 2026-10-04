@@ -1,7 +1,46 @@
 <template>
     <section>
-        <h3>{{ isRdp ? 'RDP 登录结果' : record.title || '连接证据' }}</h3>
+        <h3>{{ isRdp ? 'RDP 登录结果' : isWindow ? '流量窗口统计' : record.title || '连接证据' }}</h3>
         <el-alert v-if="!isRdp && analysis.conclusion" type="info" :closable="false" :title="analysis.conclusion" />
+        <div v-if="isWindow && sample.udp_stats_version === 1" class="udp-statistics">
+            <h4>UDP 流量统计</h4>
+            <el-descriptions :column="2" border>
+                <el-descriptions-item label="实际采集时长">{{ sampleDuration }}</el-descriptions-item>
+                <el-descriptions-item label="UDP 出站流数">{{ countText(sample.udp_flows_out) }}（本窗口不同五元组）</el-descriptions-item>
+                <el-descriptions-item label="UDP 平均出站包速率">{{ averageText(sample.udp_packets_out, '包/秒') }}</el-descriptions-item>
+                <el-descriptions-item label="UDP 平均带宽 出／入"
+                    >{{ averageText(sample.udp_bytes_out, 'Mbps', 8 / 1000000) }} /
+                    {{ averageText(sample.udp_bytes_in, 'Mbps', 8 / 1000000) }}</el-descriptions-item
+                >
+                <el-descriptions-item label="UDP 包数 出／入"
+                    >{{ countText(sample.udp_packets_out) }} / {{ countText(sample.udp_packets_in) }}</el-descriptions-item
+                >
+                <el-descriptions-item label="UDP 字节 出／入"
+                    >{{ countText(sample.udp_bytes_out) }} / {{ countText(sample.udp_bytes_in) }} B</el-descriptions-item
+                >
+                <el-descriptions-item v-if="sample.udp_filter_version === 1" label="排除目标端口 53 的出站流数／包数"
+                    >{{ countText(sample.udp_non_dns_flows_out) }} / {{ countText(sample.udp_non_dns_packets_out) }}</el-descriptions-item
+                >
+            </el-descriptions>
+            <p>以上原始 UDP 总量包含 DNS；平均速率按实际采集时长计算，不是瞬时峰值。包数、带宽和五元组数量只描述流量规模，不产生异常告警。</p>
+            <el-table :data="sample.udp_endpoints || []" border size="small">
+                <el-table-column prop="peer_ip" label="对端 IP（样本）" min-width="150" />
+                <el-table-column prop="peer_port" label="对端端口" width="100" />
+                <el-table-column prop="flows" label="出站流数" width="100" />
+                <el-table-column label="包数 出／入" min-width="130"
+                    ><template #default="scope">{{ scope.row.packets_out }} / {{ scope.row.packets_in }}</template></el-table-column
+                >
+                <el-table-column label="字节 出／入" min-width="160"
+                    ><template #default="scope">{{ scope.row.bytes_out }} / {{ scope.row.bytes_in }} B</template></el-table-column
+                >
+            </el-table>
+            <p>
+                每窗口最多 8 个对端样本，样本数量不代表全部目标数；仅入站的对端也可能出现在样本中。UDP
+                无握手，服务回复也可能计入出站流；双向包不代表业务或认证成功。{{
+                    sample.udp_flows_capped || sample.udp_endpoints_truncated ? '状态限额或对端样本截断，证据不完整。' : ''
+                }}
+            </p>
+        </div>
         <template v-if="isRdp">
             <el-descriptions :column="1" border>
                 <el-descriptions-item label="公网 IP">{{ record.ip || sample.ip || '—' }}</el-descriptions-item>
@@ -70,11 +109,11 @@
         <template v-else>
             <el-descriptions :column="2" border>
                 <el-descriptions-item label="公网 IP">{{ record.ip || sample.ip || '—' }}</el-descriptions-item>
-                <el-descriptions-item label="规则命中／阈值"
+                <el-descriptions-item v-if="!isWindow" label="规则命中／阈值"
                     >{{ evidence.value ?? '未保存' }} / {{ evidence.threshold ?? '未保存' }}</el-descriptions-item
                 >
-                <el-descriptions-item label="规则配置窗口">{{ evidence.window_seconds ?? '未保存' }} 秒</el-descriptions-item>
-                <el-descriptions-item label="实际规则覆盖范围">{{ ruleCoverage }}</el-descriptions-item>
+                <el-descriptions-item v-if="!isWindow" label="规则配置窗口">{{ evidence.window_seconds ?? '未保存' }} 秒</el-descriptions-item>
+                <el-descriptions-item v-if="!isWindow" label="实际规则覆盖范围">{{ ruleCoverage }}</el-descriptions-item>
                 <el-descriptions-item label="样本采集窗口">{{ sampleDuration }}</el-descriptions-item>
                 <el-descriptions-item label="样本目标数"
                     >{{ sample.unique_targets ?? '—' }}{{ sample.cardinality_capped ? '（计数可能截断）' : '' }}</el-descriptions-item
@@ -129,20 +168,34 @@
 </template>
 <script setup lang="ts">
 import { computed } from 'vue'
-const props = defineProps<{ record: Record<string, any> }>()
+const props = defineProps<{ record: Record<string, any>; windowStatistics?: boolean }>()
 const evidence = computed(() => props.record.evidence || {})
 const sample = computed(() => evidence.value.sample || evidence.value)
 const analysis = computed(() => evidence.value.connection_analysis || {})
 const endpoints = computed<any[]>(() => sample.value.outbound_endpoints || [])
 const isRdp = computed(() => props.record.kind === 'rdp_connections')
 const isUdpRate = computed(() => props.record.kind === 'udp_packet_rate')
+const isWindow = computed(() => props.windowStatistics === true)
 const sampleSeconds = computed(() => {
-    const start = Date.parse(evidence.value.sample_window_start || '')
-    const end = Date.parse(evidence.value.sample_window_end || '')
+    const start = parseTime(isWindow.value ? props.record.window_start : evidence.value.sample_window_start)
+    const end = parseTime(isWindow.value ? props.record.window_end : evidence.value.sample_window_end)
     if (Number.isFinite(start) && Number.isFinite(end) && end > start) return (end - start) / 1000
+    if (isWindow.value) return null
     const seconds = sample.value.observed_seconds
     return typeof seconds === 'number' && Number.isFinite(seconds) && seconds > 0 ? seconds : null
 })
+function parseTime(value: unknown) {
+    if (typeof value !== 'string' || !value) return Number.NaN
+    const iso = value.replace(' ', 'T')
+    return Date.parse(/(Z|[+-]\d{2}:\d{2})$/.test(iso) ? iso : iso + 'Z')
+}
+function countText(value: unknown) {
+    return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value.toLocaleString() : '未采集'
+}
+function averageText(value: unknown, unit: string, scale = 1) {
+    if (sampleSeconds.value === null || typeof value !== 'number' || !Number.isFinite(value) || value < 0) return '不可计算'
+    return `${((value / sampleSeconds.value) * scale).toFixed(unit === 'Mbps' ? 2 : 1)} ${unit}`
+}
 const udpSampleRate = computed(() => {
     const filtered = sample.value.udp_filter_version === 1
     const packets = filtered ? sample.value.udp_non_dns_packets_out : sample.value.udp_packets_out
@@ -170,13 +223,15 @@ const ruleCoverage = computed(() => {
 })
 const sampleDuration = computed(() => {
     const e = evidence.value
-    const start = Date.parse(e.sample_window_start || '')
-    const end = Date.parse(e.sample_window_end || '')
+    const startText = isWindow.value ? props.record.window_start : e.sample_window_start
+    const endText = isWindow.value ? props.record.window_end : e.sample_window_end
+    const start = parseTime(startText)
+    const end = parseTime(endText)
     if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return sampleSeconds.value === null ? '未保存' : `${sampleSeconds.value} 秒`
-    return `${((end - start) / 1000).toFixed(3).replace(/\.?0+$/, '')} 秒；${timeText(e.sample_window_start)} 至 ${timeText(e.sample_window_end)}`
+    return `${((end - start) / 1000).toFixed(3).replace(/\.?0+$/, '')} 秒；${timeText(startText)} 至 ${timeText(endText)}`
 })
 function timeText(value: string) {
-    const date = new Date(value)
+    const date = new Date(parseTime(value))
     return Number.isFinite(date.getTime()) ? date.toLocaleString() : '未知'
 }
 const replyRatio = computed(() => {
