@@ -199,6 +199,22 @@ try {
   assert.equal(await page.getByText("完整握手", {exact: true}).count(), 0);
   assert.equal(await page.getByText("配对 RST", {exact: true}).count(), 0);
   assert.ok(!(await page.locator("body").textContent()).includes("317"));
+  const serviceTargetIps = Array.from({length: 150}, (_, index) => `192.0.2.${index + 1}`);
+  for (const serviceKind of ["ssh_target_spread", "rdp_target_spread", "ftp_target_spread"]) {
+    await page.evaluate(({serviceKind, serviceTargetIps}) => window.showEvidence("udp", {
+      title: "服务多目标建连", kind: serviceKind, ip: "203.0.113.10",
+      evidence: {value: 10, threshold: 10, window_seconds: 60, rule_observed_span_seconds: 60, rule_window_count: 2,
+        rule_observed_start: "2026-10-08T00:00:00Z", rule_observed_end: "2026-10-08T00:01:00Z",
+        sample: {service_target_stats_version: 1, targets: serviceTargetIps, ports: [3389], tcp_attempts: 317, service_targets_capped: true}}
+    }), {serviceKind, serviceTargetIps});
+    await page.getByText("不同目标 IP 数／阈值", {exact: true}).waitFor();
+    const serviceText = await page.locator("body").textContent();
+    assert.ok(serviceText.includes("10 / 10 个") && serviceText.includes("60 秒跨度 / 2 个采集窗口"));
+    assert.ok(serviceText.includes("同一 IP 重复连接只计一个目标") && serviceText.includes("登录失败次数") && serviceText.includes("不可观测"));
+    assert.ok(serviceText.includes("192.0.2.128") && !serviceText.includes("192.0.2.129"));
+    assert.ok(serviceText.includes("317 次主动 SYN 尝试") && serviceText.includes("不能据此自动放行白名单"));
+    assert.equal(await page.getByText("完整握手", {exact: true}).count(), 0);
+  }
   await page.evaluate(() => window.showEvidence("review", {
     event: {id: 1, ip: "203.0.113.10", kinds: ["rdp_connections"]}, timeline: [], totals: {},
     reasons: [], normal_explanations: [], targets: [], port_targets: [], request_hints: [], evidence_gaps: [], next_steps: []
@@ -304,7 +320,18 @@ try {
   await page.getByRole("option", {name: "采集覆盖下降", exact: true}).waitFor();
   assert.equal(await page.getByRole("option", {name: "UDP 出站流数量", exact: true}).count(), 0);
   assert.equal(await page.getByRole("option", {name: "UDP 出站包速率 PPS", exact: true}).count(), 0);
-  await page.keyboard.press("Escape");
+  for (const label of ["端口扫描", "SSH 服务高频连接", "RDP 服务高频连接", "FTP 服务高频连接"]) {
+    assert.equal(await page.getByRole("option", {name: label, exact: true}).count(), 0);
+  }
+  for (const label of ["SSH 多目标建连", "RDP 多目标建连", "FTP 多目标建连"]) {
+    assert.equal(await page.getByRole("option", {name: label, exact: true}).count(), 1);
+  }
+  await page.getByRole("option", {name: "RDP 多目标建连", exact: true}).click();
+  await qualityDialog.getByText("不同目标 IP 数阈值（2–128）", {exact: true}).waitFor();
+  assert.ok((await qualityDialog.textContent()).includes("已有连接交互不增加目标数"));
+  assert.ok((await qualityDialog.textContent()).includes("需要 Agent 1.4.0+") && (await qualityDialog.textContent()).includes("不短于实际采集间隔"));
+  await qualityDialog.locator(".el-form-item").filter({hasText: "检测类型"}).locator(".el-select").click();
+  await page.getByRole("option", {name: "采集覆盖下降", exact: true}).click();
   await qualityDialog.getByText("指定节点", {exact: true}).click();
   const nodeSelect = qualityDialog.locator(".el-form-item").filter({hasText: "指定节点（可多选）"}).locator(".el-select");
   await nodeSelect.click();
@@ -325,6 +352,7 @@ try {
   await page.getByRole("button", {name: "加入白名单", exact: true}).first().click();
   await page.getByText("112.121.183.102", {exact: true}).waitFor();
   assert.ok((await page.locator(".el-dialog").textContent()).includes("11000, 11001, 11002"));
+  assert.ok((await page.locator(".el-dialog").textContent()).includes("不代表完整连接证据") && (await page.locator(".el-dialog").textContent()).includes("FTP 的 21／990 端口集合可能来自不同目标"));
   await page.getByRole("button", {name: "取消", exact: true}).click();
   assert.ok((await page.locator(".el-table__header").first().textContent()).includes("主要告警"));
   const headlineBox = await page.getByRole("button", {name: eventFixture.title, exact: true}).boundingBox();

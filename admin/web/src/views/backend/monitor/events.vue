@@ -220,7 +220,11 @@
                 >
             </el-table>
             <p>每个目标只批准对应端口。新目标、未批准端口、强度超限或更强异常仍告警。重复审批会保留之前批准的范围；删除范围请到检测排除编辑。</p>
-            <p>Agent 1.2.0 提供每目标最多 128 个端口的完整范围；旧版截断证据仍可能要求复核，升级后再审核此范围。</p>
+            <p>
+                SSH／RDP／FTP 多目标规则按独立服务目标集合整理审批候选，不代表完整连接证据；按该服务实际观察到的端口集合批准每个目标。FTP 的 21／990
+                端口集合可能来自不同目标，请逐项确认。
+            </p>
+            <p>SSH／RDP／FTP 多目标统计需要 Agent 1.4.0+；目标集合截断或存在状态丢弃时，业务例外不自动放行。</p>
             <template #footer
                 ><el-button @click="whitelistOpen = false">取消</el-button
                 ><el-button type="warning" :loading="whitelistSaving" :disabled="whitelistLoading" @click="saveWhitelist"

@@ -95,6 +95,13 @@ class MonitorTest extends TestCase
         return $this->withHeaders(['Authorization' => 'Bearer '.$this->token, 'X-Node-ID' => $n->id])->postJson('/api/v1/agent/batches', $p);
     }
 
+    private function smbEndpoint(int $attempts = 70, array $overrides = []): array
+    {
+        return array_replace(['peer_ip' => '192.0.2.1', 'peer_port' => 445, 'attempts' => $attempts,
+            'synack_replies' => $attempts, 'completed_handshakes' => $attempts, 'rst_replies' => 0,
+            'payload_out' => 100, 'payload_in' => 200], $overrides);
+    }
+
     public function test_scope_auth_and_atomic_rejection(): void
     {
         $n = $this->node();
@@ -109,7 +116,7 @@ class MonitorTest extends TestCase
     {
         $this->freezeTime();
         $node = $this->node();
-        Rule::create(['name' => 'Port anomaly', 'kind' => 'vertical_scan', 'threshold' => 1]);
+        Rule::create(['name' => 'SMB connections', 'kind' => 'smb_connections', 'threshold' => 1]);
         Rule::create(['name' => 'UDP rate reminder', 'kind' => 'udp_packet_rate', 'threshold' => 180]);
         $payload = $this->payload();
         $second = now()->utc()->format('Y-m-d\TH:i:s');
@@ -119,6 +126,7 @@ class MonitorTest extends TestCase
             'udp_stats_version' => 1, 'udp_filter_version' => 1, 'udp_flows_out' => 1, 'udp_non_dns_flows_out' => 1,
             'udp_packets_out' => 150, 'udp_non_dns_packets_out' => 150, 'udp_packets_in' => 0,
             'udp_bytes_out' => 6000, 'udp_bytes_in' => 0, 'packets_out' => 270, 'bytes_out' => 10000,
+            'outbound_endpoints' => [$this->smbEndpoint(3)],
         ]);
         $this->upload($node, $payload)->assertOk();
         $batch = Batch::firstOrFail();
@@ -127,7 +135,7 @@ class MonitorTest extends TestCase
         ProcessBatch::dispatchSync($batch->id);
         $metric = TrafficMetric::firstOrFail();
         $this->assertEqualsWithDelta(0.8, $metric->window_start->diffInSeconds($metric->window_end), 0.000001);
-        $alert = Alert::where('kind', 'vertical_scan')->firstOrFail();
+        $alert = Alert::where('kind', 'smb_connections')->firstOrFail();
         $this->assertSame(3, $alert->evidence['value']);
         $this->assertEquals(0.8, $alert->evidence['rule_observed_span_seconds']);
         $this->assertDatabaseMissing('alerts', ['kind' => 'udp_packet_rate']);
@@ -233,6 +241,7 @@ class MonitorTest extends TestCase
         $n = $this->node();
         $p = $this->payload();
         $p['metrics'][0]['max_ports_per_target'] = 50;
+        $p['metrics'][0]['outbound_endpoints'] = [$this->smbEndpoint()];
         $this->upload($n, $p)->assertOk()->assertJson(['accepted' => true, 'duplicate' => false]);
         $this->upload($n, $p)->assertOk()->assertJson(['duplicate' => true]);
         $this->assertDatabaseCount('batches', 1);
@@ -241,7 +250,8 @@ class MonitorTest extends TestCase
         ProcessBatch::dispatchSync(Batch::first()->id);
         $this->assertDatabaseCount('traffic_metrics', 1);
         $this->assertDatabaseCount('websites', 1);
-        $this->assertDatabaseHas('alerts', ['kind' => 'vertical_scan']);
+        $this->assertDatabaseHas('alerts', ['kind' => 'smb_connections']);
+        $this->assertSame(1, Alert::firstOrFail()->occurrences);
         $this->assertNull(Batch::first()->payload);
     }
 
@@ -268,6 +278,7 @@ class MonitorTest extends TestCase
         $payload['health'] = ['version' => '1.0.0', 'captured' => 10000, 'kernel_drops' => 0, 'state_dropped' => 0, 'decode_skipped' => 0];
         $payload['metrics'][0] += ['connection_stats_version' => 1, 'synack_replies' => 100, 'completed_handshakes' => 90, 'rst_replies' => 10, 'mature_attempts' => 110, 'mature_no_reply' => 10,
             'port_scan_targets' => [['peer_ip' => '192.0.2.1', 'port_count' => 2, 'ports' => [22, 443], 'truncated' => false]]];
+        $payload['metrics'][0]['outbound_endpoints'] = [$this->smbEndpoint(70, ['synack_replies' => 65, 'completed_handshakes' => 60, 'rst_replies' => 5])];
         $invalid = $payload;
         $invalid['metrics'][0]['completed_handshakes'] = 101;
         $this->upload($node, $invalid)->assertUnprocessable();
@@ -276,11 +287,13 @@ class MonitorTest extends TestCase
         $this->upload($node, $invalid)->assertUnprocessable();
         $this->upload($node, $payload)->assertOk();
         ProcessBatch::dispatchSync(Batch::firstOrFail()->id);
-        $alert = Alert::where('kind', 'vertical_scan')->firstOrFail();
+        $alert = Alert::where('kind', 'smb_connections')->firstOrFail();
         $this->assertSame('medium', $alert->severity);
         $this->assertSame('paired_transport', $alert->evidence['confidence']);
         $this->assertSame(10000, $alert->evidence['sample']['capture_quality']['captured']);
-        $this->assertSame([22, 443], $alert->evidence['sample']['port_scan_targets'][0]['ports']);
+        $this->assertSame(60, $alert->evidence['connection_analysis']['completed_handshakes']);
+        $this->assertSame(5, $alert->evidence['connection_analysis']['rst_replies']);
+        $this->assertSame([22, 443], TrafficMetric::firstOrFail()->evidence['port_scan_targets'][0]['ports']);
         $this->assertSame('needs_review', $alert->assessment_category);
     }
 
@@ -346,14 +359,15 @@ class MonitorTest extends TestCase
         $node = $this->node();
         Exclusion::create([
             'node_id' => $node->id, 'cidr' => '203.0.113.10/32',
-            'kind' => 'horizontal_scan', 'reason' => '业务复核', 'expires_at' => now()->addDays(30),
+            'kind' => 'smb_connections', 'reason' => '业务复核', 'expires_at' => now()->addDays(30),
         ]);
         $payload = $this->payload();
         $payload['metrics'][0]['max_ports_per_target'] = 50;
+        $payload['metrics'][0]['outbound_endpoints'] = [$this->smbEndpoint()];
         $this->upload($node, $payload)->assertOk();
         ProcessBatch::dispatchSync(Batch::firstOrFail()->id);
         $this->assertDatabaseMissing('alerts', ['kind' => 'horizontal_scan']);
-        $this->assertDatabaseHas('alerts', ['kind' => 'vertical_scan']);
+        $this->assertDatabaseHas('alerts', ['kind' => 'smb_connections']);
         $this->assertDatabaseCount('traffic_metrics', 1);
     }
 
@@ -380,6 +394,7 @@ class MonitorTest extends TestCase
         $payload = $this->payload();
         $payload['metrics'][0]['bytes_out'] = 1000000000;
         $payload['metrics'][0]['auth_attempts'] = 100;
+        $payload['metrics'][0]['outbound_endpoints'] = [$this->smbEndpoint()];
         $payload['vpn'] = [[
             'ip' => '203.0.113.10', 'peer_ip' => '1.1.1.1', 'local_port' => 40000,
             'peer_port' => 51820, 'protocol' => 'wireguard', 'initiator' => 'vm',
@@ -424,11 +439,12 @@ class MonitorTest extends TestCase
             'kind' => 'capture_degraded', 'reason' => '维护', 'expires_at' => now()->addDays(30)]);
         $payload = $this->payload();
         $payload['metrics'][0]['max_ports_per_target'] = 50;
+        $payload['metrics'][0]['outbound_endpoints'] = [$this->smbEndpoint()];
         $payload['health']['kernel_drops'] = 1;
         $this->upload($node, $payload)->assertOk();
         ProcessBatch::dispatchSync(Batch::firstOrFail()->id);
         $this->assertDatabaseMissing('alerts', ['kind' => 'capture_degraded']);
-        $this->assertDatabaseHas('alerts', ['kind' => 'vertical_scan']);
+        $this->assertDatabaseHas('alerts', ['kind' => 'smb_connections']);
         $this->assertSame(1, $node->fresh()->health['kernel_drops']);
         $node->update(['last_seen_at' => now()->subHour()]);
         $this->artisan('monitor:maintain')->assertSuccessful();
@@ -856,13 +872,15 @@ class MonitorTest extends TestCase
         ], [21, 22, 445, 3389]);
         $this->upload($node, $payload)->assertOk();
         ProcessBatch::dispatchSync(Batch::first()->id);
-        foreach (['ssh_connections', 'smb_connections', 'rdp_connections', 'ftp_connections'] as $kind) {
-            $alert = Alert::where('kind', $kind)->firstOrFail();
-            $this->assertSame('medium', $alert->severity);
-            $this->assertSame(70, $alert->evidence['value']);
-            $this->assertSame('not visible in aggregate traffic', $alert->evidence['sample']['login_result']);
-            $this->assertNull($alert->evidence['connection_analysis']['completion_ratio']);
+        foreach (['ssh_connections', 'rdp_connections', 'ftp_connections'] as $kind) {
+            $this->assertDatabaseMissing('alerts', ['kind' => $kind]);
         }
+        $alert = Alert::where('kind', 'smb_connections')->firstOrFail();
+        $this->assertSame('medium', $alert->severity);
+        $this->assertSame(70, $alert->evidence['value']);
+        $this->assertSame('not visible in aggregate traffic', $alert->evidence['sample']['login_result']);
+        $this->assertNull($alert->evidence['connection_analysis']['completion_ratio']);
+        $this->assertDatabaseCount('alerts', 1);
         $this->assertDatabaseCount('monitor_events', 1);
     }
 
@@ -873,11 +891,11 @@ class MonitorTest extends TestCase
         $payload = $this->payload();
         $payload['metrics'][0] += ['connection_stats_version' => 1, 'synack_replies' => 317, 'completed_handshakes' => 317, 'rst_replies' => 3, 'mature_attempts' => 317, 'mature_no_reply' => 0];
         $payload['metrics'][0]['tcp_attempts'] = 317;
-        $payload['metrics'][0]['outbound_endpoints'] = [['peer_ip' => '43.128.8.64', 'peer_port' => 3389, 'attempts' => 317, 'synack_replies' => 317, 'completed_handshakes' => 317, 'rst_replies' => 3, 'payload_out' => 424670, 'payload_in' => 355694]];
+        $payload['metrics'][0]['outbound_endpoints'] = [$this->smbEndpoint(317, ['peer_ip' => '43.128.8.64', 'rst_replies' => 3, 'payload_out' => 424670, 'payload_in' => 355694])];
         $payload['health'] = ['version' => '1.3.0', 'captured' => 782815, 'kernel_drops' => 84, 'decode_skipped' => 6973, 'state_dropped' => 0];
         $this->upload($node, $payload)->assertOk();
         ProcessBatch::dispatchSync(Batch::firstOrFail()->id);
-        $evidence = Alert::where('kind', 'rdp_connections')->firstOrFail()->evidence;
+        $evidence = Alert::where('kind', 'smb_connections')->firstOrFail()->evidence;
         $this->assertSame(317, $evidence['value']);
         $this->assertSame(317, $evidence['connection_analysis']['completed_handshakes']);
         $this->assertEquals(1.0, $evidence['connection_analysis']['completion_ratio']);

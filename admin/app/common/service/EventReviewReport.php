@@ -6,6 +6,7 @@ class EventReviewReport
 {
     public static function prioritize(array $alerts, string $title): array
     {
+        $alerts = array_filter($alerts, fn ($alert) => ($alert['kind'] ?? '') !== 'vertical_scan');
         $ranked = array_map(fn ($row) => ['alert' => $row, 'score' => 100000 * (int) ! self::isBehaviorNotice($row)
             + 10000 * (int) in_array($row['status'] ?? 'open', ['open', 'acknowledged'], true)
             + 1000 * (['low' => 1, 'medium' => 2, 'high' => 3][$row['severity'] ?? ''] ?? 0)
@@ -23,7 +24,7 @@ class EventReviewReport
 
     private static function isBehaviorNotice(array $alert): bool
     {
-        if (in_array($alert['kind'] ?? '', ['udp_flow_burst', 'udp_packet_rate'], true)) {
+        if (in_array($alert['kind'] ?? '', ['ssh_connections', 'rdp_connections', 'ftp_connections', 'udp_flow_burst', 'udp_packet_rate'], true)) {
             return true;
         }
 
@@ -33,7 +34,8 @@ class EventReviewReport
 
     public static function build(array $event, array $alerts, array $metrics): array
     {
-        $eventKinds = self::decode($event['kinds'] ?? []);
+        $alerts = array_filter($alerts, fn ($alert) => ($alert['kind'] ?? '') !== 'vertical_scan');
+        $eventKinds = array_values(array_diff(self::decode($event['kinds'] ?? []), ['vertical_scan']));
         if (! $eventKinds) {
             $eventKinds = array_values(array_unique(array_column($alerts, 'kind')));
         }
@@ -68,6 +70,15 @@ class EventReviewReport
                 $sample = $e['sample'] ?? [];
                 $target = implode(', ', array_slice($sample['target_endpoints'] ?? [], 0, 4));
                 $reasons[] = $alert['title'].'：'.$target.'；规则窗口 '.($e['window_seconds'] ?? '未知').' 秒，最活跃目标连接下界 '.($e['value'] ?? '未知').' 次。握手成功不排除认证或应用层异常，需结合配对认证结果和业务授权核实';
+            }
+            if (in_array($alert['kind'], ['ssh_target_spread', 'rdp_target_spread', 'ftp_target_spread'], true)) {
+                $sample = $e['sample'] ?? [];
+                $targetList = implode(', ', array_slice($sample['targets'] ?? [], 0, 8));
+                $span = $e['rule_observed_span_seconds'] ?? '未知';
+                $reasons[] = $alert['title'].'：实际观察跨度 '.$span.' 秒、'.($e['rule_window_count'] ?? '未知').' 个有效采集窗口，主动建连的不同目标 IP '.($e['value'] ?? '未知').' 个，阈值 '.($e['threshold'] ?? '未知').' 个；目标样本 '.$targetList.'。同一 IP 重复连接只计一个目标，已建立连接的交互不计入目标数量；握手不代表登录，登录失败次数不可观测';
+                if ($sample['service_targets_capped'] ?? false) {
+                    $gaps[] = '服务目标集合最多保存 128 个 IP；存在集合截断，目标数量为观察下界，白名单不自动放行';
+                }
             }
             $a = $e['connection_analysis'] ?? [];
             $current = $a['category'] ?? 'needs_review';

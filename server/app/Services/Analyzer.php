@@ -30,7 +30,7 @@ class Analyzer
         $p = $batch->payload;
         $at = $batch->window_end;
         $this->observed = [];
-        $this->rules = Rule::where('enabled', true)->whereNotIn('kind', ['horizontal_scan', 'suspected_bruteforce'])->where(fn ($q) => $q->whereNull('node_id')->orWhere('node_id', $node->id))->get();
+        $this->rules = Rule::where('enabled', true)->whereNotIn('kind', ['horizontal_scan', 'suspected_bruteforce', ...AlertNotificationPolicy::RETIRED_RULES])->where(fn ($q) => $q->whereNull('node_id')->orWhere('node_id', $node->id))->get();
         $this->exclusions = Exclusion::where('expires_at', '>', $at)->where(fn ($q) => $q->whereNull('node_id')->orWhere('node_id', $node->id))->get();
         foreach ($p['metrics'] as $m) {
             $m['capture_quality'] = array_intersect_key($p['health'], array_flip(['captured', 'kernel_drops', 'decode_skipped', 'state_dropped', 'reassembly_dropped', 'interfaces', 'version']));
@@ -150,7 +150,7 @@ class Analyzer
 
     private function detect(Node $node, IpAsset $asset, Batch $batch): void
     {
-        $trafficRules = $this->rules->where('kind', '!=', 'capture_degraded')->whereNotIn('kind', AlertNotificationPolicy::RETIRED_UDP_RULES);
+        $trafficRules = $this->rules->where('kind', '!=', 'capture_degraded')->whereNotIn('kind', AlertNotificationPolicy::RETIRED_RULES);
         if ($trafficRules->isEmpty()) {
             return;
         }
@@ -158,55 +158,67 @@ class Analyzer
         foreach ($trafficRules as $rule) {
             $cutoff = $batch->window_end->copy()->subSeconds($rule->window_seconds);
             $rows = $history->filter(fn ($row) => $row->window_end->gt($cutoff));
+            $countsTargets = ServiceConnectionRules::countsTargets($rule->kind);
+            if ($countsTargets) {
+                $rows = $rows->filter(fn ($row) => $row->window_start->gte($cutoff) && ($row->evidence['service_target_stats_version'] ?? 0) === 1);
+                if ($rows->isEmpty()) {
+                    continue;
+                }
+            }
             $observedStart = $rows->min('window_start');
             $observedEnd = $rows->max('window_end');
-            $serviceSamples = isset(ServiceConnectionRules::RULES[$rule->kind]) ? $rows->map(fn ($row) => ['row' => $row, 'sample' => app(ServiceConnectionRules::class)->sample($rule->kind, $row->evidence)])->filter(fn ($entry) => $entry['sample'] !== null)->sortByDesc(fn ($entry) => $entry['sample']['tcp_attempts']) : collect();
+            $serviceSamples = ! $countsTargets && isset(ServiceConnectionRules::RULES[$rule->kind]) ? $rows->map(fn ($row) => ['row' => $row, 'sample' => app(ServiceConnectionRules::class)->sample($rule->kind, $row->evidence)])->filter(fn ($entry) => $entry['sample'] !== null)->sortByDesc(fn ($entry) => $entry['sample']['tcp_attempts']) : collect();
             $serviceSample = $serviceSamples->first();
-            $value = $serviceSample ? $serviceSample['sample']['tcp_attempts'] : match ($rule->kind) {
-                'vertical_scan' => (int) $rows->max(fn ($m) => $m->evidence['max_ports_per_target'] ?? 0),
+            $targetSample = $countsTargets ? app(ServiceConnectionRules::class)->targetSample($rule->kind, $rows->pluck('evidence')->all()) : null;
+            $value = $countsTargets ? ($targetSample['unique_targets'] ?? 0) : ($serviceSample ? $serviceSample['sample']['tcp_attempts'] : match ($rule->kind) {
                 'single_target_attempts' => (int) $rows->max(fn ($m) => $m->evidence['max_attempts_per_target'] ?? 0),
                 'tcp_connection_burst' => (int) $rows->sum('tcp_attempts'),
                 'egress_mbps' => (int) ($rows->sum('bytes_out') * 8 / max(1, $rows->sum(fn ($m) => $m->window_start->diffInSeconds($m->window_end))) / 1000000),
                 default => 0,
-            };
-            if ($value < $rule->threshold) {
+            });
+            $threshold = $countsTargets ? max(2, $rule->threshold) : $rule->threshold;
+            if ($value < $threshold) {
                 continue;
             }
             $title = match ($rule->kind) {
-                'vertical_scan' => '疑似对外端口扫描',
                 'single_target_attempts' => '单目标高频连接','tcp_connection_burst' => 'TCP 连接突增',default => '出站流量超出阈值'
             };
             $note = match ($rule->kind) {
-                'vertical_scan' => '仅当前观察节点；跨窗口取最大值，目标/端口数是保守下界',
                 'single_target_attempts' => '按单目标 TCP 发起计数，可能是正常重连；不代表登录失败',
                 'tcp_connection_burst' => '按窗口累积 TCP 发起计数，可能包含正常高并发连接',
                 default => '按当前观察节点估算的出站速率',
             };
             $sample = match ($rule->kind) {
-                'vertical_scan' => $rows->sortByDesc(fn ($row) => $row->evidence['max_ports_per_target'] ?? 0)->first(),
                 'single_target_attempts' => $rows->sortByDesc(fn ($row) => $row->evidence['max_attempts_per_target'] ?? 0)->first(),
                 default => $rows->last(),
             };
             if ($serviceSample) {
                 $sample = $serviceSample['row'];
             }
-            $sampleEvidence = $serviceSample ? $serviceSample['sample'] : ($sample?->evidence ?? []);
+            $sampleEvidence = $targetSample ?? ($serviceSample ? $serviceSample['sample'] : ($sample?->evidence ?? []));
+            if ($targetSample) {
+                $quality = [];
+                foreach (['captured', 'kernel_drops', 'decode_skipped', 'state_dropped', 'reassembly_dropped'] as $counter) {
+                    $quality[$counter] = (int) $rows->sum(fn ($row) => $row->evidence['capture_quality'][$counter] ?? 0);
+                }
+                $sampleEvidence['capture_quality'] = $quality + array_intersect_key($sample?->evidence['capture_quality'] ?? [], array_flip(['interfaces', 'version']));
+            }
             $severity = $rule->severity;
             $confidence = 'behavioral';
             $analysis = [];
             if (in_array($rule->kind, ConnectionAssessment::KINDS, true)) {
-                $assessment = app(ConnectionAssessment::class)->assess($rule->kind, $sampleEvidence, $rule->threshold, $severity, $rows->pluck('evidence')->all());
+                $assessment = app(ConnectionAssessment::class)->assess($rule->kind, $sampleEvidence, $threshold, $severity, $rows->pluck('evidence')->all());
                 $severity = $assessment['severity'];
                 $title = $assessment['title'];
                 $confidence = $assessment['confidence'];
                 $note = $assessment['note'];
                 $analysis = ['connection_analysis' => $assessment['connection_analysis']];
             }
-            $this->alert($node, $asset, $rule->kind, $severity, $title, ['rule_id' => $rule->id, 'value' => $value, 'threshold' => $rule->threshold, 'window_seconds' => $rule->window_seconds,
+            $this->alert($node, $asset, $rule->kind, $severity, $title, ['rule_id' => $rule->id, 'value' => $value, 'threshold' => $threshold, 'window_seconds' => $rule->window_seconds,
                 'rule_observed_start' => $observedStart?->toIso8601String(), 'rule_observed_end' => $observedEnd?->toIso8601String(),
                 'rule_observed_span_seconds' => $observedStart && $observedEnd ? round($observedStart->diffInSeconds($observedEnd), 3) : null,
                 'rule_window_count' => $rows->count(),
-                'sample_window_start' => $sample?->window_start?->toIso8601String(), 'sample_window_end' => $sample?->window_end?->toIso8601String(), 'sample' => $sampleEvidence, 'confidence' => $confidence, 'note' => $note] + $analysis, $batch->window_end, $rule->cooldown_seconds, (string) $rule->id);
+                'sample_window_start' => ($countsTargets ? $observedStart : $sample?->window_start)?->toIso8601String(), 'sample_window_end' => ($countsTargets ? $observedEnd : $sample?->window_end)?->toIso8601String(), 'sample' => $sampleEvidence, 'confidence' => $confidence, 'note' => $note] + $analysis, $batch->window_end, $rule->cooldown_seconds, (string) $rule->id);
         }
     }
 
@@ -265,7 +277,7 @@ class Analyzer
 
         if (in_array($event->status, ['open', 'acknowledged'], true)) {
             $ranked = Alert::where('event_id', $event->id)->whereIn('status', ['open', 'acknowledged'])->where('assessment_category', '!=', 'behavior_notice')
-                ->whereNotIn('kind', AlertNotificationPolicy::RETIRED_UDP_RULES)->orderBy('id')->get(['kind', 'severity', 'title', 'assessment_category'])
+                ->whereNotIn('kind', AlertNotificationPolicy::RETIRED_RULES)->orderBy('id')->get(['kind', 'severity', 'title', 'assessment_category'])
                 ->sortByDesc(fn ($row) => EventPriority::rank($row->severity, $row->assessment_category, $row->kind))->first();
             if ($ranked) {
                 $event->update(['severity' => $ranked->severity, 'title' => $ranked->title, 'assessment_category' => $ranked->assessment_category]);

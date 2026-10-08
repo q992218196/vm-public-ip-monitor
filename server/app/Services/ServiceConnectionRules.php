@@ -5,14 +5,70 @@ namespace App\Services;
 class ServiceConnectionRules
 {
     public const RULES = [
-        'ssh_connections' => ['name' => 'SSH 服务高频连接', 'ports' => [22]],
         'smb_connections' => ['name' => 'SMB 服务高频连接', 'ports' => [139, 445]],
-        'rdp_connections' => ['name' => '远程桌面 RDP 高频连接', 'ports' => [3389]],
-        'ftp_connections' => ['name' => 'FTP 服务高频连接', 'ports' => [21, 990]],
+        'ssh_target_spread' => ['name' => 'SSH 多目标建连', 'ports' => [22], 'service' => 'ssh'],
+        'rdp_target_spread' => ['name' => 'RDP 多目标建连', 'ports' => [3389], 'service' => 'rdp'],
+        'ftp_target_spread' => ['name' => 'FTP 多目标建连', 'ports' => [21, 990], 'service' => 'ftp'],
     ];
+
+    public static function countsTargets(string $kind): bool
+    {
+        return isset(self::RULES[$kind]['service']);
+    }
+
+    public function targetSample(string $kind, array $windows): ?array
+    {
+        $definition = self::RULES[$kind] ?? null;
+        if (! isset($definition['service'])) {
+            return null;
+        }
+        $targets = [];
+        $ports = [];
+        $attempts = 0;
+        $capped = false;
+        foreach ($windows as $window) {
+            if (($window['service_target_stats_version'] ?? 0) !== 1) {
+                continue;
+            }
+            foreach ($window['service_targets'] ?? [] as $service) {
+                if ($service['service'] !== $definition['service']) {
+                    continue;
+                }
+                $attempts += $service['attempts'];
+                $capped = $capped || $service['targets_capped'] || ($window['capture_quality']['state_dropped'] ?? 0) > 0;
+                foreach ($service['targets'] as $target) {
+                    if (! isset($targets[$target]) && count($targets) >= 128) {
+                        $capped = true;
+                    } else {
+                        $targets[$target] = true;
+                    }
+                }
+                foreach ($service['ports'] as $port) {
+                    $ports[$port] = true;
+                }
+            }
+        }
+        if (! $targets) {
+            return null;
+        }
+        $targets = array_keys($targets);
+        sort($targets, SORT_STRING);
+        $ports = array_keys($ports);
+        sort($ports, SORT_NUMERIC);
+
+        return ['service_target_stats_version' => 1, 'count_basis' => 'distinct_service_target_ips', 'targets' => $targets,
+            'unique_targets' => count($targets), 'service_targets_capped' => $capped, 'cardinality_capped' => $capped, 'ports' => $ports,
+            'port_samples_truncated' => false, 'endpoint_samples_truncated' => false, 'outbound_samples_truncated' => false,
+            'tcp_attempts' => $attempts, 'outbound_endpoints' => [], 'service' => $definition['name'],
+            'login_result' => 'not visible in aggregate traffic', 'protocol_basis' => 'common destination ports only; actual service may differ',
+            'counting_note' => 'Distinct destination IPs with outgoing TCP SYN within fully contained collection windows; retransmissions and post-connect data do not add targets; a repeated target across windows or FTP ports counts once; bounded lower bound, not login failures'];
+    }
 
     public function sample(string $kind, array $evidence): ?array
     {
+        if (self::countsTargets($kind)) {
+            return $this->targetSample($kind, [$evidence]);
+        }
         $definition = self::RULES[$kind] ?? null;
         if (! $definition) {
             return null;

@@ -7,9 +7,9 @@ class EventPriority
     public static function rank(string $severity, string $category, string $kind): int
     {
         $specificity = match ($kind) {
-            'smb_connections', 'ssh_connections', 'rdp_connections', 'ftp_connections' => 30,
+            'smb_connections', 'ssh_target_spread', 'rdp_target_spread', 'ftp_target_spread' => 30,
             'suspected_bruteforce', 'single_target_attempts', 'vpn_protocol', 'proxy_suspect' => 20,
-            'horizontal_scan', 'vertical_scan' => 10,
+            'horizontal_scan' => 10,
             default => 0,
         };
 

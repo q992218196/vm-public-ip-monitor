@@ -47,7 +47,7 @@ echo "Event review report bounds, mixed versions and review priorities passed\n"
 $serviceAlerts = [
     ['title' => '多目标连接', 'kind' => 'horizontal_scan', 'severity' => 'medium', 'status' => 'open', 'evidence' => ['connection_analysis' => ['category' => 'needs_review', 'reasons' => ['目标较多']]]],
     ['title' => 'SMB 服务高频连接', 'kind' => 'smb_connections', 'severity' => 'medium', 'status' => 'open', 'evidence' => ['value' => 100, 'window_seconds' => 60, 'sample' => ['target_endpoints' => ['192.0.2.1:445']], 'connection_analysis' => ['category' => 'needs_review']]],
-    ['title' => '旧强异常', 'kind' => 'vertical_scan', 'severity' => 'high', 'status' => 'resolved', 'evidence' => []],
+    ['title' => '旧强异常', 'kind' => 'vpn_protocol', 'severity' => 'high', 'status' => 'resolved', 'evidence' => []],
 ];
 $serviceEvent = $event + ['title' => 'SMB 服务高频连接'];
 $ordered = EventReviewReport::prioritize($serviceAlerts, $serviceEvent['title']);
@@ -60,6 +60,19 @@ if ($ordered[0]['kind'] !== 'smb_connections' || $ordered[2]['status'] !== 'reso
 echo "Service headline and review evidence priority passed.\n";
 
 $rdpAlert = ['title' => 'RDP 高频连接', 'kind' => 'rdp_connections', 'status' => 'open', 'evidence' => []];
+$spreadEvidence = ['value' => 10, 'threshold' => 10, 'window_seconds' => 60, 'rule_observed_span_seconds' => 60, 'rule_window_count' => 2,
+    'sample' => ['service_target_stats_version' => 1, 'targets' => ['192.0.2.1', '192.0.2.2'], 'tcp_attempts' => 317, 'ports' => [3389], 'service_targets_capped' => true],
+    'connection_analysis' => ['category' => 'needs_review']];
+foreach (['ssh_target_spread', 'rdp_target_spread', 'ftp_target_spread'] as $spreadKind) {
+    $spreadAlert = ['kind' => $spreadKind, 'title' => '服务多目标建连', 'severity' => 'medium', 'status' => 'open', 'evidence' => $spreadEvidence];
+    $retiredAlert = ['kind' => 'rdp_connections', 'title' => '旧 RDP 次数提醒', 'severity' => 'high', 'status' => 'open', 'evidence' => ['connection_analysis' => ['category' => 'strong_anomaly', 'reasons' => ['Retired count assessment']]]];
+    $deletedAlert = ['kind' => 'vertical_scan', 'title' => '已删除多端口', 'severity' => 'high', 'status' => 'open', 'evidence' => ['connection_analysis' => ['category' => 'strong_anomaly']]];
+    $spreadReport = EventReviewReport::build($event + ['kinds' => [$spreadKind, 'rdp_connections', 'vertical_scan']], [$retiredAlert, $deletedAlert, $spreadAlert], [$row]);
+    if ($spreadReport['category'] !== 'needs_review' || ! str_contains($spreadReport['reasons'][0], '不同目标 IP 10 个') || ! str_contains($spreadReport['reasons'][0], '实际观察跨度 60 秒、2 个有效采集窗口') || str_contains(implode(' ', $spreadReport['reasons']), '317 次') || str_contains(json_encode($spreadReport), 'Retired count assessment') || in_array('vertical_scan', $spreadReport['event']['kinds'], true) || ! str_contains(implode(' ', $spreadReport['evidence_gaps']), '128 个 IP')) {
+        throw new RuntimeException('Service target reports confuse distinct IPs with retired connection counts or deleted data');
+    }
+}
+
 $rdpReport = EventReviewReport::build($event + ['kinds' => '["rdp_connections"]'], [$rdpAlert], [$row]);
 $fallbackReport = EventReviewReport::build($event, [$rdpAlert], [$row]);
 $mixedRdpReport = EventReviewReport::build($event + ['kinds' => ['rdp_connections', 'smb_connections']], [$rdpAlert], [$row]);
@@ -105,5 +118,17 @@ $profile = BusinessScope::profile(
 );
 if ($profile !== ['192.0.2.1' => [11000, 11001, 11002, 11003], '192.0.2.2' => [3389]]) {
     throw new RuntimeException('Business approval must combine recent windows and preserve previous approval without mixing ports across targets');
+}
+$serviceProfile = BusinessScope::profile([
+    ['service_target_stats_version' => 1, 'service_targets' => [
+        ['service' => 'ssh', 'targets' => ['192.0.2.3'], 'ports' => [22]],
+        ['service' => 'rdp', 'targets' => ['192.0.2.4'], 'ports' => [3389]],
+        ['service' => 'ftp', 'targets' => ['192.0.2.3', '192.0.2.5'], 'ports' => [21, 990]],
+    ]],
+    ['service_target_stats_version' => 1, 'count_basis' => 'distinct_service_target_ips', 'targets' => ['192.0.2.6'], 'ports' => [3389]],
+    ['service_target_stats_version' => 0, 'service_targets' => [['targets' => ['192.0.2.7'], 'ports' => [22]]]],
+]);
+if ($serviceProfile !== ['192.0.2.3' => [21, 22, 990], '192.0.2.4' => [3389], '192.0.2.5' => [21, 990], '192.0.2.6' => [3389]]) {
+    throw new RuntimeException('Service business approval loses independent target sets or invents port pairings');
 }
 echo "Business scope aggregation passed.\n";

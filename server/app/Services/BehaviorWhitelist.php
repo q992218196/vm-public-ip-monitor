@@ -54,24 +54,36 @@ class BehaviorWhitelist
             }
         }
         if (($scope['version'] ?? 0) === 2) {
-            $profiles = $sample['port_scan_targets'] ?? [];
-            $profilePeers = array_unique(array_column($profiles, 'peer_ip'));
-            if (! $profiles || count($profilePeers) !== count($profiles) || count($profilePeers) !== ($sample['unique_targets'] ?? -1) || array_diff($targets, $profilePeers)) {
-                return ['match' => false, 'reason' => '目标端口范围不完整，请升级 Agent 或补充抓包复核'];
-            }
-            $allPorts = [];
-            foreach ($profiles as $profile) {
-                $currentPorts = array_values(array_unique($profile['ports'] ?? []));
-                if (($profile['truncated'] ?? true) || count($currentPorts) !== ($profile['port_count'] ?? -1)) {
-                    return ['match' => false, 'reason' => '目标端口样本截断，不能确认已审核范围；需要 Agent 1.2.0 或以上'];
+            if (($sample['count_basis'] ?? '') === 'distinct_service_target_ips') {
+                if (($sample['service_target_stats_version'] ?? 0) !== 1 || ($sample['service_targets_capped'] ?? true)
+                    || count($targets) !== ($sample['unique_targets'] ?? -1)) {
+                    return ['match' => false, 'reason' => '服务目标集合不完整，不能确认已批准范围'];
                 }
-                if (array_diff($currentPorts, $scope['target_ports'][$profile['peer_ip']] ?? [])) {
-                    return ['match' => false, 'reason' => '目标 '.$profile['peer_ip'].' 出现未批准的端口'];
+                foreach ($targets as $target) {
+                    if (array_diff($ports, $scope['target_ports'][$target] ?? [])) {
+                        return ['match' => false, 'reason' => '目标 '.$target.' 出现未批准的服务端口'];
+                    }
                 }
-                $allPorts = [...$allPorts, ...$currentPorts];
-            }
-            if (array_diff($ports, $allPorts)) {
-                return ['match' => false, 'reason' => '目标端口明细与全局证据不一致'];
+            } else {
+                $profiles = $sample['port_scan_targets'] ?? [];
+                $profilePeers = array_unique(array_column($profiles, 'peer_ip'));
+                if (! $profiles || count($profilePeers) !== count($profiles) || count($profilePeers) !== ($sample['unique_targets'] ?? -1) || array_diff($targets, $profilePeers)) {
+                    return ['match' => false, 'reason' => '目标端口范围不完整，请升级 Agent 或补充抓包复核'];
+                }
+                $allPorts = [];
+                foreach ($profiles as $profile) {
+                    $currentPorts = array_values(array_unique($profile['ports'] ?? []));
+                    if (($profile['truncated'] ?? true) || count($currentPorts) !== ($profile['port_count'] ?? -1)) {
+                        return ['match' => false, 'reason' => '目标端口样本截断，不能确认已审核范围；需要 Agent 1.2.0 或以上'];
+                    }
+                    if (array_diff($currentPorts, $scope['target_ports'][$profile['peer_ip']] ?? [])) {
+                        return ['match' => false, 'reason' => '目标 '.$profile['peer_ip'].' 出现未批准的端口'];
+                    }
+                    $allPorts = [...$allPorts, ...$currentPorts];
+                }
+                if (array_diff($ports, $allPorts)) {
+                    return ['match' => false, 'reason' => '目标端口明细与全局证据不一致'];
+                }
             }
         } elseif (array_diff($ports, $scope['ports'] ?? [])) {
             return ['match' => false, 'reason' => '出现未批准的目标端口'];

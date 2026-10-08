@@ -54,17 +54,15 @@ class ConnectionAssessmentTest extends TestCase
     {
         $s = $this->sample();
         $service = app(ConnectionAssessment::class);
-        foreach (['horizontal_scan' => 100, 'vertical_scan' => 10] as $kind => $threshold) {
-            $this->assertSame('medium', $service->assess($kind, $s, $threshold, 'high', [$s])['severity']);
-            $this->assertSame('high', $service->assess($kind, $s, $threshold, 'high', [$s, $s])['severity']);
-            $this->assertSame('low', $service->assess($kind, $s, $threshold, 'low', [$s, $s])['severity']);
-            $bad = $s;
-            $bad['capture_quality']['state_dropped'] = 1;
-            $this->assertSame('medium', $service->assess($kind, $bad, $threshold, 'high', [$bad, $bad])['severity']);
-            $bad = $s;
-            $bad['capture_quality']['kernel_drops'] = 500;
-            $this->assertSame('medium', $service->assess($kind, $bad, $threshold, 'high', [$bad, $bad])['severity']);
-        }
+        $this->assertSame('medium', $service->assess('horizontal_scan', $s, 100, 'high', [$s])['severity']);
+        $this->assertSame('high', $service->assess('horizontal_scan', $s, 100, 'high', [$s, $s])['severity']);
+        $this->assertSame('low', $service->assess('horizontal_scan', $s, 100, 'low', [$s, $s])['severity']);
+        $bad = $s;
+        $bad['capture_quality']['state_dropped'] = 1;
+        $this->assertSame('medium', $service->assess('horizontal_scan', $bad, 100, 'high', [$bad, $bad])['severity']);
+        $bad = $s;
+        $bad['capture_quality']['kernel_drops'] = 500;
+        $this->assertSame('medium', $service->assess('horizontal_scan', $bad, 100, 'high', [$bad, $bad])['severity']);
     }
 
     public function test_busy_successful_service_is_notice_and_auth_connections_do_not_prove_bruteforce(): void

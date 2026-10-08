@@ -28,9 +28,9 @@ foreach ($kinds as $index => $kind) {
         $insert->execute([$alertId, $observer, $asset, $kind, $kind, 'medium', 'open', 1, '2026-10-01 00:00:00']);
     }
     $db->prepare('UPDATE alerts SET evidence=? WHERE id IN (?,?,?)')->execute([json_encode(['value' => 100, 'sample' => ['targets' => ['192.0.2.2'], 'ports' => [443], 'unique_targets' => 1]]), $id, $id + 1, $id + 2]);
-    if ($kind === 'capture_degraded') {
-        if (($request('whitelistAlert', ['id' => $id])['code'] ?? null) === 1 || $db->query("SELECT count(*) FROM exclusions WHERE kind='capture_degraded'")->fetchColumn() != 0 || $db->query('SELECT status FROM alerts WHERE id='.$id)->fetchColumn() !== 'open') {
-            throw new RuntimeException('Capture quality can be muted through alert whitelist');
+    if (in_array($kind, ['capture_degraded', 'vertical_scan'], true)) {
+        if (($request('whitelistAlert', ['id' => $id])['code'] ?? null) === 1 || $db->query("SELECT count(*) FROM exclusions WHERE kind='".$kind."'")->fetchColumn() != 0 || $db->query('SELECT status FROM alerts WHERE id='.$id)->fetchColumn() !== 'open') {
+            throw new RuntimeException('Capture quality or deleted multi-port rule can be muted through alert whitelist');
         }
 
         continue;

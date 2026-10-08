@@ -62,7 +62,7 @@ class AlertNotificationTest extends TestCase
         $this->assertNull(app(Analyzer::class)->alert($node, $ip, 'tcp_connection_burst', 'high', 'Quantity only', ['connection_analysis' => ['category' => 'behavior_notice']], now()->addSeconds(30)));
         $this->assertSame('normal', $event->fresh()->status);
         $this->assertSame(1, $event->fresh()->occurrences);
-        app(Analyzer::class)->alert($node, $ip, 'vertical_scan', 'high', 'New anomaly', ['connection_analysis' => ['category' => 'strong_anomaly']], now()->addMinute());
+        app(Analyzer::class)->alert($node, $ip, 'smb_connections', 'high', 'New anomaly', ['connection_analysis' => ['category' => 'strong_anomaly']], now()->addMinute());
         $this->assertSame('open', $event->fresh()->status);
         $this->assertSame('New anomaly', $event->fresh()->title);
         $this->assertDatabaseCount('alerts', 2);
@@ -125,8 +125,30 @@ class AlertNotificationTest extends TestCase
         $alert = Alert::create(['dedup_key' => hash('sha256', 'queued'), 'node_id' => $node->id, 'ip_asset_id' => $ip->id, 'kind' => 'udp_packet_rate',
             'severity' => 'high', 'title' => 'Count only', 'assessment_category' => 'needs_review', 'evidence' => [], 'first_seen_at' => now(), 'last_seen_at' => now()]);
         (new SendAlertEmail($alert->id))->handle();
-        $alert->update(['kind' => 'vertical_scan', 'evidence' => ['connection_analysis' => ['category' => 'behavior_notice']]]);
+        $alert->update(['kind' => 'smb_connections', 'evidence' => ['connection_analysis' => ['category' => 'behavior_notice']]]);
         (new SendAlertEmail($alert->id))->handle();
+        Mail::assertNothingOutgoing();
+    }
+
+    public function test_retired_rules_do_not_notify_even_when_evidence_claims_strong_anomaly(): void
+    {
+        Queue::fake();
+        Mail::fake();
+        config(['monitor.auto_capture' => true, 'monitor.alert_email' => 'review@example.test']);
+        $node = $this->node();
+        $ip = $this->ip();
+        foreach (AlertNotificationPolicy::RETIRED_RULES as $kind) {
+            $evidence = ['connection_analysis' => ['category' => 'strong_anomaly'], 'value' => 1000000];
+            $this->assertNull(app(Analyzer::class)->alert($node, $ip, $kind, 'high', 'Retired rule', $evidence, now()));
+            $alert = Alert::create(['dedup_key' => hash('sha256', $kind), 'node_id' => $node->id, 'ip_asset_id' => $ip->id,
+                'kind' => $kind, 'severity' => 'high', 'title' => 'Previously queued', 'assessment_category' => 'strong_anomaly',
+                'evidence' => $evidence, 'first_seen_at' => now(), 'last_seen_at' => now()]);
+            (new SendAlertEmail($alert->id))->handle();
+        }
+        $this->assertDatabaseCount('monitor_events', 0);
+        $this->assertDatabaseCount('packet_captures', 0);
+        $this->assertDatabaseCount('alerts', count(AlertNotificationPolicy::RETIRED_RULES));
+        Queue::assertNotPushed(SendAlertEmail::class);
         Mail::assertNothingOutgoing();
     }
 }

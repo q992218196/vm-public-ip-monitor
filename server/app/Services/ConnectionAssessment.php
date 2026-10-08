@@ -4,10 +4,13 @@ namespace App\Services;
 
 class ConnectionAssessment
 {
-    public const KINDS = ['horizontal_scan', 'vertical_scan', 'suspected_bruteforce', 'single_target_attempts', 'tcp_connection_burst', 'egress_mbps', 'ssh_connections', 'smb_connections', 'rdp_connections', 'ftp_connections', 'udp_flow_burst', 'udp_packet_rate'];
+    public const KINDS = ['horizontal_scan', 'suspected_bruteforce', 'single_target_attempts', 'tcp_connection_burst', 'egress_mbps', 'smb_connections', 'ssh_target_spread', 'rdp_target_spread', 'ftp_target_spread', 'udp_flow_burst', 'udp_packet_rate'];
 
     public function assess(string $kind, array $sample, int $threshold = 0, string $ceiling = 'high', array $windows = []): array
     {
+        if (ServiceConnectionRules::countsTargets($kind)) {
+            return $this->assessServiceTargets($kind, $sample, $threshold, $ceiling);
+        }
         if (in_array($kind, ['udp_flow_burst', 'udp_packet_rate'], true)) {
             $reasons = ['UDP 流数量或包速率达到阈值，只证明流量活跃，不能直接判断攻击', 'UDP 流按单采集窗口内不同五元组计数，重复包不增加流数，服务回复也可能计入出站流；不是连接握手或应用请求数'];
             if (($sample['udp_filter_version'] ?? 0) === 1) {
@@ -34,17 +37,14 @@ class ConnectionAssessment
             && min($completed, $resets) >= 0 && max($completed, $resets) <= $attempts
             && ($service && $mature === null && $missing === null || is_int($mature) && is_int($missing) && min($mature, $missing) >= 0 && $mature <= $attempts && $missing <= $mature);
         $qualityGood = $this->qualityGood($sample);
-        $titles = ['horizontal_scan' => '多目标连接（待复核）', 'vertical_scan' => '多端口连接（待复核）', 'suspected_bruteforce' => '认证服务重复连接（待复核）', 'single_target_attempts' => '单目标高频连接提醒', 'tcp_connection_burst' => 'TCP 连接数量提醒', 'egress_mbps' => '出站带宽提醒'];
+        $titles = ['horizontal_scan' => '多目标连接（待复核）', 'suspected_bruteforce' => '认证服务重复连接（待复核）', 'single_target_attempts' => '单目标高频连接提醒', 'tcp_connection_burst' => 'TCP 连接数量提醒', 'egress_mbps' => '出站带宽提醒'];
         foreach (ServiceConnectionRules::RULES as $serviceKind => $definition) {
             $titles[$serviceKind] = $definition['name'].'（待复核）';
         }
-        $scan = in_array($kind, ['horizontal_scan', 'vertical_scan'], true);
+        $scan = $kind === 'horizontal_scan';
         $severity = $scan || $service || $kind === 'suspected_bruteforce' ? 'medium' : 'low';
         $category = $severity === 'low' ? 'behavior_notice' : 'needs_review';
         $reasons = [$scan ? '目标或端口数量达到规则阈值，仍需区分业务连接与探测行为' : '连接数量或带宽阈值只能证明活跃程度，不能证明攻击'];
-        if ($kind === 'vertical_scan') {
-            $reasons[] = '固定目标的多端口健康检查、服务池检查也会触发此规则；按目标核查业务范围，数量本身不确认扫描或违规，已审核目标端口可建立定向业务例外';
-        }
         if ($service) {
             $reasons[] = '仅统计有界目标样本中最活跃目标的连接下界，跨窗口取最大值；常见端口只提示服务类型，不代表已观察登录失败或爆破';
             $reasons[] = '规则计数是主动 TCP 建连尝试（SYN 有界去重），连接后的数据交互不增加次数；完整握手数另列，未成功的发起仍保留用于扫描核查';
@@ -100,6 +100,31 @@ class ConnectionAssessment
             && ($q['decode_skipped'] ?? PHP_INT_MAX) / max(1, $q['captured']) <= 0.1 && ! ($sample['cardinality_capped'] ?? false);
     }
 
+    private function assessServiceTargets(string $kind, array $sample, int $threshold, string $ceiling): array
+    {
+        $valid = ($sample['service_target_stats_version'] ?? 0) === 1 && ($sample['unique_targets'] ?? 0) >= max(2, $threshold);
+        $severity = $valid && $ceiling !== 'low' ? 'medium' : 'low';
+        $reasons = ['同一公网 IP 在规则覆盖范围内向多个不同目标 IP 的指定服务端口主动建连，需核实业务授权与探测用途',
+            '同一目标跨窗口、跨 FTP 控制端口只算一个 IP；SYN 重传及连接后的交互不增加目标数，同目标反复重连不单凭次数告警'];
+        $gaps = ['端口仅提供 RDP、SSH 或 FTP 服务线索，不能确认实际协议；多目标行为也可能是授权运维、监控或批量任务',
+            '完整 TCP 握手不等于登录成功，不能据此排除爆破；加密认证结果不可观测，单目标爆破不在此规则覆盖范围',
+            '仅使用配置时间范围内完整且支持服务目标统计的采集窗口；跨边界或旧 Agent 窗口不计入，可能存在观察间断'];
+        if ($sample['service_targets_capped'] ?? false) {
+            $gaps[] = '服务目标集合或状态触及容量上限，目标数是观察下界，业务白名单不自动放行';
+        }
+        if (! $this->qualityGood($sample)) {
+            $gaps[] = '采集质量未知或存在漏采，观察到的目标数量不能代表全部行为';
+        }
+
+        return ['severity' => $severity, 'title' => ServiceConnectionRules::RULES[$kind]['name'].'（待复核）', 'confidence' => 'observed_target_spread',
+            'note' => implode('。', [...$reasons, ...$gaps]), 'connection_analysis' => ['assessment_version' => 4,
+                'category' => $severity === 'low' ? 'behavior_notice' : 'needs_review', 'conclusion' => $reasons[0], 'reasons' => $reasons, 'evidence_gaps' => $gaps,
+                'count_basis' => 'distinct_service_target_ips', 'unique_targets' => $sample['unique_targets'] ?? 0,
+                'tcp_attempts' => $sample['tcp_attempts'] ?? 0, 'completion_ratio' => null, 'login_failures' => null,
+                'normal_explanations' => ['已授权的跨服务器运维、监控、批量管理或 FTP 文件分发'],
+                'next_steps' => ['核对完整目标 IP 集合与服务端口是否在客户业务授权范围', '必要时申请定向抓包或认证日志，不把握手、RST 或目标数当作登录失败']]];
+    }
+
     private function rejectionPattern(array $s, string $kind, int $threshold): bool
     {
         $n = (int) ($s['tcp_attempts'] ?? 0);
@@ -107,6 +132,6 @@ class ConnectionAssessment
         return ($s['connection_stats_version'] ?? 0) === 1 && $n >= 50 && ($s['rst_replies'] ?? 0) <= $n && ($s['rst_replies'] ?? 0) / $n >= 0.5
             && ($s['completed_handshakes'] ?? $n) >= 0 && ($s['completed_handshakes'] ?? $n) / $n <= 0.1
             && ($s['mature_attempts'] ?? 0) >= 20 && ($s['mature_attempts'] ?? $n + 1) <= $n && $this->qualityGood($s)
-            && ($kind === 'vertical_scan' ? ($s['max_ports_per_target'] ?? 0) >= max(10, $threshold) : ($s['unique_targets'] ?? 0) >= max(50, $threshold));
+            && ($s['unique_targets'] ?? 0) >= max(50, $threshold);
     }
 }

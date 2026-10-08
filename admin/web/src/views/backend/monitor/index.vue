@@ -103,6 +103,9 @@
                             enabledState(scope.row.enabled) ? '启用' : '停用'
                         }}</el-tag>
                         <span v-else-if="column.key === 'node_scope'">{{ ruleNodeScope(scope.row) }}</span>
+                        <span v-else-if="resource === 'rules' && column.key === 'threshold' && isServiceTargetRule(scope.row.kind)"
+                            >{{ scope.row.threshold }} 个目标 IP</span
+                        >
                         <span v-else-if="column.key === 'window_seconds' && scope.row.kind === 'capture_degraded'">每采集窗口</span>
                         <el-tag
                             v-else-if="column.key === 'agent_update_status'"
@@ -303,6 +306,8 @@
                         v-model="form[field.key]"
                         :type="field.type === 'number' ? 'number' : field.type === 'textarea' ? 'textarea' : 'text'"
                         :rows="field.type === 'textarea' ? 5 : undefined"
+                        :min="resource === 'rules' && field.key === 'threshold' && isServiceTargetRule(form.kind) ? 2 : undefined"
+                        :max="resource === 'rules' && field.key === 'threshold' && isServiceTargetRule(form.kind) ? 128 : undefined"
                     />
                 </el-form-item>
                 <el-alert
@@ -310,6 +315,12 @@
                     type="info"
                     :closable="false"
                     title="按每个采集窗口的内核丢包、状态丢弃与上报缓存丢弃之和判断。只在选定节点生成质量告警；关闭告警仍保留节点健康数据。"
+                />
+                <el-alert
+                    v-if="resource === 'rules' && isServiceTargetRule(form.kind)"
+                    type="info"
+                    :closable="false"
+                    title="需要 Agent 1.4.0+；旧 Agent 仍正常上报，但不参与此规则。仅统计配置时间范围内完整采集窗口的不同目标 IP，同一 IP 重复建连只计一个目标；已有连接交互不增加目标数。默认 60 秒、10 个目标，阈值为 2–128。评估窗口请设为不短于实际采集间隔（默认 30 秒）；握手不代表登录或认证成功。"
                 />
             </el-form>
             <template #footer
@@ -486,11 +497,10 @@ const definitions: Record<string, Definition> = {
                 ...col('kind', '检测类型'),
                 type: 'select',
                 options: options({
-                    vertical_scan: '端口扫描',
-                    ssh_connections: 'SSH 服务高频连接',
+                    ssh_target_spread: 'SSH 多目标建连',
                     smb_connections: 'SMB 服务高频连接',
-                    rdp_connections: 'RDP 服务高频连接',
-                    ftp_connections: 'FTP 服务高频连接',
+                    rdp_target_spread: 'RDP 多目标建连',
+                    ftp_target_spread: 'FTP 多目标建连',
                     single_target_attempts: '单目标高频连接',
                     tcp_connection_burst: 'TCP 连接突增',
                     egress_mbps: '出站 Mbps',
@@ -532,11 +542,10 @@ const definitions: Record<string, Definition> = {
                 ...col('kind', '仅对此类型应用业务例外'),
                 type: 'select',
                 options: options({
-                    vertical_scan: '端口扫描',
-                    ssh_connections: 'SSH 服务高频连接',
+                    ssh_target_spread: 'SSH 多目标建连',
                     smb_connections: 'SMB 服务高频连接',
-                    rdp_connections: 'RDP 服务高频连接',
-                    ftp_connections: 'FTP 服务高频连接',
+                    rdp_target_spread: 'RDP 多目标建连',
+                    ftp_target_spread: 'FTP 多目标建连',
                     single_target_attempts: '单目标高频连接',
                     tcp_connection_burst: 'TCP 连接突增',
                     egress_mbps: '出站 Mbps',
@@ -642,8 +651,19 @@ const editorFields = computed(() =>
         .map((field) =>
             resource.value === 'rules' && form.kind === 'capture_degraded' && field.key === 'threshold'
                 ? { ...field, label: '每采集窗口丢弃计数阈值' }
-                : field
+                : resource.value === 'rules' && isServiceTargetRule(form.kind) && field.key === 'threshold'
+                  ? { ...field, label: '不同目标 IP 数阈值（2–128）' }
+                  : field
         )
+)
+function isServiceTargetRule(kind: unknown): boolean {
+    return ['ssh_target_spread', 'rdp_target_spread', 'ftp_target_spread'].includes(String(kind))
+}
+watch(
+    () => form.kind,
+    (kind) => {
+        if (resource.value === 'rules' && !editingId.value && isServiceTargetRule(kind) && form.threshold === undefined) form.threshold = 10
+    }
 )
 const bulkOpen = ref(false)
 const bulkStatus = ref('acknowledged')
@@ -791,6 +811,9 @@ function display(value: any): string {
         high: '高',
         medium: '中',
         low: '低',
+        ssh_target_spread: 'SSH 多目标建连',
+        rdp_target_spread: 'RDP 多目标建连',
+        ftp_target_spread: 'FTP 多目标建连',
     }
     if (labels[String(value)]) return labels[String(value)]
     return String(value)
@@ -907,6 +930,13 @@ async function openEditor(row?: any) {
 async function save() {
     const data = { ...form }
     if (resource.value === 'rules') {
+        if (
+            isServiceTargetRule(data.kind) &&
+            (!Number.isInteger(Number(data.threshold)) || Number(data.threshold) < 2 || Number(data.threshold) > 128)
+        ) {
+            ElMessage.warning('服务多目标建连规则的不同目标 IP 数阈值必须在 2–128 之间')
+            return
+        }
         if (data.kind === 'capture_degraded') {
             if (data.node_scope === 'selected' && (!Array.isArray(data.node_ids) || !data.node_ids.length)) {
                 ElMessage.warning('请选择至少一个适用节点，或改为全部节点')

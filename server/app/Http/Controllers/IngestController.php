@@ -42,6 +42,16 @@ class IngestController extends Controller
             'metrics.*.target_endpoints' => 'sometimes|array|max:32', 'metrics.*.target_endpoints.*' => 'string|max:64',
             'metrics.*.port_samples_truncated' => 'sometimes|boolean', 'metrics.*.endpoint_samples_truncated' => 'sometimes|boolean',
             'metrics.*.cardinality_capped' => 'required|boolean',
+            'metrics.*.service_target_stats_version' => 'sometimes|integer|in:1',
+            'metrics.*.service_targets' => 'sometimes|array|max:3',
+            'metrics.*.service_targets.*' => 'array:service,targets,targets_capped,attempts,ports',
+            'metrics.*.service_targets.*.service' => 'required|in:ssh,rdp,ftp',
+            'metrics.*.service_targets.*.targets' => 'required|array|min:1|max:128',
+            'metrics.*.service_targets.*.targets.*' => 'required|ip',
+            'metrics.*.service_targets.*.targets_capped' => 'required|boolean',
+            'metrics.*.service_targets.*.attempts' => 'required|integer|min:1|max:1000000000000000',
+            'metrics.*.service_targets.*.ports' => 'required|array|min:1|max:2',
+            'metrics.*.service_targets.*.ports.*' => 'required|integer|in:21,22,990,3389',
             'metrics.*.udp_stats_version' => 'sometimes|integer|in:1',
             'metrics.*.udp_filter_version' => 'sometimes|integer|in:1',
             ...collect(['udp_non_dns_flows_out', 'udp_non_dns_packets_out'])->mapWithKeys(fn ($f) => ["metrics.*.$f" => 'required_with:metrics.*.udp_filter_version|integer|min:0|max:1000000000000000'])->all(),
@@ -132,7 +142,31 @@ class IngestController extends Controller
             }$health[$f] = $n;
         }
         $v['health'] = $health + ['version' => $v['health']['version'], 'interfaces' => $v['health']['interfaces'] ?? [], 'update_error' => $v['health']['update_error'] ?? null];
-        foreach ($v['metrics'] as $index => $metric) {
+        foreach ($v['metrics'] as $index => &$metric) {
+            if (array_key_exists('service_targets', $metric) || isset($metric['service_target_stats_version'])) {
+                if (($metric['service_target_stats_version'] ?? 0) !== 1 || ! isset($metric['service_targets'])) {
+                    throw ValidationException::withMessages(["metrics.$index.service_targets" => '服务目标统计版本或集合缺失']);
+                }
+                $services = [];
+                $totalAttempts = 0;
+                foreach ($metric['service_targets'] as $serviceIndex => $service) {
+                    $targets = array_map(Ip::normalize(...), $service['targets']);
+                    $allowedPorts = match ($service['service']) {
+                        'ssh' => [22], 'rdp' => [3389], 'ftp' => [21, 990],
+                    };
+                    if (isset($services[$service['service']]) || count(array_unique($targets)) !== count($targets)
+                        || count($targets) > $service['attempts'] || array_diff($service['ports'], $allowedPorts)
+                        || count(array_unique($service['ports'])) !== count($service['ports'])) {
+                        throw ValidationException::withMessages(["metrics.$index.service_targets.$serviceIndex" => '服务、去重目标、端口或建连统计不一致']);
+                    }
+                    $services[$service['service']] = true;
+                    $totalAttempts += $service['attempts'];
+                    $metric['service_targets'][$serviceIndex]['targets'] = $targets;
+                }
+                if ($totalAttempts > $metric['tcp_attempts']) {
+                    throw ValidationException::withMessages(["metrics.$index.service_targets" => '服务建连尝试之和超过本窗口 TCP 发起总数']);
+                }
+            }
             if (($metric['udp_filter_version'] ?? 0) === 1) {
                 if (($metric['udp_stats_version'] ?? 0) !== 1 || $metric['udp_non_dns_flows_out'] > $metric['udp_non_dns_packets_out'] || $metric['udp_non_dns_flows_out'] > $metric['udp_flows_out'] || $metric['udp_non_dns_packets_out'] > $metric['udp_packets_out']) {
                     throw ValidationException::withMessages(["metrics.$index.udp_filter_version" => '排除目标端口 53 后的 UDP 统计不一致']);
@@ -169,7 +203,7 @@ class IngestController extends Controller
                     throw ValidationException::withMessages(["metrics.$index.outbound_endpoints" => '目标配对统计不一致']);
                 }
             }
-        }
+        } unset($metric);
         // A durable DB inbox is the acknowledgement boundary. The scheduler retries
         // undispatched rows after crashes / Redis outages; no event is acked in RAM.
         $duplicate = DB::transaction(function () use ($node, $v, $start, $end) {

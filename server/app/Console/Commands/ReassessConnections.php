@@ -25,7 +25,7 @@ class ReassessConnections extends Command
     {
         $rules = Rule::all()->keyBy('id');
         $count = 0;
-        Alert::whereIn('kind', ConnectionAssessment::KINDS)->whereNotIn('kind', AlertNotificationPolicy::RETIRED_UDP_RULES)
+        Alert::whereIn('kind', ConnectionAssessment::KINDS)->whereNotIn('kind', AlertNotificationPolicy::RETIRED_RULES)
             ->where('status', 'open')->chunkById(100, function ($alerts) use ($assessment, $rules, &$count) {
                 foreach ($alerts as $alert) {
                     DB::transaction(function () use ($alert, $assessment, $rules, &$count) {
@@ -47,7 +47,7 @@ class ReassessConnections extends Command
         MonitorEvent::where('status', 'open')->chunkById(100, function ($events) {
             foreach ($events as $event) {
                 $top = Alert::where('event_id', $event->id)->whereIn('status', ['open', 'acknowledged'])->where('assessment_category', '!=', 'behavior_notice')
-                    ->whereNotIn('kind', AlertNotificationPolicy::RETIRED_UDP_RULES)->get(['kind', 'severity', 'title', 'assessment_category'])
+                    ->whereNotIn('kind', AlertNotificationPolicy::RETIRED_RULES)->get(['kind', 'severity', 'title', 'assessment_category'])
                     ->sortByDesc(fn ($a) => EventPriority::rank($a->severity, $a->assessment_category, $a->kind))->first();
                 if ($top) {
                     MonitorEvent::whereKey($event->id)->where('status', 'open')->update(['severity' => $top->severity, 'title' => $top->title, 'assessment_category' => $top->assessment_category]);

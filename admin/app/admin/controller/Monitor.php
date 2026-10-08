@@ -34,6 +34,10 @@ class Monitor extends Backend
         'ips' => 'ip_assets', 'metrics' => 'traffic_metrics', 'tasks' => 'probe_tasks', 'audit' => 'audit_logs', 'protocols' => 'protocol_observations',
     ];
 
+    protected const RETIRED_RULE_KINDS = ['vertical_scan', 'ssh_connections', 'rdp_connections', 'ftp_connections', 'udp_flow_burst', 'udp_packet_rate'];
+
+    private const SERVICE_TARGET_RULE_KINDS = ['ssh_target_spread', 'rdp_target_spread', 'ftp_target_spread'];
+
     private function table(string $resource): string
     {
         if (! isset(self::TABLES[$resource])) {
@@ -68,7 +72,7 @@ class Monitor extends Backend
 
     protected function notificationAlerts($query, string $alias = 'm'): void
     {
-        $query->whereNotIn($alias.'.kind', ['new_website', 'udp_flow_burst', 'udp_packet_rate'])
+        $query->whereNotIn($alias.'.kind', ['new_website', ...self::RETIRED_RULE_KINDS])
             ->whereRaw('COALESCE('.$alias.".assessment_category, 'needs_review') <> ?", ['behavior_notice']);
     }
 
@@ -76,7 +80,7 @@ class Monitor extends Backend
     {
         $kinds = 'COALESCE('.$alias.".kinds::jsonb, '[]'::jsonb)";
         $query->whereRaw('COALESCE('.$alias.".assessment_category, 'needs_review') <> ?", ['behavior_notice'])
-            ->whereRaw('NOT ('.$kinds.' <@ ?::jsonb AND jsonb_array_length('.$kinds.') > 0)', [json_encode(['udp_flow_burst', 'udp_packet_rate'])]);
+            ->whereRaw('NOT ('.$kinds.' <@ ?::jsonb AND jsonb_array_length('.$kinds.') > 0)', [json_encode(self::RETIRED_RULE_KINDS)]);
     }
 
     public function overview(): void
@@ -183,6 +187,11 @@ class Monitor extends Backend
 
     private function applyFilters($query, string $resource): void
     {
+        if ($resource === 'rules') {
+            $query->whereNotIn('m.kind', self::RETIRED_RULE_KINDS);
+        } elseif ($resource === 'exclusions') {
+            $query->whereRaw("COALESCE(m.kind, '') <> ?", ['vertical_scan']);
+        }
         $node = (string) $this->request->get('node', '');
         $ip = (string) $this->request->get('ip', '');
         $status = (string) $this->request->get('status', '');
@@ -358,6 +367,9 @@ class Monitor extends Backend
             }
             if ($alert['kind'] === 'capture_degraded') {
                 $this->error('采集覆盖下降属于采集质量问题，不支持加入白名单；请处理丢包或采集限额。');
+            }
+            if (in_array($alert['kind'], ['vertical_scan', 'ssh_connections', 'rdp_connections', 'ftp_connections'], true)) {
+                $this->error('此规则已删除或退役，不能再创建业务例外。');
             }
             $asset = null;
             $cidr = null;
@@ -537,10 +549,16 @@ class Monitor extends Backend
             if (isset($data['name']) && (trim((string) $data['name']) === '' || mb_strlen((string) $data['name']) > 255)) {
                 $this->error('规则名称无效');
             }
-            if (isset($data['kind']) && ! in_array($data['kind'], ['vertical_scan', 'ssh_connections', 'smb_connections', 'rdp_connections', 'ftp_connections', 'single_target_attempts', 'tcp_connection_burst', 'egress_mbps', 'vpn_protocol', 'proxy_suspect', 'capture_degraded'], true)) {
+            if (isset($data['kind']) && ! in_array($data['kind'], ['ssh_target_spread', 'smb_connections', 'rdp_target_spread', 'ftp_target_spread', 'single_target_attempts', 'tcp_connection_burst', 'egress_mbps', 'vpn_protocol', 'proxy_suspect', 'capture_degraded'], true)) {
                 $this->error('规则类型无效');
             }
             $scope = $creating ? $data : array_replace($this->db()->table('rules')->where('id', $id)->find() ?: [], $data);
+            if (in_array($scope['kind'] ?? '', self::RETIRED_RULE_KINDS, true)) {
+                $this->error('此规则已删除或退役，不能重新启用或编辑。');
+            }
+            if (in_array($scope['kind'] ?? '', self::SERVICE_TARGET_RULE_KINDS, true) && ((int) ($scope['threshold'] ?? 0) < 2 || (int) ($scope['threshold'] ?? 0) > 128)) {
+                $this->error('服务多目标建连规则的不同目标 IP 数阈值必须在 2–128 之间。');
+            }
             if (($scope['kind'] ?? '') === 'capture_degraded') {
                 if (array_key_exists('node_ids', $data) && $data['node_ids'] !== null && ! is_array($data['node_ids'])) {
                     $this->error('适用节点必须是列表或全部节点');
@@ -590,6 +608,9 @@ class Monitor extends Backend
             if (($scope['kind'] ?? '') === 'capture_degraded') {
                 $this->error('采集覆盖下降不支持加入白名单，请处理采集质量。');
             }
+            if (in_array($scope['kind'] ?? '', ['vertical_scan', 'ssh_connections', 'rdp_connections', 'ftp_connections'], true)) {
+                $this->error('此规则已删除或退役，不能再配置业务例外。');
+            }
             $nodeAlert = ($scope['kind'] ?? '') === 'node_offline';
             if ($nodeAlert) {
                 if (empty($scope['node_id']) || ! empty($scope['cidr'])) {
@@ -601,7 +622,7 @@ class Monitor extends Backend
             if (isset($data['reason']) && (trim((string) $data['reason']) === '' || mb_strlen((string) $data['reason']) > 255)) {
                 $this->error('原因无效');
             }
-            if (isset($data['kind']) && $data['kind'] !== '' && ! in_array($data['kind'], ['horizontal_scan', 'vertical_scan', 'suspected_bruteforce', 'ssh_connections', 'smb_connections', 'rdp_connections', 'ftp_connections', 'udp_flow_burst', 'udp_packet_rate', 'single_target_attempts', 'tcp_connection_burst', 'egress_mbps', 'vpn_protocol', 'proxy_suspect', 'node_offline', 'capture_degraded'], true)) {
+            if (isset($data['kind']) && $data['kind'] !== '' && ! in_array($data['kind'], ['horizontal_scan', 'suspected_bruteforce', 'ssh_target_spread', 'smb_connections', 'rdp_target_spread', 'ftp_target_spread', 'udp_flow_burst', 'udp_packet_rate', 'single_target_attempts', 'tcp_connection_burst', 'egress_mbps', 'vpn_protocol', 'proxy_suspect', 'node_offline', 'capture_degraded'], true)) {
                 $this->error('白名单类型无效');
             }
             if (isset($data['kind']) && $data['kind'] === '') {

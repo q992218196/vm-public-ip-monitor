@@ -37,7 +37,7 @@ class EventEvidence extends Monitor
         $rows = $this->query()->field('e.id,e.title,e.severity,e.status,e.assessment_category,e.kinds,e.occurrences,e.first_seen_at,e.last_seen_at,i.ip,n.name AS node_name')
             ->order($sort, $this->request->get('direction') === 'asc' ? 'asc' : 'desc')->order('e.id', 'desc')->page(max(1, (int) $this->request->get('page', 1)), max(10, min(500, (int) $this->request->get('limit', 25))))->select()->toArray();
         foreach ($rows as &$row) {
-            $row['kinds'] = $this->decode($row['kinds']);
+            $row['kinds'] = array_values(array_diff($this->decode($row['kinds']), ['vertical_scan']));
         }
         $this->success('', ['list' => $rows, 'super' => $this->auth->isSuperAdmin()]);
     }
@@ -57,8 +57,9 @@ class EventEvidence extends Monitor
         foreach (['kinds', 'quality', 'node_health', 'behavior', 'review_context'] as $key) {
             $event[$key] = $this->decode($event[$key]);
         }
+        $event['kinds'] = array_values(array_diff($event['kinds'], ['vertical_scan']));
         unset($event['active_key']);
-        $ids = $this->db()->table('alerts')->where('event_id', $id)->group('kind')->column('MAX(id) AS id');
+        $ids = $this->db()->table('alerts')->where('event_id', $id)->where('kind', '<>', 'vertical_scan')->group('kind')->column('MAX(id) AS id');
         $alerts = $ids ? $this->db()->table('alerts')->whereIn('id', $ids)->field('id,title,kind,severity,assessment_category,status,evidence,first_seen_at,last_seen_at')->select()->toArray() : [];
         foreach ($alerts as &$alert) {
             $alert['evidence'] = $this->decode($alert['evidence']);
@@ -97,7 +98,7 @@ class EventEvidence extends Monitor
         if (! $event) {
             $this->error('事件不存在', [], 404);
         }
-        $ids = $this->db()->table('alerts')->where('event_id', $id)->group('kind')->column('MAX(id) AS id');
+        $ids = $this->db()->table('alerts')->where('event_id', $id)->where('kind', '<>', 'vertical_scan')->group('kind')->column('MAX(id) AS id');
         $alerts = $ids ? $this->db()->table('alerts')->whereIn('id', $ids)->field('kind,title,severity,assessment_category,status,evidence,last_seen_at')->limit(20)->select()->toArray() : [];
         $metrics = [];
         if ($event['ip_asset_id']) {
@@ -145,6 +146,9 @@ class EventEvidence extends Monitor
         foreach ($rows as $row) {
             $samples[] = $this->decode($row['evidence']);
         }
+        foreach ($this->db()->table('alerts')->where('event_id', $event['id'])->whereIn('kind', ['ssh_target_spread', 'rdp_target_spread', 'ftp_target_spread'])->order('last_seen_at', 'desc')->field('evidence')->limit(12)->select()->toArray() as $row) {
+            $samples[] = $this->decode($row['evidence'])['sample'] ?? [];
+        }
         $summaries = [];
         foreach ($this->db()->table('packet_captures')->where('event_id', $event['id'])->where('status', 'uploaded')->where('created_at', '>=', $cutoff)->field('summary')->order('created_at', 'desc')->limit(3)->select()->toArray() as $row) {
             $summaries[] = $this->decode($row['summary']);
@@ -186,6 +190,10 @@ class EventEvidence extends Monitor
             }
             $this->db()->table('nodes')->where('id', $event['node_id'])->lock(true)->find();
             $event = $this->db()->table('monitor_events')->where('id', $id)->lock(true)->find();
+            $activeKinds = array_values(array_diff($this->decode($event['kinds']), self::RETIRED_RULE_KINDS));
+            if (! $activeKinds) {
+                $this->error('此事件只有已删除或退役规则，不再配置业务例外。');
+            }
             if (in_array('capture_degraded', $this->decode($event['kinds']), true)) {
                 $this->error('采集覆盖下降属于采集质量问题，不支持加入白名单；请处理丢包或采集限额。');
             }
@@ -199,12 +207,13 @@ class EventEvidence extends Monitor
                 $this->error('业务目标或端口已变化，请重新打开白名单预览并审核');
             }
             $now = gmdate('Y-m-d H:i:s');
-            foreach ($this->decode($event['kinds']) as $kind) {
+            foreach ($activeKinds as $kind) {
                 $scope = ['node_id' => $event['node_id'], 'cidr' => $cidr, 'kind' => $kind];
                 $existing = $this->db()->table('exclusions')->where($scope)->find();
                 $alert = $this->db()->table('alerts')->where('event_id', $id)->where('kind', $kind)->order('last_seen_at', 'desc')->find();
                 $behaviorScope = $ip ? $this->behaviorWhitelistScope((array) $this->decode($alert['evidence'] ?? null), $alert['severity'] ?? $event['severity']) : null;
-                if ($profile && ! empty($this->decode($alert['evidence'] ?? null)['sample']['port_scan_targets'])) {
+                $alertSample = $this->decode($alert['evidence'] ?? null)['sample'] ?? [];
+                if ($profile && (! empty($alertSample['port_scan_targets']) || (($alertSample['service_target_stats_version'] ?? 0) === 1 && ($alertSample['count_basis'] ?? '') === 'distinct_service_target_ips'))) {
                     $decoded = json_decode($behaviorScope, true);
                     $decoded['version'] = 2;
                     $decoded['target_ports'] = $profile;

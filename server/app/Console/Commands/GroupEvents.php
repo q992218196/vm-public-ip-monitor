@@ -22,7 +22,7 @@ class GroupEvents extends Command
     {
         config(['monitor.auto_capture' => false]);
         Alert::whereNull('event_id')->where('kind', '<>', 'new_website')->where('assessment_category', '!=', 'behavior_notice')
-            ->whereNotIn('kind', AlertNotificationPolicy::RETIRED_UDP_RULES)->orderBy('id')->chunkById(200, function ($alerts) {
+            ->whereNotIn('kind', AlertNotificationPolicy::RETIRED_RULES)->orderBy('id')->chunkById(200, function ($alerts) {
                 foreach ($alerts as $alert) {
                     if (! AlertNotificationPolicy::allows($alert->kind, $alert->evidence)) {
                         continue;

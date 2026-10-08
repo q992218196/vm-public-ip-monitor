@@ -97,7 +97,8 @@ func (c Config) Validate() error {
 		return errors.New("capture/state limits outside supported bounds")
 	}
 	// Fixed bounds are deliberately conservative; maps and the Go heap need spare space.
-	estimate := int64(c.MaxIPs)*163840 + int64(min(c.MaxFlows, 16384))*128 + int64(c.MaxFlows)*256 + int64(c.MaxReassembly)*20000 + int64(c.MaxSites)*1024 + 2048*512 + int64(min(c.MaxFlows, 16384))*256 + int64(len(c.Interfaces)*c.CaptureBufferMiB)*2*1024*1024 + 8*1024*1024
+	// The per-IP reserve includes 128 distinct targets for each supported service.
+	estimate := int64(c.MaxIPs)*196608 + int64(min(c.MaxFlows, 16384))*128 + int64(c.MaxFlows)*256 + int64(c.MaxReassembly)*20000 + int64(c.MaxSites)*1024 + 2048*512 + int64(min(c.MaxFlows, 16384))*256 + int64(len(c.Interfaces)*c.CaptureBufferMiB)*2*1024*1024 + 8*1024*1024
 	if estimate > c.MemorySoftMiB*1024*1024/2 {
 		return fmt.Errorf("state limits require a larger memory budget or smaller max_* values (estimated state %d MiB)", estimate/1024/1024)
 	}

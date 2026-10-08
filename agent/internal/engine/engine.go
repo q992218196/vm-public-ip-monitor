@@ -20,15 +20,25 @@ type flowKey struct {
 	SP, DP   uint16
 }
 type ipState struct {
-	udpEndpoints  map[netip.AddrPort]*wire.UDPEndpoint
-	m             wire.Metric
-	targets       map[netip.Addr]int
-	auth          map[netip.Addr]int
-	edges         map[netip.AddrPort]bool
-	ports         map[netip.Addr]int
-	endpoints     map[netip.AddrPort]*wire.EndpointEvidence
-	metadataCount int
+	serviceTargets map[string]*serviceTargetState
+	udpEndpoints   map[netip.AddrPort]*wire.UDPEndpoint
+	m              wire.Metric
+	targets        map[netip.Addr]int
+	auth           map[netip.Addr]int
+	edges          map[netip.AddrPort]bool
+	ports          map[netip.Addr]int
+	endpoints      map[netip.AddrPort]*wire.EndpointEvidence
+	metadataCount  int
 }
+type serviceTargetState struct {
+	targets  map[netip.Addr]bool
+	ports    map[uint16]bool
+	attempts uint64
+	capped   bool
+}
+
+const maxServiceTargets = 128
+
 type stream struct {
 	buf  []byte
 	next uint32
@@ -209,6 +219,7 @@ func (e *Engine) Process(b []byte, wireLen int, iface string, now time.Time) {
 			return
 		}
 		s.m.TCPAttempts++
+		e.observeServiceTarget(s, p.Dst, p.DstPort)
 		if endpoint := e.endpoint(s, p.Dst, p.DstPort); endpoint != nil {
 			endpoint.Attempts++
 		}
@@ -416,6 +427,37 @@ func (e *Engine) endpoint(s *ipState, peer netip.Addr, port uint16) *wire.Endpoi
 	s.endpoints[key] = found
 	return found
 }
+func (e *Engine) observeServiceTarget(s *ipState, peer netip.Addr, port uint16) {
+	var service string
+	switch port {
+	case 22:
+		service = "ssh"
+	case 3389:
+		service = "rdp"
+	case 21, 990:
+		service = "ftp"
+	default:
+		return
+	}
+	if s.serviceTargets == nil {
+		s.serviceTargets = make(map[string]*serviceTargetState, 3)
+	}
+	stats := s.serviceTargets[service]
+	if stats == nil {
+		stats = &serviceTargetState{targets: make(map[netip.Addr]bool), ports: make(map[uint16]bool)}
+		s.serviceTargets[service] = stats
+	}
+	stats.attempts++
+	stats.ports[port] = true
+	if stats.targets[peer] {
+		return
+	}
+	if len(stats.targets) >= maxServiceTargets {
+		stats.capped = true
+		return
+	}
+	stats.targets[peer] = true
+}
 func (e *Engine) observeProxy(p packet.Packet, src, dst bool, now time.Time) {
 	if src == dst || (p.Protocol != 6 && p.Protocol != 17) {
 		return
@@ -605,6 +647,25 @@ func (e *Engine) Snapshot(now time.Time) wire.Batch {
 		}
 		s.m.UDPEndpoints = udpEndpoints[:min(len(udpEndpoints), 8)]
 		s.m.ConnectionStatsVersion = 1
+		s.m.ServiceTargetStatsVersion = 1
+		s.m.ServiceTargets = []wire.ServiceTargetStats{}
+		for _, service := range []string{"ssh", "rdp", "ftp"} {
+			stats := s.serviceTargets[service]
+			if stats == nil {
+				continue
+			}
+			targets := make([]string, 0, len(stats.targets))
+			for target := range stats.targets {
+				targets = append(targets, target.String())
+			}
+			sort.Strings(targets)
+			ports := make([]uint16, 0, len(stats.ports))
+			for port := range stats.ports {
+				ports = append(ports, port)
+			}
+			sort.Slice(ports, func(i, j int) bool { return ports[i] < ports[j] })
+			s.m.ServiceTargets = append(s.m.ServiceTargets, wire.ServiceTargetStats{Service: service, Targets: targets, Ports: ports, TargetsCapped: stats.capped, Attempts: stats.attempts})
+		}
 		s.m.UniqueTargets = len(s.targets)
 		ts := make([]string, 0, len(s.targets))
 		for t := range s.targets {

@@ -41,7 +41,36 @@
                 }}
             </p>
         </div>
-        <template v-if="isRdp">
+        <template v-if="isServiceTarget">
+            <el-descriptions :column="2" border>
+                <el-descriptions-item label="公网 IP">{{ record.ip || sample.ip || '—' }}</el-descriptions-item>
+                <el-descriptions-item label="不同目标 IP 数／阈值"
+                    >{{ evidence.value ?? '未保存' }} / {{ evidence.threshold ?? '未保存' }} 个</el-descriptions-item
+                >
+                <el-descriptions-item label="服务目的端口">{{ (sample.ports || []).join('、') || '未采集' }}</el-descriptions-item>
+                <el-descriptions-item label="规则配置窗口">{{ evidence.window_seconds ?? '未保存' }} 秒</el-descriptions-item>
+                <el-descriptions-item label="实际规则覆盖范围">{{ ruleCoverage }}</el-descriptions-item>
+                <el-descriptions-item label="登录失败次数"><el-tag type="info">不可观测</el-tag></el-descriptions-item>
+            </el-descriptions>
+            <p>
+                按有效采集窗口合并去重目标 IP；同一 IP
+                重复连接只计一个目标，已有连接交互不增加目标数。常见端口仅提示服务类型，握手不代表登录或认证成功；仅靠宿主机采集不能确认加密登录结果。
+            </p>
+            <h4>主动建连目标 IP（最多 128 个）</h4>
+            <p class="service-targets">{{ serviceTargets.join('、') || '未保存目标列表' }}</p>
+            <p v-if="sample.service_targets_capped || sample.cardinality_capped">
+                服务目标集合或采集状态存在截断，数量是观察下界；不能据此自动放行白名单。
+            </p>
+            <details v-if="typeof sample.tcp_attempts === 'number'">
+                <summary>辅助统计：服务建连尝试</summary>
+                <p>
+                    {{ sample.tcp_attempts.toLocaleString() }} 次主动 SYN
+                    尝试；仅限本规则有效窗口和服务端口，不是登录次数、失败次数或已建立连接中的交互次数。
+                </p>
+            </details>
+            <p>{{ evidence.note }}</p>
+        </template>
+        <template v-else-if="isRdp">
             <el-descriptions :column="1" border>
                 <el-descriptions-item label="公网 IP">{{ record.ip || sample.ip || '—' }}</el-descriptions-item>
                 <el-descriptions-item label="登录失败次数"><el-tag type="info">不可观测</el-tag></el-descriptions-item>
@@ -174,6 +203,10 @@ const sample = computed(() => evidence.value.sample || evidence.value)
 const analysis = computed(() => evidence.value.connection_analysis || {})
 const endpoints = computed<any[]>(() => sample.value.outbound_endpoints || [])
 const isRdp = computed(() => props.record.kind === 'rdp_connections')
+const isServiceTarget = computed(() => ['ssh_target_spread', 'rdp_target_spread', 'ftp_target_spread'].includes(props.record.kind))
+const serviceTargets = computed<string[]>(() =>
+    Array.isArray(sample.value.targets) ? sample.value.targets.filter((target: unknown) => typeof target === 'string').slice(0, 128) : []
+)
 const isUdpRate = computed(() => props.record.kind === 'udp_packet_rate')
 const isWindow = computed(() => props.windowStatistics === true)
 const sampleSeconds = computed(() => {

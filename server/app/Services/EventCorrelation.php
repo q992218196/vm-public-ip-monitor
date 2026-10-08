@@ -33,6 +33,12 @@ class EventCorrelation
             $behavior = ['ports' => array_slice(array_values(array_unique($sample['ports'] ?? [])), 0, 256),
                 'complete_ports' => isset($sample['ports']) && ! ($sample['port_samples_truncated'] ?? true) && ! ($sample['cardinality_capped'] ?? false),
                 'category' => $evidence['connection_analysis']['category'] ?? 'unknown', 'observed_at' => $behaviorTime->toIso8601String(), 'change_streak' => 0];
+            if (ServiceConnectionRules::countsTargets($kind)) {
+                $behavior['targets'] = array_slice(array_values(array_unique($sample['targets'] ?? [])), 0, 128);
+                $behavior['complete_targets'] = ($sample['service_target_stats_version'] ?? 0) === 1
+                    && ! ($sample['service_targets_capped'] ?? true) && ! ($sample['cardinality_capped'] ?? false)
+                    && count($behavior['targets']) === ($sample['unique_targets'] ?? -1);
+            }
             if (! $event) {
                 $event = MonitorEvent::create(['node_id' => $node->id, 'ip_asset_id' => $asset?->id, 'active_key' => $key, 'title' => $title, 'severity' => $severity, 'assessment_category' => $evidence['connection_analysis']['category'] ?? 'needs_review', 'kinds' => [$kind], 'quality' => $quality, 'behavior' => [$kind => $behavior], 'first_seen_at' => $time, 'last_seen_at' => $time]);
                 if ($asset && $severity === 'high' && config('monitor.auto_capture') && version_compare($node->health['version'] ?? '0.0.0', '0.6.0', '>=')) {
@@ -81,6 +87,9 @@ class EventCorrelation
     {
         if (($current['category'] ?? '') === 'strong_anomaly' && ($baseline['category'] ?? '') !== 'strong_anomaly') {
             return '同类行为出现更强的配对连接异常证据';
+        }
+        if (array_key_exists('complete_targets', $baseline) && array_diff($current['targets'] ?? [], $baseline['targets'] ?? [])) {
+            return $baseline['complete_targets'] ? '指定服务出现未经本次审核的新增目标 IP' : '指定服务目标超出可核实审核范围';
         }
         if (! ($baseline['complete_ports'] ?? false) || ! $current['complete_ports'] || ! $baseline['ports']) {
             return null;

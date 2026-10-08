@@ -20,6 +20,14 @@ class BusinessScope
                     $targets[$peer['peer_ip']][(int) $port] = true;
                 }
             }
+            if (($sample['service_target_stats_version'] ?? 0) === 1) {
+                foreach ($sample['service_targets'] ?? [] as $service) {
+                    self::addServiceTargetPorts($targets, $service['targets'] ?? [], $service['ports'] ?? []);
+                }
+                if (($sample['count_basis'] ?? '') === 'distinct_service_target_ips') {
+                    self::addServiceTargetPorts($targets, $sample['targets'] ?? [], $sample['ports'] ?? []);
+                }
+            }
         }
         foreach ($summaries as $summary) {
             if (! ($summary['pcap_fully_read'] ?? false) || ($summary['summary_capped'] ?? true)) {
@@ -39,6 +47,20 @@ class BusinessScope
         unset($ports);
 
         return $targets;
+    }
+
+    private static function addServiceTargetPorts(array &$targets, array $peers, array $ports): void
+    {
+        foreach ($peers as $peer) {
+            if (! is_string($peer) || ! filter_var($peer, FILTER_VALIDATE_IP)) {
+                continue;
+            }
+            foreach ($ports as $port) {
+                if (in_array($port, [21, 22, 990, 3389], true)) {
+                    $targets[$peer][$port] = true;
+                }
+            }
+        }
     }
 
     public static function fingerprint(array $targets): string

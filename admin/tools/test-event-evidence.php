@@ -271,6 +271,11 @@ foreach ([
     [304, 'Mixed proxy evidence', 'low', ['udp_packet_rate', 'proxy_suspect'], 'needs_review'],
     [305, 'Low-severity proxy evidence', 'low', ['proxy_suspect'], 'needs_review'],
     [306, 'Legacy unclassified evidence', 'medium', ['vpn_protocol'], null],
+    [307, 'Deleted multi-port evidence', 'high', ['vertical_scan'], 'strong_anomaly'],
+    [308, 'Retired SSH connection count', 'high', ['ssh_connections'], 'strong_anomaly'],
+    [309, 'Retired RDP connection count', 'high', ['rdp_connections'], 'needs_review'],
+    [310, 'Retired FTP connection count', 'medium', ['ftp_connections'], 'needs_review'],
+    [311, 'Mixed SMB evidence', 'medium', ['vertical_scan', 'smb_connections'], 'needs_review'],
 ] as [$eventId, $title, $severity, $kinds, $category]) {
     $eventInsert->execute([$eventId, $notificationNode, 'Notification fixture '.$title, $severity, json_encode($kinds), $category]);
 }
@@ -284,6 +289,12 @@ foreach ([
     [505, 305, 'Low-severity proxy evidence', 'proxy_suspect', 'low', 'needs_review'],
     [506, 306, 'Legacy unclassified evidence', 'vpn_protocol', 'medium', null],
     [507, null, 'Retired website clue', 'new_website', 'medium', 'needs_review'],
+    [508, 307, 'Deleted multi-port evidence', 'vertical_scan', 'high', 'strong_anomaly'],
+    [509, 308, 'Retired SSH connection count', 'ssh_connections', 'high', 'strong_anomaly'],
+    [510, 309, 'Retired RDP connection count', 'rdp_connections', 'high', 'needs_review'],
+    [511, 310, 'Retired FTP connection count', 'ftp_connections', 'medium', 'needs_review'],
+    [512, 311, 'Deleted mixed multi-port evidence', 'vertical_scan', 'high', 'strong_anomaly'],
+    [513, 311, 'Mixed SMB evidence', 'smb_connections', 'medium', 'needs_review'],
 ] as [$alertId, $eventId, $title, $kind, $severity, $category]) {
     $alertInsert->execute([$alertId, $eventId, $notificationNode, 'Notification fixture '.$title, $kind, $severity, $category, json_encode(['note' => 'Preserved original evidence', 'padding' => str_repeat('e', 100000)])]);
 }
@@ -292,7 +303,7 @@ foreach ([false, true] as $viewer) {
     $eventList = $ok($request('index', $notificationQuery, false, $viewer))['list'];
     $eventIds = array_map('intval', array_column($eventList, 'id'));
     sort($eventIds);
-    if ($eventIds !== [304, 305, 306] || $ok($request('count', $notificationQuery, false, $viewer))['total'] !== 3 || strlen(json_encode($eventList)) > 4096) {
+    if ($eventIds !== [304, 305, 306, 311] || $ok($request('count', $notificationQuery, false, $viewer))['total'] !== 4 || strlen(json_encode($eventList)) > 4096) {
         throw new RuntimeException('Event notifications lose mixed/low-severity evidence or include volume-only notices');
     }
     if ($ok($request('index', $notificationQuery + ['assessment_category' => 'behavior_notice'], false, $viewer))['list'] !== [] || $ok($request('count', $notificationQuery + ['assessment_category' => 'behavior_notice'], false, $viewer))['total'] !== 0) {
@@ -301,12 +312,12 @@ foreach ([false, true] as $viewer) {
     $legacyQuery = $notificationQuery + ['resource' => 'alerts'];
     $alertIds = array_map('intval', array_column($ok($request('index', $legacyQuery, false, $viewer, 'Monitor'))['list'], 'id'));
     sort($alertIds);
-    if ($alertIds !== [504, 505, 506] || $ok($request('count', $legacyQuery, false, $viewer, 'Monitor'))['total'] !== 3) {
+    if ($alertIds !== [504, 505, 506, 513] || $ok($request('count', $legacyQuery, false, $viewer, 'Monitor'))['total'] !== 4) {
         throw new RuntimeException('Legacy alert list/count includes retired UDP or behavior-only notices');
     }
 }
 $db->exec('CREATE TABLE batches (id bigserial primary key,processed_at timestamp)');
-if ($ok($request('overview', [], false, false, 'Monitor'))['alerts'] !== $originalEventTotal + 3) {
+if ($ok($request('overview', [], false, false, 'Monitor'))['alerts'] !== $originalEventTotal + 4) {
     throw new RuntimeException('Dashboard count disagrees with notification-only event list');
 }
 $mixedDetail = $ok($request('detail', ['id' => 304]));
@@ -314,14 +325,56 @@ if (count($mixedDetail['alerts']) !== 2 || $mixedDetail['alerts'][0]['evidence']
     throw new RuntimeException('Hiding volume-only notifications deletes historical rule evidence');
 }
 $csvContext = stream_context_create(['http' => ['method' => 'GET', 'timeout' => 20, 'header' => ['server: true', 'batoken: '.getenv('TEST_ADMIN_TOKEN')]]]);
+$deletedMixedDetail = $ok($request('detail', ['id' => 311]));
+if (array_column($deletedMixedDetail['alerts'], 'kind') !== ['smb_connections'] || $deletedMixedDetail['event']['kinds'] !== ['smb_connections'] || count($ok($request('detail', ['id' => 308]))['alerts']) !== 1) {
+    throw new RuntimeException('Deleted multi-port data leaks into mixed details or retired service evidence is lost');
+}
 $csv = file_get_contents('http://127.0.0.1:8099/admin/Monitor/export?'.http_build_query($notificationQuery + ['resource' => 'alerts']), false, $csvContext);
 $csvRows = array_map(fn ($line) => str_getcsv($line, escape: ''), explode("\n", trim(substr($csv, 3))));
-if (count($csvRows) !== 4 || array_column(array_slice($csvRows, 1), 2) !== ['proxy_suspect', 'proxy_suspect', 'vpn_protocol'] || str_contains($csv, 'UDP') || str_contains($csv, 'TCP volume')) {
+if (count($csvRows) !== 5 || array_column(array_slice($csvRows, 1), 2) !== ['proxy_suspect', 'proxy_suspect', 'vpn_protocol', 'smb_connections'] || str_contains($csv, 'UDP') || str_contains($csv, 'TCP volume') || str_contains($csv, 'multi-port') || str_contains($csv, 'Retired')) {
     throw new RuntimeException('CSV export disagrees with notification-only list and count');
 }
-foreach (['udp_flow_burst', 'udp_packet_rate'] as $retiredKind) {
+foreach (['udp_flow_burst', 'udp_packet_rate', 'vertical_scan', 'ssh_connections', 'rdp_connections', 'ftp_connections'] as $index => $retiredKind) {
     if (($request('save', ['resource' => 'rules', 'data' => ['name' => 'Retired volume rule', 'kind' => $retiredKind, 'threshold' => 10000, 'severity' => 'low', 'enabled' => true]], true, false, 'Monitor')['code'] ?? null) === 1) {
-        throw new RuntimeException('Retired UDP quantity rule can be recreated');
+        throw new RuntimeException('Retired rule can be recreated: '.$retiredKind);
+    }
+    $retiredId = 700 + $index;
+    $db->prepare('INSERT INTO rules(id,name,kind,threshold,enabled) VALUES(?,?,?,?,false)')->execute([$retiredId, 'Retired fixture '.$retiredKind, $retiredKind, 10]);
+    if (($request('save', ['resource' => 'rules', 'id' => $retiredId, 'data' => ['enabled' => true]], true, false, 'Monitor')['code'] ?? null) === 1) {
+        throw new RuntimeException('A partial edit re-enables a retired rule: '.$retiredKind);
+    }
+}
+if ($ok($request('index', ['resource' => 'rules', 'search' => 'Retired fixture'], false, false, 'Monitor'))['list'] !== [] || $ok($request('count', ['resource' => 'rules', 'search' => 'Retired fixture'], false, false, 'Monitor'))['total'] !== 0) {
+    throw new RuntimeException('Retired rules remain in list/count before database migration');
+}
+foreach (['ssh_target_spread', 'rdp_target_spread', 'ftp_target_spread'] as $serviceKind) {
+    $serviceData = ['name' => 'Service spread '.$serviceKind, 'kind' => $serviceKind, 'threshold' => 10, 'window_seconds' => 60, 'severity' => 'medium', 'enabled' => true];
+    $serviceId = $ok($request('save', ['resource' => 'rules', 'data' => $serviceData], true, false, 'Monitor'))['id'];
+    foreach ([1, 129] as $invalidThreshold) {
+        if (($request('save', ['resource' => 'rules', 'id' => $serviceId, 'data' => ['threshold' => $invalidThreshold]], true, false, 'Monitor')['code'] ?? null) === 1 || ($request('save', ['resource' => 'rules', 'data' => array_replace($serviceData, ['threshold' => $invalidThreshold])], true, false, 'Monitor')['code'] ?? null) === 1) {
+            throw new RuntimeException('A service target rule accepts an out-of-range threshold');
+        }
+    }
+    $service = ['ssh_target_spread' => 'ssh', 'rdp_target_spread' => 'rdp', 'ftp_target_spread' => 'ftp'][$serviceKind];
+    $servicePorts = ['ssh' => [22], 'rdp' => [3389], 'ftp' => [21, 990]][$service];
+    $serviceEventId = ['ssh' => 400, 'rdp' => 401, 'ftp' => 402][$service];
+    $serviceTargets = array_map(fn ($last) => '192.0.2.'.$last, range(1, 16));
+    $eventInsert->execute([$serviceEventId, $notificationNode, 'Service approval fixture '.$service, 'medium', json_encode([$serviceKind]), 'needs_review']);
+    $serviceSample = ['service_target_stats_version' => 1, 'count_basis' => 'distinct_service_target_ips', 'targets' => [...$serviceTargets, '192.0.2.99'], 'ports' => $servicePorts, 'service_targets_capped' => false, 'tcp_attempts' => 17];
+    $alertInsert->execute([$serviceEventId + 200, $serviceEventId, $notificationNode, 'Service approval fixture '.$service, $serviceKind, 'medium', 'needs_review', json_encode(['value' => 17, 'sample' => $serviceSample])]);
+    $db->prepare('INSERT INTO traffic_metrics(node_id,ip_asset_id,window_start,window_end,tcp_attempts,bytes_in,bytes_out,evidence) VALUES(?,1,now()-INTERVAL \'32 second\',now()-INTERVAL \'2 second\',16,0,0,?)')->execute([$notificationNode, json_encode(['service_target_stats_version' => 1, 'service_targets' => [['service' => $service, 'targets' => $serviceTargets, 'ports' => $servicePorts, 'targets_capped' => false, 'attempts' => 16]]])]);
+    $servicePreview = $ok($request('whitelistPreview', ['id' => $serviceEventId]));
+    foreach ([...$serviceTargets, '192.0.2.99'] as $target) {
+        if (array_diff($servicePorts, $servicePreview['target_ports'][$target] ?? [])) {
+            throw new RuntimeException('Service approval preview loses independent raw targets or alert target evidence');
+        }
+    }
+    $ok($request('whitelist', ['id' => $serviceEventId, 'fingerprint' => $servicePreview['fingerprint']], true));
+    $serviceScopeQuery = $db->prepare('SELECT behavior_scope FROM exclusions WHERE kind=? AND node_id=? AND cidr=\'203.0.113.10/32\'');
+    $serviceScopeQuery->execute([$serviceKind, $notificationNode]);
+    $serviceScope = json_decode($serviceScopeQuery->fetchColumn(), true, 512, JSON_THROW_ON_ERROR);
+    if ($serviceScope['version'] !== 2 || count($serviceScope['target_ports']) < 17 || array_diff($servicePorts, $serviceScope['target_ports']['192.0.2.99'] ?? []) || array_diff($servicePorts, $serviceScope['target_ports']['192.0.2.16'] ?? [])) {
+        throw new RuntimeException('Service target approval fails without fabricated port_scan_targets or loses target/port scope');
     }
 }
 echo "Notification lists, totals, dashboard and CSV exclude volume-only reminders; mixed and low-severity evidence remain visible, historical evidence survives, and UDP quantity rules cannot be recreated.\n";

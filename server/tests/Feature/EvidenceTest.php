@@ -128,10 +128,10 @@ class EvidenceTest extends TestCase
         $event->update(['status' => 'normal']);
         $analyzer->alert($node, $ip, 'horizontal_scan', 'medium', '扫描', [], $at->copy()->addMinutes(16));
         $this->assertSame('normal', $event->fresh()->status);
-        $analyzer->alert($node, $ip, 'vertical_scan', 'high', '端口扫描', [], $at->copy()->addMinutes(17));
+        $analyzer->alert($node, $ip, 'smb_connections', 'high', 'SMB 服务异常', [], $at->copy()->addMinutes(17));
         $this->assertSame('open', $event->fresh()->status);
         $this->assertCount(2, $event->fresh()->kinds);
-        $analyzer->alert($node, $ip, 'vertical_scan', 'high', '端口扫描', [], $at->copy()->addMinutes(48));
+        $analyzer->alert($node, $ip, 'smb_connections', 'high', 'SMB 服务异常', [], $at->copy()->addMinutes(48));
         $this->assertDatabaseCount('monitor_events', 2);
     }
 
@@ -180,7 +180,7 @@ class EvidenceTest extends TestCase
         $this->assertCount(2, $event->fresh()->kinds);
         $this->assertDatabaseCount('alerts', 2);
         $strong = ['connection_analysis' => ['category' => 'strong_anomaly']];
-        $analyzer->alert($node, $ip, 'vertical_scan', 'medium', '配对强异常', $strong, $at->copy()->addSeconds(30));
+        $analyzer->alert($node, $ip, 'vpn_protocol', 'medium', '配对强异常', $strong, $at->copy()->addSeconds(30));
         $this->assertSame('配对强异常', $event->fresh()->title);
         $analyzer->alert($node, $ip, 'horizontal_scan', 'high', '高等级扫描', $review, $at->copy()->addSeconds(30));
         $this->assertSame('高等级扫描', $event->fresh()->title);
@@ -196,7 +196,7 @@ class EvidenceTest extends TestCase
         $at = now();
         $analyzer->alert($node, $ip, 'horizontal_scan', 'medium', '多目标连接（待复核）', [], $at);
         $analyzer->alert($node, $ip, 'smb_connections', 'medium', 'SMB 服务高频连接（待复核）', [], $at);
-        $archived = $analyzer->alert($node, $ip, 'vertical_scan', 'high', '已处理的强异常', [], $at);
+        $archived = $analyzer->alert($node, $ip, 'vpn_protocol', 'high', '已处理的强异常', [], $at);
         $archived->update(['status' => 'resolved']);
         $event->refresh()->update(['title' => '多目标连接（待复核）', 'severity' => 'medium', 'status' => 'acknowledged', 'review_notes' => '人工核实中']);
         $migration = require database_path('migrations/2026_10_03_120028_prioritize_existing_event_titles.php');
