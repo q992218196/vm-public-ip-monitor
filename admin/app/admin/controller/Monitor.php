@@ -20,7 +20,7 @@ class Monitor extends Backend
     private const TABLES = [
         'nodes' => ['name', 'id', 'enabled', 'cidrs', 'last_seen_at', 'health', 'health_observed_at', 'agent_desired_version', 'agent_update_requested_at'],
         'ips' => ['ip', 'id', 'version', 'label', 'first_seen_at', 'last_seen_at'],
-        'websites' => ['id', 'ip_asset_id', 'host', 'port', 'scheme', 'status', 'ownership_status', 'title', 'description', 'category', 'manual_category', 'last_probed_at', 'last_seen_at'],
+        'websites' => ['id', 'ip_asset_id', 'host', 'port', 'scheme', 'discovery_kind', 'status', 'ownership_status', 'title', 'description', 'category', 'manual_category', 'last_probed_at', 'last_seen_at'],
         'alerts' => ['id', 'node_id', 'ip_asset_id', 'title', 'kind', 'severity', 'status', 'occurrences', 'last_seen_at'],
         'rules' => ['id', 'name', 'kind', 'threshold', 'window_seconds', 'cooldown_seconds', 'severity', 'node_id', 'node_ids', 'enabled'],
         'exclusions' => ['id', 'cidr', 'kind', 'reason', 'node_id', 'expires_at'],
@@ -91,7 +91,7 @@ class Monitor extends Backend
         $this->success('', [
             'nodes' => $db->table('nodes')->where('enabled', true)->where('last_seen_at', '>', gmdate('Y-m-d H:i:s', time() - 300))->count(),
             'ips' => $db->table('ip_assets')->count(),
-            'websites' => $db->table('websites')->whereIn('ownership_status', ['dns_match', 'manual', 'ip_only'])->count(),
+            'websites' => $db->table('websites')->where('discovery_kind', 'web_candidate')->whereIn('ownership_status', ['dns_match', 'manual', 'ip_only'])->count(),
             'alerts' => $events->count(),
             'batches' => $db->table('batches')->whereNull('processed_at')->count(),
         ]);
@@ -224,11 +224,16 @@ class Monitor extends Backend
         }
         if ($resource === 'websites') {
             $ownership = (string) $this->request->get('ownership', 'assets');
+            if ($ownership === 'services') {
+                $query->whereIn('m.discovery_kind', ['tls_unknown', 'rdp']);
+            } elseif ($ownership !== 'all') {
+                $query->where('m.discovery_kind', 'web_candidate');
+            }
             $states = match ($ownership) {
                 'assets' => ['dns_match', 'manual', 'ip_only'],
                 'candidates' => ['unverified', 'dns_unknown', 'origin_response'],
                 'foreign' => ['dns_mismatch'],
-                'all' => null,
+                'all', 'services' => null,
                 default => ['dns_match', 'manual', 'ip_only'],
             };
             if ($states !== null) {
@@ -820,10 +825,11 @@ class Monitor extends Backend
         $now = gmdate('Y-m-d H:i:s');
         $task = $this->db()->table('probe_tasks')->where('website_id', $id)->find();
         if (! $task) {
-            $this->db()->table('probe_tasks')->insert(['website_id' => $id, 'status' => 'pending', 'attempts' => 0, 'available_at' => $now, 'created_at' => $now, 'updated_at' => $now]);
+            $this->db()->table('probe_tasks')->insert(['website_id' => $id, 'request_source' => 'manual', 'status' => 'pending', 'attempts' => 0, 'available_at' => $now, 'created_at' => $now, 'updated_at' => $now]);
         } elseif (! in_array($task['status'], ['pending', 'leased'], true)) {
-            $this->db()->table('probe_tasks')->where('website_id', $id)->update(['mode' => 'normal', 'status' => 'pending', 'attempts' => 0, 'available_at' => $now, 'lease_token' => null, 'leased_until' => null, 'updated_at' => $now]);
+            $this->db()->table('probe_tasks')->where('website_id', $id)->update(['mode' => 'normal', 'request_source' => 'manual', 'status' => 'pending', 'attempts' => 0, 'available_at' => $now, 'lease_token' => null, 'leased_until' => null, 'updated_at' => $now]);
         }
+        $this->db()->table('probe_tasks')->where('website_id', $id)->where('status', 'pending')->update(['request_source' => 'manual']);
         $this->audit('probe_queued', 'Website:'.$id);
     }
 
@@ -854,7 +860,7 @@ class Monitor extends Backend
             if (isset($old['origin_test'])) {
                 $evidence['origin_test'] = $old['origin_test'];
             }
-            $db->table('websites')->where('id', $id)->update(['source' => 'manual', 'ownership_status' => 'manual', 'ownership_evidence' => json_encode($evidence, JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR), 'updated_at' => gmdate('Y-m-d H:i:s')]);
+            $db->table('websites')->where('id', $id)->update(['source' => 'manual', 'ownership_status' => 'manual', 'discovery_kind' => 'web_candidate', 'ownership_evidence' => json_encode($evidence, JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR), 'updated_at' => gmdate('Y-m-d H:i:s')]);
             $db->table('probe_tasks')->where('website_id', $id)->whereIn('status', ['pending', 'leased'])->update(['mode' => 'normal', 'status' => 'pending', 'attempts' => 0, 'available_at' => gmdate('Y-m-d H:i:s'), 'lease_token' => null, 'leased_until' => null, 'updated_at' => gmdate('Y-m-d H:i:s')]);
             $this->audit('website.origin_registered', 'Website:'.$id, ['reason' => $reason, 'host' => $site['host'], 'ip_asset_id' => $site['ip_asset_id']]);
         });
@@ -889,7 +895,7 @@ class Monitor extends Backend
             ]);
         } else {
             $id = $site['id'];
-            $db->table('websites')->where('id', $id)->update(['source' => 'manual', 'ownership_status' => 'manual']);
+            $db->table('websites')->where('id', $id)->update(['source' => 'manual', 'ownership_status' => 'manual', 'discovery_kind' => 'web_candidate']);
         }
         $this->queueProbe((int) $id);
         $this->success('网站已加入验证队列', ['id' => $id]);

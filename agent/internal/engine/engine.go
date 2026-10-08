@@ -94,6 +94,7 @@ type Engine struct {
 	ips        map[netip.Addr]*ipState
 	syns       map[flowKey]synState
 	streams    map[flowKey]*stream
+	rdpFlows   map[flowKey]time.Time
 	sites      map[string]wire.Site
 	vpn        map[vpnKey]*vpnState
 	proxyFlows map[flowKey]*proxyFlow
@@ -104,6 +105,7 @@ type Engine struct {
 
 func New(c config.Config, now time.Time) *Engine {
 	e := &Engine{udpFlows: map[flowKey]bool{}, c: c, ips: map[netip.Addr]*ipState{}, syns: map[flowKey]synState{}, streams: map[flowKey]*stream{}, sites: map[string]wire.Site{}, vpn: map[vpnKey]*vpnState{}, proxyFlows: map[flowKey]*proxyFlow{}, duplicates: map[uint64]seen{}, start: now}
+	e.rdpFlows = make(map[flowKey]time.Time)
 	for _, s := range c.CIDRs {
 		p, err := netip.ParsePrefix(s)
 		if err == nil {
@@ -191,6 +193,9 @@ func (e *Engine) Process(b []byte, wireLen int, iface string, now time.Time) {
 		return
 	}
 	k := flowKey{p.Src, p.Dst, p.SrcPort, p.DstPort}
+	if p.SYN && !p.ACK {
+		delete(e.rdpFlows, k)
+	}
 	if dst && p.SYN && p.ACK && !p.RST {
 		reverse := flowKey{p.Dst, p.Src, p.DstPort, p.SrcPort}
 		if attempt, ok := e.syns[reverse]; ok && !attempt.responded && p.AckSeq == attempt.seq+1 && now.Sub(attempt.at) < 60*time.Second {
@@ -303,6 +308,9 @@ func (e *Engine) Process(b []byte, wireLen int, iface string, now time.Time) {
 			return
 		}
 	}
+	if at, ok := e.rdpFlows[k]; ok && now.Sub(at) < time.Minute {
+		return
+	}
 	st := e.streams[k]
 	if st == nil {
 		if len(e.streams) >= e.c.MaxReassembly {
@@ -329,13 +337,21 @@ func (e *Engine) Process(b []byte, wireLen int, iface string, now time.Time) {
 	}
 	st.buf = append(st.buf, p.Payload...)
 	st.next += uint32(len(p.Payload))
-	scheme, host, complete := packet.Site(st.buf)
+	scheme, host, source, complete := packet.Discovery(st.buf)
 	if !complete {
 		return
 	}
 	delete(e.streams, k)
 	if scheme == "" {
 		return
+	}
+	if source == "rdp_negotiation" {
+		if len(e.rdpFlows) < e.c.MaxReassembly {
+			e.rdpFlows[k] = now
+		}
+		if outbound {
+			return
+		}
 	}
 	if outbound {
 		if endpoint != nil {
@@ -347,10 +363,7 @@ func (e *Engine) Process(b []byte, wireLen int, iface string, now time.Time) {
 		}
 		return
 	}
-	site := wire.Site{IP: p.Dst.String(), Port: p.DstPort, Scheme: scheme, Host: host, Source: "http_host"}
-	if scheme == "https" {
-		site.Source = "tls_sni"
-	}
+	site := wire.Site{IP: p.Dst.String(), Port: p.DstPort, Scheme: scheme, Host: host, Source: source}
 	key := fmt.Sprintf("%s|%d|%s|%s", site.IP, site.Port, site.Scheme, site.Host)
 	if _, ok := e.sites[key]; !ok && len(e.sites) >= e.c.MaxSites {
 		e.health.StateDropped++
@@ -543,6 +556,11 @@ func authPort(p uint16) bool {
 func (e *Engine) Sweep(now time.Time) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	for k, at := range e.rdpFlows {
+		if now.Sub(at) >= time.Minute {
+			delete(e.rdpFlows, k)
+		}
+	}
 	for k, attempt := range e.syns {
 		if now.Sub(attempt.at) > 60*time.Second {
 			delete(e.syns, k)

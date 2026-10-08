@@ -270,6 +270,19 @@ try {
       "默认站点或反向代理也可能响应",
     ),
   );
+  await page.evaluate(() => window.showEvidence("site", {
+    status: "observed", discovery_kind: "rdp", source: "rdp_negotiation",
+    ownership_status: "ip_only", ip: "203.0.113.10", port: 13389, scheme: "https",
+  }));
+  await page.getByText("已观察到 RDP 连接协商；此记录为远程桌面服务线索，不自动探测网页。", {exact: true}).waitFor();
+  assert.ok((await page.locator(".site-report").textContent()).includes("RDP 协商请求（不代表认证成功）"));
+  assert.ok((await page.locator(".site-report").textContent()).includes("TLS 服务线索"));
+  await page.evaluate(() => window.showEvidence("site", {
+    status: "observed", discovery_kind: "tls_unknown", source: "tls_sni",
+    ownership_status: "ip_only", ip: "203.0.113.10", port: 3389, scheme: "https",
+  }));
+  await page.getByText("3389 仅有 TLS 线索，尚无网页证据；不自动探测，需要时可手动验证。", {exact: true}).waitFor();
+  assert.ok((await page.locator(".site-report").textContent()).includes("TLS 握手；SNI 本身不能证明网站"));
   const eventFixture = {id: 933, title: "SMB 服务高频连接（待复核）", ip: "103.123.132.239", node_name: "TW 2", severity: "medium", status: "open", kinds: ["horizontal_scan", "smb_connections"], quality: {}, first_seen_at: "2026-10-03 07:01:48", last_seen_at: "2026-10-03 07:02:48"};
   const captureFixture = {id: "test-pcap", status: "uploaded", bytes: 4, metadata: {}, created_at: "2026-10-03 07:01:48"};
   let requestedMode = null;

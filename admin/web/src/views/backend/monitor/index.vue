@@ -56,6 +56,7 @@
                     <el-option label="网站资产" value="assets" />
                     <el-option label="归属待核实线索" value="candidates" />
                     <el-option label="解析不匹配线索" value="foreign" />
+                    <el-option label="RDP／未知 TLS 服务线索" value="services" />
                     <el-option label="全部资产和原始线索" value="all" />
                 </el-select>
                 <el-select v-if="resource === 'websites'" v-model="filters.review" placeholder="全部分类" clearable @change="resetAndLoad">
@@ -97,12 +98,25 @@
                             :type="tagType(scope.row[column.key])"
                             :class="resource === 'alerts' ? 'monitor-clickable' : ''"
                             @click="filterAlert(column.key, scope.row)"
-                            >{{ display(scope.row[column.key]) }}</el-tag
+                            >{{
+                                resource === 'websites' &&
+                                column.key === 'status' &&
+                                ['rdp', 'tls_unknown'].includes(scope.row.discovery_kind) &&
+                                scope.row.status === 'observed'
+                                    ? '仅观察服务'
+                                    : display(scope.row[column.key])
+                            }}</el-tag
                         >
                         <el-tag v-else-if="column.key === 'enabled'" :type="enabledState(scope.row.enabled) ? 'success' : 'info'">{{
                             enabledState(scope.row.enabled) ? '启用' : '停用'
                         }}</el-tag>
                         <span v-else-if="column.key === 'node_scope'">{{ ruleNodeScope(scope.row) }}</span>
+                        <span
+                            v-else-if="
+                                resource === 'websites' && column.key === 'scheme' && ['rdp', 'tls_unknown'].includes(scope.row.discovery_kind)
+                            "
+                            >TLS</span
+                        >
                         <span v-else-if="resource === 'rules' && column.key === 'threshold' && isServiceTargetRule(scope.row.kind)"
                             >{{ scope.row.threshold }} 个目标 IP</span
                         >
@@ -114,7 +128,12 @@
                             >{{ agentUpdateStatus(scope.row) }}</el-tag
                         >
                         <a
-                            v-else-if="column.key === 'host' && resource === 'websites' && scope.row.host"
+                            v-else-if="
+                                column.key === 'host' &&
+                                resource === 'websites' &&
+                                scope.row.host &&
+                                !['rdp', 'tls_unknown'].includes(scope.row.discovery_kind)
+                            "
                             :href="websiteUrl(scope.row)"
                             target="_blank"
                             rel="noopener noreferrer"
@@ -452,6 +471,7 @@ const definitions: Record<string, Definition> = {
             col('host', '域名线索'),
             col('port', '端口'),
             col('scheme', '协议'),
+            col('discovery_kind', '识别线索'),
             col('status', '验证状态'),
             col('ownership_status', '归属状态'),
             col('title', '标题'),
@@ -590,7 +610,7 @@ const definitions: Record<string, Definition> = {
         title: '网站探测任务',
         search: '域名',
         ip: true,
-        status: options({ pending: '等待', leased: '执行中', complete: '完成', failed: '失败' }),
+        status: options({ pending: '等待', leased: '执行中', complete: '完成', failed: '失败', skipped: '已跳过自动探测' }),
         columns: [
             col('ip', '公网 IP'),
             col('host', '域名'),
@@ -801,6 +821,10 @@ function display(value: any): string {
         pending: '等待',
         leased: '执行中',
         complete: '完成',
+        skipped: '已跳过自动探测',
+        web_candidate: '网页候选／已验证',
+        tls_unknown: '未知 TLS（不自动探测）',
+        rdp: 'RDP 协商线索',
         dns_match: '解析匹配（非部署证明）',
         manual: '人工登记',
         ip_only: 'IP 直连',

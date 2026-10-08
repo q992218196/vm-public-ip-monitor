@@ -26,11 +26,15 @@ class Maintain extends Command
             $analyzer->alert($node, null, 'node_offline', 'high', '节点上报中断', ['last_seen_at' => $node->last_seen_at], now(), 3600);
         }
         ProbeTask::where('status', 'leased')->where('leased_until', '<', now())->where('attempts', '>=', 3)->update(['status' => 'failed', 'last_error' => '工作节点租约连续超时']);
+        ProbeTask::whereIn('request_source', ['auto', 'legacy'])->where('mode', 'normal')
+            ->where(fn (Builder $query) => $query->where('status', 'pending')->orWhere(fn (Builder $expired) => $expired->where('status', 'leased')->where('leased_until', '<', now())))
+            ->whereHas('website', fn (Builder $query) => $query->whereIn('discovery_kind', ['rdp', 'tls_unknown']))
+            ->update(['status' => 'skipped', 'lease_token' => null, 'leased_until' => null, 'last_error' => '服务线索不自动探测网页；需要时可手动验证']);
         if (config('monitor.auto_probe')) {
             $capacity = max(0, 1000 - ProbeTask::whereIn('status', ['pending', 'leased'])->count());
             if ($capacity > 0) {
-                Website::where(fn (Builder $query) => $query->whereNull('last_probed_at')->orWhere('last_probed_at', '<', now()->subDay()))
-                    ->whereDoesntHave('task', fn (Builder $query) => $query->whereIn('status', ['pending', 'leased'])->orWhere('updated_at', '>', now()->subDay()))
+                Website::where('discovery_kind', 'web_candidate')->where(fn (Builder $query) => $query->whereNull('last_probed_at')->orWhere('last_probed_at', '<', now()->subDay()))
+                    ->whereDoesntHave('task', fn (Builder $query) => $query->whereIn('status', ['pending', 'leased'])->orWhere(fn (Builder $recent) => $recent->where('status', '<>', 'skipped')->where('updated_at', '>', now()->subDay())))
                     ->orderByRaw('CASE WHEN last_probed_at IS NULL THEN 0 ELSE 1 END')
                     ->orderBy('last_probed_at')
                     ->limit(min(50, $capacity))

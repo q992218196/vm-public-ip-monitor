@@ -98,7 +98,7 @@ docker compose -f compose.yml -f compose.buildadmin.yml --profile screenshots up
 
 升级不强制重建已运行的 HTTPS 入口，避免无必要的 443 中断；如果修改了 Caddy 配置，可执行 `docker compose -f compose.yml -f compose.buildadmin.yml exec https caddy reload --config /etc/caddy/Caddyfile` 平滑重载。应用容器替换期间仍可能短暂出现 502，Agent 会保留普通上报批次并自动重试，入口恢复后无需逐个重启节点。
 
-本版 Agent 为 **1.4.0**：先升级主控，再在“采集节点”下发更新。新版本独立统计 SSH、RDP、FTP 的主动建连目标，不受通用 Top 8 端点样本影响；每个公网 IP、每种服务最多保存 128 个目标。旧节点继续上报，但不参加新的服务多目标规则，升级后自动参与。
+本版 Agent 为 **1.5.0**：先升级主控，再在“采集节点”下发更新。新版本独立统计 SSH、RDP、FTP 的主动建连目标，不受通用 Top 8 端点样本影响；每个公网 IP、每种服务最多保存 128 个目标。旧节点继续上报，但不参加新的服务多目标规则，升级后自动参与。
 
 **本次迁移会永久删除“多端口连接”规则、该类型告警及纯该类型事件的关联抓包／AI 报告。** 混合事件保留其他告警、抓包和人工审核，重新选择主告警；原始流量窗口保留。旧 SSH／RDP／FTP 高频次数规则停用，历史证据仍保留，但退出异常通知。新三项规则使用新的类型和阈值，不会将旧“连接次数”阈值直接解释成“目标 IP 数”。
 
@@ -117,7 +117,19 @@ chown -R "$worker_uid:$worker_gid" /home/vm-monitor-server/worker
 docker compose -f compose.yml -f compose.buildadmin.yml --profile screenshots up -d worker
 ```
 
-默认并发 2、内存上限 2 GiB；`.env` 中 `WORKER_CONCURRENCY` 可设 1–4。IPv6 网站验证需要 **worker 容器有 IPv6 出口**。
+默认浏览器并发 2、内存上限 2 GiB；`.env` 中 `WORKER_CONCURRENCY` 可设 1–4。轻量检查与浏览器分开，领取任务最多为浏览器并发的两倍（默认 4），同时运行的浏览器仍最多 2 个。IPv6 网站验证需要 **worker 容器有 IPv6 出口**。
+
+### 先筛选协议，再验证网页
+
+本次升级需同时更新 **主控、后台和 worker**，再下发 Agent **1.5.0**。旧节点的 3389 纯 TLS 线索也会被主控拦住；新 Agent 可补充 RDP 协商和 HTTP ALPN 线索。
+
+- 观察到 RDP 连接协商，或 3389 只有 TLS 握手：保留在“RDP／未知 TLS 服务线索”，不自动验证网页，默认不计入网站列表和总数。
+- 明文 HTTP，或 TLS 中声明支持 `h2`／`http/1.1`：作为网页候选；客户端声明协议不等于服务端已支持或网站已验证。
+- 人工登记网站、点击“验证／截图”或“测试源站”：可以手动探测这些服务线索，优先于自动任务领取，不会仅因点击就确认网站。
+- 主控的 worker 先发送固定 IP、Host/SNI 的轻量 HTTP 请求，自动检查总超时 3 秒，手动检查 8 秒；TLS 证书仍严格验证。明确的 JSON、图片等非网页内容只记录 HTTP 结果，不启动浏览器。HTML 或未注明内容类型的响应才进入浏览器分析和截图。
+- 同一线索重复上报不重复排队；自动失败后冷却 24 小时，手动操作可立即重试。确认到新的网页候选后，原先跳过的任务可重新排队。
+
+升级迁移会将未验证、未人工登记且没有 HTTP／截图证据的旧 3389 TLS 记录移为服务线索，取消尚未执行的普通探测任务。已经执行中的任务、人工源站测试、已验证网站和人工分类保留。服务线索保留原记录，不批量删除数据。没有 HTTP 协商线索的真实 3389 HTTPS 网站可通过“添加已知网站”或手动验证补充。
 
 ### 如何确认网站归属
 
@@ -167,7 +179,7 @@ du -sh /home/vm-monitor
 
 ### 更新 Agent
 
-主控发布二进制后，在“采集节点”下发单节点或批量更新，先试点一台。Agent 1.4.0 启动时立即检查，正常每分钟轮询；暂时性网络错误按 15、30、60、120 秒退避重试，二进制校验失败或无权限保留 10 分钟间隔。下载最长允许 3 分钟，仍限制文件大小和 SHA-256 校验。后台显示当前版本及自动重试状态；重新下发后，上一次指令之前的错误不再覆盖新状态。旧 Agent 仍按原来的 10 分钟间隔重试；急需恢复时可执行下面的手动更新命令。
+主控发布二进制后，在“采集节点”下发单节点或批量更新，先试点一台。Agent 1.5.0 启动时立即检查，正常每分钟轮询；暂时性网络错误按 15、30、60、120 秒退避重试，二进制校验失败或无权限保留 10 分钟间隔。下载最长允许 3 分钟，仍限制文件大小和 SHA-256 校验。后台显示当前版本及自动重试状态；重新下发后，上一次指令之前的错误不再覆盖新状态。旧 Agent 仍按原来的 10 分钟间隔重试；急需恢复时可执行下面的手动更新命令。
 
 节点需要立即检查已下发更新时执行：
 
@@ -280,7 +292,7 @@ docker compose -f compose.yml -f compose.buildadmin.yml --profile https ps
 tail -n 40 /home/vm-monitor-server/nginx-logs/error.log
 tail -n 40 /home/vm-monitor-server/storage/logs/php-fpm.log
 tail -n 40 /home/vm-monitor-server/worker/worker.log
-curl -sS -o /dev/null -w 'Agent API: %{http_code}\n' 'https://vm-monitor.lcayun.cn/api/v1/agent/update?version=1.4.0'
+curl -sS -o /dev/null -w 'Agent API: %{http_code}\n' 'https://vm-monitor.lcayun.cn/api/v1/agent/update?version=1.5.0'
 ```
 
 无 Agent 令牌的最后一项正常应为 **401**。示例域名和自定义目录请替换。BuildAdmin 日志在 `buildadmin/runtime`；节点日志在宿主机的 `data_dir/logs/agent.log`。

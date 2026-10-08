@@ -12,7 +12,9 @@ class ProbeController extends Controller
     public function claim()
     {
         return DB::transaction(function () {
-            $task = ProbeTask::where('attempts', '<', 3)->where('available_at', '<=', now())->where(fn ($q) => $q->where('status', 'pending')->orWhere(fn ($q) => $q->where('status', 'leased')->where('leased_until', '<', now())))->orderBy('id')->lockForUpdate()->first();
+            $task = ProbeTask::where('attempts', '<', 3)->where('available_at', '<=', now())->where(fn ($q) => $q->where('status', 'pending')->orWhere(fn ($q) => $q->where('status', 'leased')->where('leased_until', '<', now())))
+                ->where(fn ($q) => $q->where('request_source', 'manual')->orWhere('mode', 'origin_test')->orWhereHas('website', fn ($site) => $site->where('discovery_kind', 'web_candidate')))
+                ->orderByRaw("CASE WHEN request_source = 'manual' OR mode = 'origin_test' THEN 0 ELSE 1 END")->orderBy('id')->lockForUpdate()->first();
             if (! $task) {
                 return response()->json(['task' => null]);
             }
@@ -20,7 +22,7 @@ class ProbeController extends Controller
             $task->update(['status' => 'leased', 'attempts' => $task->attempts + 1, 'lease_token' => hash('sha256', $token), 'leased_until' => now()->addMinutes(3)]);
             $site = $task->website;
 
-            return response()->json(['task' => ['id' => $task->id, 'lease_token' => $token, 'ip' => $site->ipAsset->ip, 'host' => $site->host, 'port' => $site->port, 'scheme' => $site->scheme, 'source' => $site->source, 'mode' => $task->mode]]);
+            return response()->json(['task' => ['id' => $task->id, 'lease_token' => $token, 'ip' => $site->ipAsset->ip, 'host' => $site->host, 'port' => $site->port, 'scheme' => $site->scheme, 'source' => $site->source, 'discovery_kind' => $site->discovery_kind, 'request_source' => $task->request_source, 'mode' => $task->mode]]);
         });
     }
 
@@ -104,6 +106,9 @@ class ProbeController extends Controller
                 $data += ['title' => $v['title'] ?? null, 'description' => $v['description'] ?? null, 'http_status' => $v['http_status'] ?? null, 'final_url' => $v['final_url'] ?? null, 'category' => $v['category'] ?? 'unknown', 'classification' => $v['classification'] ?? null, 'content_hash' => $v['content_hash'] ?? null, 'screenshot_path' => $path];
             }
             $site->update($data);
+            if ($v['status'] === 'verified' && isset($v['http_status'])) {
+                $site->update(['discovery_kind' => 'web_candidate']);
+            }
             $task->update(['mode' => 'normal', 'status' => $v['status'] === 'verified' ? 'complete' : 'failed', 'last_error' => $v['error'] ?? null, 'lease_token' => null, 'leased_until' => null]);
 
             return response()->json(['accepted' => true, 'screenshot_stored' => $path !== null]);

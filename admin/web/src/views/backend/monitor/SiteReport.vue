@@ -1,5 +1,15 @@
 <template>
     <section class="site-report">
+        <el-alert
+            v-if="['rdp', 'tls_unknown'].includes(record.discovery_kind)"
+            type="info"
+            :closable="false"
+            :title="
+                record.discovery_kind === 'rdp'
+                    ? '已观察到 RDP 连接协商；此记录为远程桌面服务线索，不自动探测网页。'
+                    : '3389 仅有 TLS 线索，尚无网页证据；不自动探测，需要时可手动验证。'
+            "
+        />
         <header>
             <h3>站点监控分析</h3>
             <el-tag :type="report.review_required ? 'warning' : 'info'">{{ report.review_required ? '中风险 · 待人工复核' : '风险未确定' }}</el-tag>
@@ -41,7 +51,19 @@
                 {{ record.last_error || '' }}</el-descriptions-item
             >
             <el-descriptions-item label="公网 IP">{{ record.ip || '—' }}</el-descriptions-item>
-            <el-descriptions-item label="域名／端口">{{ record.host || 'IP 直连' }} : {{ record.port }} / {{ record.scheme }}</el-descriptions-item>
+            <el-descriptions-item label="域名／端口"
+                >{{ record.host || 'IP 直连' }} : {{ record.port }} /
+                {{ ['rdp', 'tls_unknown'].includes(record.discovery_kind) ? 'TLS 服务线索' : record.scheme }}</el-descriptions-item
+            >
+            <el-descriptions-item label="识别来源">{{
+                record.source === 'tls_alpn'
+                    ? '客户端声明支持 HTTP；尚需验证响应'
+                    : record.source === 'rdp_negotiation'
+                      ? 'RDP 协商请求（不代表认证成功）'
+                      : record.source === 'tls_sni'
+                        ? 'TLS 握手；SNI 本身不能证明网站'
+                        : record.source
+            }}</el-descriptions-item>
             <el-descriptions-item label="站点标题">{{ record.title || '—' }}</el-descriptions-item>
             <el-descriptions-item label="网站描述">{{ record.description || '未提供' }}</el-descriptions-item>
             <el-descriptions-item label="业务类型">{{ report.business_type || record.category || '未分类' }}</el-descriptions-item>

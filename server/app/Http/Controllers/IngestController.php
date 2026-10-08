@@ -95,7 +95,7 @@ class IngestController extends Controller
             'metrics.*.outbound_endpoints.*.query_keys.*' => 'string|max:32',
             'sites.*.ip' => 'required|ip', 'sites.*.port' => 'required|integer|min:1|max:65535',
             'sites.*.scheme' => 'required|in:http,https', 'sites.*.host' => ['present', 'nullable', 'string', 'max:253', 'regex:/^[a-zA-Z0-9.\-:\[\]]*$/'],
-            'sites.*.source' => 'required|in:http_host,tls_sni',
+            'sites.*.source' => 'required|in:http_host,tls_sni,tls_alpn,rdp_negotiation',
             ...collect(['bytes_out', 'bytes_in', 'packets_out', 'packets_in', 'tcp_attempts', 'unique_targets', 'max_ports_per_target', 'max_attempts_per_target', 'auth_attempts'])->mapWithKeys(fn ($f) => ["metrics.*.$f" => 'required|integer|min:0|max:1000000000000000'])->all(),
         ]);
         $start = CarbonImmutable::parse($v['window_start']);

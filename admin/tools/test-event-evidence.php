@@ -152,7 +152,7 @@ if (($request('whitelist', ['id' => 100], true)['code'] ?? null) === 1 || $db->q
 }
 echo "Event list/count/detail, local PCAP summary, manual AI, encrypted secrets, duplicate prevention and read-only permissions passed.\n";
 
-$db->exec('CREATE TABLE websites (id bigserial primary key,ip_asset_id bigint,host text,port integer,scheme text,status text,ownership_status text,title text,description text,category text,manual_category text,last_probed_at timestamp,last_seen_at timestamp,source text default \'http_host\',ownership_evidence jsonb,updated_at timestamp)');
+$db->exec('CREATE TABLE websites (id bigserial primary key,ip_asset_id bigint,host text,port integer,scheme text,discovery_kind text default \'web_candidate\',status text,ownership_status text,title text,description text,category text,manual_category text,last_probed_at timestamp,last_seen_at timestamp,source text default \'http_host\',ownership_evidence jsonb,updated_at timestamp)');
 $db->exec("INSERT INTO websites(ip_asset_id,host,port,scheme,status,ownership_status,last_seen_at) VALUES(1,'owned.example',443,'https','verified','dns_match',now()),(1,'foreign.example',80,'http','failed','dns_mismatch',now()),(1,'unknown.example',80,'http','observed','unverified',now()),(1,'tested.example',443,'https','verified','origin_response',now())");
 foreach (['assets' => 1, 'foreign' => 1, 'candidates' => 2, 'all' => 4] as $ownership => $count) {
     $query = ['resource' => 'websites', 'ownership' => $ownership];
@@ -165,7 +165,14 @@ if ($ok($request('index', ['resource' => 'websites'], false, false, 'Monitor'))[
 }
 echo "Website default/list/count ownership separation passed.\n";
 
-$db->exec('CREATE TABLE probe_tasks (id bigserial primary key,website_id bigint unique,mode text default \'normal\',status text,attempts integer,available_at timestamp,lease_token text,leased_until timestamp,created_at timestamp,updated_at timestamp)');
+$db->exec("INSERT INTO websites(ip_asset_id,host,port,scheme,status,ownership_status,discovery_kind,last_seen_at,source) VALUES(1,'',3389,'https','observed','ip_only','tls_unknown',now(),'tls_sni'),(1,'',13389,'https','observed','ip_only','rdp',now(),'rdp_negotiation')");
+if ($ok($request('count', ['resource' => 'websites'], false, false, 'Monitor'))['total'] !== 1
+    || $ok($request('count', ['resource' => 'websites', 'ownership' => 'services'], false, false, 'Monitor'))['total'] !== 2
+    || count($ok($request('index', ['resource' => 'websites', 'ownership' => 'services'], false, true, 'Monitor'))['list']) !== 2) {
+    throw new RuntimeException('TLS/RDP service clues pollute default asset count or cannot be retrieved');
+}
+
+$db->exec('CREATE TABLE probe_tasks (id bigserial primary key,website_id bigint unique,request_source text default \'legacy\',mode text default \'normal\',status text,attempts integer,available_at timestamp,lease_token text,leased_until timestamp,created_at timestamp,updated_at timestamp)');
 $foreignId = $db->query("SELECT id FROM websites WHERE host='foreign.example'")->fetchColumn();
 $db->exec("UPDATE websites SET ownership_evidence='{\"host\":\"foreign.example\",\"addresses\":[\"198.51.100.1\"],\"checked_at\":\"2026-10-03T00:00:00Z\",\"method\":\"dns_A_AAAA\"}' WHERE id=".$foreignId);
 if (($request('testOrigin', ['id' => $foreignId], true, true, 'Monitor')['code'] ?? null) !== 403) {
@@ -200,6 +207,17 @@ if ($task['mode'] !== 'normal' || $task['status'] !== 'pending' || $task['lease_
     throw new RuntimeException('Stale passive probe lease was not fenced');
 }
 echo "CDN origin registration permissions, explicit basis, DNS provenance and stale lease fencing passed.\n";
+
+$serviceId = (int) $db->query("SELECT id FROM websites WHERE discovery_kind='tls_unknown'")->fetchColumn();
+$db->prepare("INSERT INTO probe_tasks(website_id,request_source,status,attempts,available_at,created_at,updated_at) VALUES(?,'auto','pending',0,now(),now(),now())")->execute([$serviceId]);
+if (($request('probe', ['id' => $serviceId], true, true, 'Monitor')['code'] ?? null) !== 403) {
+    throw new RuntimeException('Viewer can force a service-clue probe');
+}
+$ok($request('probe', ['id' => $serviceId], true, false, 'Monitor'));
+if ($db->query('SELECT request_source FROM probe_tasks WHERE website_id='.$serviceId)->fetchColumn() !== 'manual'
+    || $db->query('SELECT discovery_kind FROM websites WHERE id='.$serviceId)->fetchColumn() !== 'tls_unknown') {
+    throw new RuntimeException('Manual service verification must bypass the queue gate without falsely confirming a website');
+}
 
 foreach ([['00000000-0000-4000-8000-000000000081', 'Sort C', '1.9.0'], ['00000000-0000-4000-8000-000000000082', 'Sort A', '1.10.0'], ['00000000-0000-4000-8000-000000000083', 'Sort B', null]] as [$id,$name,$version]) {
     $db->prepare('INSERT INTO nodes(id,name,enabled,cidrs,health) VALUES(?,?,true,?,?)')->execute([$id, $name, '[]', json_encode(['version' => $version])]);

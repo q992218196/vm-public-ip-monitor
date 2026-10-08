@@ -3,6 +3,7 @@ import path from 'node:path';
 import {probe} from './probe.mjs';
 import {fileLogger} from './logger.mjs';
 import {cleanTemp} from './temp.mjs';
+import {renderGate} from './render-gate.mjs';
 
 const base = new URL(process.env.MONITOR_URL || 'https://monitor.example.com');
 const token = process.env.MONITOR_WORKER_TOKEN || '';
@@ -19,6 +20,7 @@ process.env.TMPDIR = path.join(dataDir,'tmp');process.env.TMP = process.env.TMPD
 process.env.HOME=path.join(dataDir,'home');process.env.XDG_CACHE_HOME=path.join(dataDir,'cache');
 await fs.mkdir(process.env.HOME,{recursive:true,mode:0o700});await fs.mkdir(process.env.XDG_CACHE_HOME,{recursive:true,mode:0o700});
 let stopped = false;process.on('SIGTERM',()=>{stopped=true;});process.on('SIGINT',()=>{stopped=true;});
+const acquireRender=renderGate(concurrency);
 const sleep = ms => new Promise(resolve=>setTimeout(resolve,ms));
 async function api(route, body) {
   const r = await fetch(new URL(`/api/v1/worker/${route}`,base), {method:'POST',redirect:'error',headers:{Authorization:`Bearer ${token}`,'Content-Type':'application/json',Accept:'application/json'},body:JSON.stringify(body),signal:AbortSignal.timeout(20000)});
@@ -28,10 +30,10 @@ async function loop() {
   while(!stopped) {
     try {
       const {task} = await api('claim',{});if(!task){await sleep(5000);continue;}
-      let result;try{result=await probe(task,{dataDir,diskLimitBytes:diskLimitMiB*1024*1024});}catch(e){result={status:'failed',...(e.ownership||{}),error:String(e.message).slice(0,1000)};}
+      let result;try{result=await probe(task,{dataDir,diskLimitBytes:diskLimitMiB*1024*1024,acquireRender});}catch(e){result={status:'failed',...(e.ownership||{}),error:String(e.message).slice(0,1000)};}
       await api(`tasks/${task.id}/complete`,{lease_token:task.lease_token,...result});
       await log(JSON.stringify({task:task.id,status:result.status}));
     } catch(e) {await log(String(e.message));await sleep(10000);}
   }
 }
-await Promise.all(Array.from({length:concurrency},loop));
+await Promise.all(Array.from({length:concurrency*2},loop));

@@ -41,10 +41,22 @@ class Analyzer
         }
         foreach ($p['sites'] as $s) {
             $asset = $this->observe($s['ip'], $node, $at);
+            if (filter_var(trim($s['host'], '[]'), FILTER_VALIDATE_IP) && inet_pton(trim($s['host'], '[]')) === inet_pton($s['ip'])) {
+                $s['host'] = '';
+            }
             $key = hash('sha256', implode('|', [$s['ip'], $s['port'], $s['scheme'], $s['host']]));
             $website = Website::firstOrCreate(['fingerprint' => $key], ['ip_asset_id' => $asset->id, 'port' => $s['port'], 'scheme' => $s['scheme'], 'host' => $s['host'], 'source' => $s['source'], 'ownership_status' => ($s['host'] === '' || (filter_var(trim($s['host'], '[]'), FILTER_VALIDATE_IP) && inet_pton(trim($s['host'], '[]')) === inet_pton($s['ip']))) ? 'ip_only' : 'unverified', 'first_seen_at' => $at, 'last_seen_at' => $at]);
             if ($website->last_seen_at->lt($at)) {
                 $website->update(['last_seen_at' => $at]);
+            }
+            if ($website->source !== 'manual' && $website->ownership_status !== 'manual' && $website->http_status === null && $website->status !== 'verified' && $website->manual_category === null && $website->screenshot_path === null) {
+                $kind = WebsiteDiscovery::kind($s['source'], $s['port']);
+                if ($kind !== 'tls_unknown' || ! in_array($website->source, ['tls_alpn', 'http_host', 'rdp_negotiation'], true)) {
+                    $website->update(['discovery_kind' => $kind, 'source' => $s['source']]);
+                }
+                if ($website->discovery_kind !== 'web_candidate') {
+                    WebsiteDiscovery::cancelAutomaticTasks($website->id);
+                }
             }
         }
         $vpnRule = $this->rules->where('kind', 'vpn_protocol')->sortByDesc(fn ($rule) => $rule->node_id !== null)->first();
