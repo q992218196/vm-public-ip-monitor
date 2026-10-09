@@ -51,10 +51,15 @@ class Analyzer
             }
             if ($website->source !== 'manual' && $website->ownership_status !== 'manual' && $website->http_status === null && $website->status !== 'verified' && $website->manual_category === null && $website->screenshot_path === null) {
                 $kind = WebsiteDiscovery::kind($s['source'], $s['port']);
+                $changed = false;
                 if ($kind !== 'tls_unknown' || ! in_array($website->source, ['tls_alpn', 'http_host', 'rdp_negotiation'], true)) {
-                    $website->update(['discovery_kind' => $kind, 'source' => $s['source']]);
+                    $website->fill(['discovery_kind' => $kind, 'source' => $s['source']]);
+                    $changed = $website->isDirty(['discovery_kind', 'source']);
+                    if ($changed) {
+                        $website->save();
+                    }
                 }
-                if ($website->discovery_kind !== 'web_candidate') {
+                if ($website->discovery_kind !== 'web_candidate' && ($changed || $website->wasRecentlyCreated)) {
                     WebsiteDiscovery::cancelAutomaticTasks($website->id);
                 }
             }

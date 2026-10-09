@@ -19,6 +19,12 @@ class CaptureController extends Controller
     {
         $node = $request->attributes->get('node');
 
+        // Idle polling does not need the node lock held by batch analysis.
+        if (! PacketCapture::where('node_id', $node->id)->where(fn ($query) => $query->where('status', 'pending')
+            ->orWhere(fn ($leased) => $leased->where('status', 'leased')->where('lease_until', '<', now())))->exists()) {
+            return response()->json(['task' => null]);
+        }
+
         return DB::transaction(function () use ($node) {
             Node::whereKey($node->id)->lockForUpdate()->firstOrFail();
             PacketCapture::where('node_id', $node->id)->where('status', 'leased')->where('lease_until', '<', now())->update(['status' => 'failed', 'last_error' => '采集租约过期；需要人工重新申请']);

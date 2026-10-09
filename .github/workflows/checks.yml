@@ -244,6 +244,7 @@ jobs:
             sleep 2
           done
           test "$status" = 401
+          python3 server/test-capture-admission.py http://127.0.0.1:8080
           test "$(curl -sS -o /dev/null -w '%{http_code}' 'http://127.0.0.1:8080/admin/login')" = 404
           docker compose -f compose.yml -f compose.buildadmin.yml up -d --no-deps --force-recreate app buildadmin-app
           sleep 8

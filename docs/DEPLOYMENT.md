@@ -278,6 +278,7 @@ AI 报告优先回答本次抓包窗口该 IP 是否有对外攻击证据，分�
 | --- | --- |
 | 后台打不开／登录失败 | 域名、80/443、`https`、`buildadmin-web`、`buildadmin-app`、MySQL |
 | Agent HTTP 502 | `app`、`web`、`https`，查看 nginx 和 PHP 日志；不要删除节点缓存 |
+| 抓包轮询 HTTP 503 | nginx 日志若有 `limiting connections by zone "monitor_capture"`，升级主控 `web`；旧配置把领取指令也算入全局 4 个上传名额，新配置只限制 PCAP 上传 |
 | Agent connection refused | 当时无法连接主控 443；检查 HTTPS 入口是否正在重建、是否运行以及网络连接，重启 Agent 不会修复主控入口 |
 | Agent HTTP 429 | 上报限流或主控积压，检查分析队列和数据库；批次会保留重试 |
 | Agent HTTP 422 | 日志中的校验字段、CIDR 和采集时间；被丢弃批次不能通过重启恢复 |
@@ -296,6 +297,34 @@ curl -sS -o /dev/null -w 'Agent API: %{http_code}\n' 'https://vm-monitor.lcayun.
 ```
 
 无 Agent 令牌的最后一项正常应为 **401**。示例域名和自定义目录请替换。BuildAdmin 日志在 `buildadmin/runtime`；节点日志在宿主机的 `data_dir/logs/agent.log`。
+
+### 抓包轮询被限流时快速修复
+
+本次修复不需要更新节点、重新编译 Agent 或重建 HTTPS 入口。主控拉取代码后可以先平滑更新 Nginx 配置，保留一个回退副本：
+
+```sh
+cd /home/vm-monitor-src
+git pull --ff-only
+cd deploy
+docker compose -f compose.yml -f compose.buildadmin.yml exec -T web cp /etc/nginx/conf.d/default.conf /etc/nginx/conf.d/default.conf.before-capture-fix
+docker compose -f compose.yml -f compose.buildadmin.yml cp server/nginx.conf web:/etc/nginx/conf.d/default.conf
+docker compose -f compose.yml -f compose.buildadmin.yml exec -T web nginx -t
+docker compose -f compose.yml -f compose.buildadmin.yml exec -T web nginx -s reload
+```
+
+`nginx -t` 失败时不要执行 reload，使用容器内的 `.before-capture-fix` 副本恢复。随后按“升级主控”步骤重建 `app`、`web`、`queue`、`scheduler`，让修复在容器重建后也保留。空闲抓包轮询不再等待批次分析持有的节点锁，重复服务线索不再反复更新分类及探测任务。
+
+### 上报队列满时检查分析进度
+
+出现“节点接收队列已达容量上限”说明请求已通过认证，但该节点未分析的批次达到容量限制。先查处理进度和最新任务失败原因，不要清空 Redis、删除 `batches` 或节点缓存，也不要直接放大容量掩盖积压：
+
+```sh
+cd /home/vm-monitor-src/deploy
+docker compose -f compose.yml -f compose.buildadmin.yml ps queue scheduler redis
+docker compose -f compose.yml -f compose.buildadmin.yml exec -T postgres psql -U monitor -d monitor -c "SELECT count(*) AS pending, round(sum(payload_bytes)/1048576.0,1) AS pending_mib, min(created_at) AS oldest, count(*) FILTER (WHERE dispatched_at IS NULL) AS not_dispatched FROM batches WHERE processed_at IS NULL; SELECT max(processed_at) AS last_processed FROM batches; SELECT failed_at,left(exception,700) AS error FROM failed_jobs ORDER BY failed_at DESC LIMIT 3;"
+```
+
+等待一两分钟重复查询：待处理数量持续下降且 `last_processed` 更新，说明正在消化积压；若不变，检查任务失败、数据库锁等待和主控资源。修复分析异常后 Agent 会自动重试保留的批次。清理异常前不要重复执行所有失败任务，其中可能含邮件等副作用任务或人工申请的 AI 分析。
 
 更新退出前的最后一个采集窗口可能不足一秒。本版主控按小数秒比较并保存窗口时间，避免有效短窗口被误拒绝；时间相等或倒退仍拒绝。日志中已经被 HTTP 422 丢弃的旧批次无法恢复。出现 `started 1.4.0` 表示该进程已启动此版本；后台显示的当前版本还要等待下一次成功上报。
 

@@ -135,6 +135,23 @@ class EvidenceTest extends TestCase
         $this->assertDatabaseCount('monitor_events', 2);
     }
 
+    public function test_idle_capture_polling_does_not_lock_the_node_and_still_expires_stale_leases(): void
+    {
+        $event = $this->event();
+        $headers = ['Authorization' => 'Bearer '.$this->token, 'X-Node-ID' => $event->node_id];
+        DB::enableQueryLog();
+        DB::flushQueryLog();
+        $this->withHeaders($headers)->getJson('/api/v1/agent/captures/claim')->assertOk()->assertJson(['task' => null]);
+        $queries = collect(DB::getQueryLog())->pluck('query');
+        DB::disableQueryLog();
+        $this->assertCount(1, $queries->filter(fn ($sql) => str_contains($sql, 'from "nodes"')));
+        $this->assertFalse($queries->contains(fn ($sql) => str_contains(strtolower($sql), 'for update')));
+        $task = PacketCapture::create(['event_id' => $event->id, 'node_id' => $event->node_id, 'ip' => '203.0.113.10',
+            'status' => 'leased', 'lease_until' => now()->subMinute(), 'lease_token' => str_repeat('a', 64)]);
+        $this->getJson('/api/v1/agent/captures/claim')->assertOk()->assertJson(['task' => null]);
+        $this->assertSame('failed', $task->fresh()->status);
+    }
+
     public function test_capture_is_node_scoped_lease_fenced_and_saved_without_ai(): void
     {
         Storage::fake('local');
