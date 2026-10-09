@@ -3,7 +3,7 @@
 namespace app\admin\controller;
 
 use app\common\service\BusinessScope;
-use app\common\service\EventReviewReport;
+use app\common\service\EventEvidencePriority;
 
 class EventEvidence extends Monitor
 {
@@ -65,7 +65,7 @@ class EventEvidence extends Monitor
             $alert['evidence'] = $this->decode($alert['evidence']);
         }
         unset($alert);
-        $alerts = EventReviewReport::prioritize($alerts, $event['title']);
+        $alerts = EventEvidencePriority::prioritize($alerts, $event['title']);
         $progress = $this->progressData($id);
         $settings = $this->db()->table('ai_settings')->where('id', 1)->field('endpoint,model,enabled')->find();
         $this->success('', ['event' => $event, 'alerts' => $alerts, 'ai' => $settings] + $progress);
@@ -73,7 +73,7 @@ class EventEvidence extends Monitor
 
     private function progressData(int $id): array
     {
-        $captures = $this->db()->table('packet_captures')->where('event_id', $id)->field('id,status,source,ip,bytes,sha256,snaplen,metadata,last_error,created_at,updated_at')->order('created_at', 'desc')->limit(20)->select()->toArray();
+        $captures = $this->db()->table('packet_captures')->where('event_id', $id)->field('id,status,source,ip,bytes,sha256,snaplen,max_bytes,duration_seconds,metadata,last_error,created_at,updated_at')->order('created_at', 'desc')->limit(20)->select()->toArray();
         foreach ($captures as &$capture) {
             $capture['metadata'] = $this->decode($capture['metadata']);
         }
@@ -89,25 +89,6 @@ class EventEvidence extends Monitor
             $this->error('事件不存在', [], 404);
         }
         $this->success('', $this->progressData($id));
-    }
-
-    public function reviewReport(): void
-    {
-        $id = (int) $this->request->get('id');
-        $event = $this->db()->table('monitor_events')->alias('e')->leftJoin('ip_assets i', 'i.id=e.ip_asset_id')->leftJoin('nodes n', 'n.id=e.node_id')->field('e.*,i.ip,n.name AS node_name')->where('e.id', $id)->find();
-        if (! $event) {
-            $this->error('事件不存在', [], 404);
-        }
-        $ids = $this->db()->table('alerts')->where('event_id', $id)->where('kind', '<>', 'vertical_scan')->group('kind')->column('MAX(id) AS id');
-        $alerts = $ids ? $this->db()->table('alerts')->whereIn('id', $ids)->field('kind,title,severity,assessment_category,status,evidence,last_seen_at')->limit(20)->select()->toArray() : [];
-        $metrics = [];
-        if ($event['ip_asset_id']) {
-            $cutoff = max(strtotime($event['first_seen_at'].' UTC'), strtotime($event['last_seen_at'].' UTC') - 3600);
-            $metrics = $this->db()->table('traffic_metrics')->where('node_id', $event['node_id'])->where('ip_asset_id', $event['ip_asset_id'])
-                ->where('window_end', '>=', gmdate('Y-m-d H:i:s', $cutoff))->where('window_end', '<=', $event['last_seen_at'])
-                ->field('window_start,window_end,tcp_attempts,bytes_in,bytes_out,evidence')->order('window_end', 'desc')->limit(121)->select()->toArray();
-        }
-        $this->success('', ['report' => EventReviewReport::build($event, $alerts, $metrics)]);
     }
 
     public function review(): void
@@ -240,11 +221,16 @@ class EventEvidence extends Monitor
         $this->writable();
         $id = (int) $this->request->post('id');
         $snaplen = (int) $this->request->post('snaplen', 2048);
+        $duration = (int) $this->request->post('duration_seconds', 60);
+        $maxMiB = (int) $this->request->post('max_mib', 8);
         $captureId = '';
-        if (! in_array($snaplen, [2048, 65535], true)) {
+        if (! in_array($snaplen, [256, 512, 2048, 65535], true)) {
             $this->error('抓包长度无效');
         }
-        $this->db()->transaction(function () use ($id, $snaplen, &$captureId) {
+        if (! in_array($duration, [15, 30, 60], true) || ! in_array($maxMiB, [1, 4, 8, 16, 32], true)) {
+            $this->error('抓包时长或文件上限无效');
+        }
+        $this->db()->transaction(function () use ($id, $snaplen, $duration, $maxMiB, &$captureId) {
             $event = $this->db()->table('monitor_events')->where('id', $id)->find();
             if (! $event || ! $event['ip_asset_id']) {
                 $this->error('此事件没有可抓包的公网 IP');
@@ -268,10 +254,10 @@ class EventEvidence extends Monitor
             $h = bin2hex($b);
             $captureId = substr($h, 0, 8).'-'.substr($h, 8, 4).'-'.substr($h, 12, 4).'-'.substr($h, 16, 4).'-'.substr($h, 20);
             $now = gmdate('Y-m-d H:i:s');
-            $this->db()->table('packet_captures')->insert(['id' => $captureId, 'event_id' => $id, 'node_id' => $node['id'], 'ip' => $ip, 'snaplen' => $snaplen, 'source' => 'manual', 'created_at' => $now, 'updated_at' => $now]);
-            $this->audit('capture.requested', 'MonitorEvent:'.$id, ['capture_id' => $captureId, 'snaplen' => $snaplen]);
+            $this->db()->table('packet_captures')->insert(['id' => $captureId, 'event_id' => $id, 'node_id' => $node['id'], 'ip' => $ip, 'snaplen' => $snaplen, 'max_bytes' => $maxMiB * 1048576, 'duration_seconds' => $duration, 'source' => 'manual', 'created_at' => $now, 'updated_at' => $now]);
+            $this->audit('capture.requested', 'MonitorEvent:'.$id, ['capture_id' => $captureId, 'snaplen' => $snaplen, 'max_mib' => $maxMiB, 'duration_seconds' => $duration]);
         });
-        $this->success('已申请未来 60 秒抓包，上限 32 MiB', ['id' => $captureId]);
+        $this->success('已申请抓包：最长 '.$duration.' 秒，文件最多 '.$maxMiB.' MiB；任一上限达到即停止', ['id' => $captureId]);
     }
 
     public function download()

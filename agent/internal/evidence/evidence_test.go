@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
@@ -88,6 +89,49 @@ func TestCaptureQueueNeverBlocksAndCountsDrops(t *testing.T) {
 	}
 	if len(a.frames) != 2 || a.drops.Load() != 8 {
 		t.Fatal("queue is not bounded")
+	}
+}
+
+func TestCapturePacketLengthAndFileBudgetAreIndependent(t *testing.T) {
+	for _, snaplen := range []int{256, 512, 2048, 65535} {
+		t.Run(fmt.Sprint(snaplen), func(t *testing.T) {
+			c := configForTest(t)
+			r := New(c)
+			task := testTask()
+			task.Snaplen = snaplen
+			packet := append(ipv4("203.0.113.10", "1.1.1.1"), make([]byte, 4000)...)
+			storedLength := min(len(packet), snaplen)
+			task.MaxBytes = int64(24 + 16 + storedLength)
+			done := make(chan error, 1)
+			go func() { done <- r.record(context.Background(), task) }()
+			deadline := time.Now().Add(time.Second)
+			for !r.recording.Load() {
+				if time.Now().After(deadline) {
+					t.Fatal("capture did not start")
+				}
+				time.Sleep(time.Millisecond)
+			}
+			r.Packet(packet, len(packet), "eno1", time.Now())
+			r.Packet(packet, len(packet), "eno1", time.Now())
+			if err := <-done; err != nil {
+				t.Fatal(err)
+			}
+			pcap, err := os.ReadFile(filepath.Join(c.DataDir, "evidence", task.ID+".pcap"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if int64(len(pcap)) != task.MaxBytes || binary.LittleEndian.Uint32(pcap[16:]) != uint32(snaplen) || binary.LittleEndian.Uint32(pcap[32:]) != uint32(storedLength) || binary.LittleEndian.Uint32(pcap[36:]) != uint32(len(packet)) {
+				t.Fatal("packet truncation or file budget was not respected")
+			}
+			metadata, _ := os.ReadFile(filepath.Join(c.DataDir, "evidence", task.ID+".json"))
+			var item saved
+			if err := json.Unmarshal(metadata, &item); err != nil {
+				t.Fatal(err)
+			}
+			if item.Meta.Stop != "size" || item.Meta.Packets != 1 || (item.Meta.Truncated == 1) != (snaplen < len(packet)) {
+				t.Fatalf("wrong stop or truncation metadata: %+v", item.Meta)
+			}
+		})
 	}
 }
 func TestUploadUsesNodeLeaseAndNeverFollowsRedirects(t *testing.T) {

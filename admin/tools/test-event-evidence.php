@@ -55,13 +55,6 @@ if (count($detail['alerts']) !== 1 || $detail['alerts'][0]['evidence']['note'] !
 }
 $db->prepare('INSERT INTO traffic_metrics(node_id,ip_asset_id,window_start,window_end,tcp_attempts,bytes_in,bytes_out,evidence) VALUES(?,?,now()-INTERVAL \'30 second\',now(),10,1000,500,?)')->execute(['00000000-0000-4000-8000-000000000001', 1, json_encode(['tcp_attempts' => 10, 'connection_stats_version' => 1, 'completed_handshakes' => 8, 'rst_replies' => 1, 'outbound_endpoints' => [['peer_ip' => '192.0.2.2', 'peer_port' => 443, 'attempts' => 10, 'synack_replies' => 8, 'completed_handshakes' => 8, 'rst_replies' => 1, 'payload_out' => 100, 'payload_in' => 200, 'max_observed_span_ms' => 6000]], 'port_scan_targets' => [['peer_ip' => '192.0.2.2', 'port_count' => 1, 'ports' => [443], 'truncated' => false]]])]);
 $db->exec('UPDATE monitor_events SET first_seen_at=now()-INTERVAL \'60 second\',last_seen_at=now() WHERE id=100');
-$reviewReport = $ok($request('reviewReport', ['id' => 100]))['report'];
-if ($reviewReport['totals']['completed'] !== 8 || count($reviewReport['timeline']) !== 1 || $reviewReport['targets'][0]['peer_ip'] !== '192.0.2.2' || strlen(json_encode($reviewReport)) > 16384) {
-    throw new RuntimeException('Review report scope or bounds incorrect');
-}
-if ($ok($request('reviewReport', ['id' => 100], false, true))['report']['totals']['attempts'] !== 10) {
-    throw new RuntimeException('Viewer cannot read local review report');
-}
 if (($request('review', ['ids' => [100], 'status' => 'normal', 'notes' => ''], true)['code'] ?? null) === 1) {
     throw new RuntimeException('Normal review has no justification');
 }
@@ -77,7 +70,20 @@ $plain = openssl_decrypt(substr($packed, 28), 'aes-256-gcm', hash('sha256', gete
 if ($plain !== $settings['api_key']) {
     throw new RuntimeException('Shared credential encryption incompatible');
 }
-$task = $ok($request('capture', ['id' => 100, 'snaplen' => 65535], true))['id'];
+foreach ([['snaplen' => 128], ['max_mib' => 64], ['max_mib' => 0], ['duration_seconds' => 120], ['duration_seconds' => 0]] as $invalidCapture) {
+    if (($request('capture', ['id' => 100] + $invalidCapture, true)['code'] ?? null) === 1) {
+        throw new RuntimeException('Invalid capture limits accepted');
+    }
+}
+$task = $ok($request('capture', ['id' => 100, 'snaplen' => 512, 'max_mib' => 4, 'duration_seconds' => 30], true))['id'];
+$limits = $db->query("SELECT snaplen,max_bytes,duration_seconds FROM packet_captures WHERE id='$task'")->fetch(PDO::FETCH_ASSOC);
+if ((int) $limits['snaplen'] !== 512 || (int) $limits['max_bytes'] !== 4194304 || (int) $limits['duration_seconds'] !== 30) {
+    throw new RuntimeException('Independent packet, file and duration limits were not saved');
+}
+$progressCapture = $ok($request('progress', ['id' => 100]))['captures'][0];
+if ($progressCapture['max_bytes'] != 4194304 || $progressCapture['duration_seconds'] != 30 || $progressCapture['snaplen'] != 512) {
+    throw new RuntimeException('Capture limits missing from history');
+}
 if (($request('requestAi', ['capture_id' => $task], true)['code'] ?? null) === 1) {
     throw new RuntimeException('AI requested before capture');
 }
@@ -86,6 +92,10 @@ $settings['api_key'] = '';
 $ok($request('saveSettings', $settings, true));
 $db->prepare('UPDATE packet_captures SET status=?,sha256=?,metadata=?,summary=? WHERE id=?')->execute(['uploaded', str_repeat('a', 64), '{}', '{"matched_packets":3}', $task]);
 $secondTask = $ok($request('capture', ['id' => 100], true))['id'];
+$defaults = $db->query("SELECT snaplen,max_bytes,duration_seconds FROM packet_captures WHERE id='$secondTask'")->fetch(PDO::FETCH_ASSOC);
+if ((int) $defaults['snaplen'] !== 2048 || (int) $defaults['max_bytes'] !== 8388608 || (int) $defaults['duration_seconds'] !== 60) {
+    throw new RuntimeException('Manual capture defaults should use an 8 MiB file budget');
+}
 if (($request('capture', ['id' => 100], true)['code'] ?? null) === 1) {
     throw new RuntimeException('Concurrent captures for the same IP allowed');
 }

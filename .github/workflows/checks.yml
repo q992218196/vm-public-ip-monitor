@@ -110,7 +110,7 @@ jobs:
           path: admin/composer.lock
       - run: php -l app/admin/controller/Monitor.php && php -l app/api/controller/AgentBootstrap.php && php -l app/common/connector/MonitorPgsql.php && php -l database/migrations/20260928000000_monitor_menus.php && php -l database/migrations/20260930000000_agent_enrollments.php && php -l tools/init-admin.php
         working-directory: admin
-      - run: php tools/test-event-review-report.php
+      - run: php tools/test-event-priority.php
         working-directory: admin
       - run: php think migrate:run
         working-directory: admin

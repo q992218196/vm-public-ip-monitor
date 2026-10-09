@@ -12,7 +12,7 @@ let server, browser;
 try {
   await writeFile(
     fixturePath,
-    '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><style>body{margin:0;padding:24px;background:#f4f6fa;font:14px system-ui;--el-text-color-primary:#303133;--el-border-color:#ddd;--el-fill-color-light:#f5f7fa;--el-fill-color-lighter:#fafafa;--el-color-primary:#409eff}#app{max-width:900px;margin:auto;background:white;padding:20px;box-sizing:border-box}</style></head><body><div id="app"></div><script type="module">import {createApp, reactive, h} from "vue";import ElementPlus from "element-plus";import "element-plus/dist/index.css";import {createPinia} from "pinia";import {createRouter,createMemoryHistory} from "vue-router";import Monitor from "/src/views/backend/monitor/index.vue";const router=createRouter({history:createMemoryHistory(),routes:[{path:"/rules",component:{render:()=>null}}]});await router.push("/rules");import Events from "/src/views/backend/monitor/events.vue";import AiReport from "/src/views/backend/monitor/AiReport.vue";import TrafficEvidence from "/src/views/backend/monitor/TrafficEvidence.vue";import SiteReport from "/src/views/backend/monitor/SiteReport.vue";import EventReviewReport from "/src/views/backend/monitor/EventReviewReport.vue";const state=reactive({content:"",record:{},view:"ai"});createApp({setup:()=>()=>state.view==="rules"?h(Monitor):state.view==="events"?h(Events):["udp","metrics"].includes(state.view)?h(TrafficEvidence,{record:state.record,windowStatistics:state.view==="metrics"}):state.view==="site"?h(SiteReport,{record:state.record}):state.view==="review"?h(EventReviewReport,{report:state.record}):h(AiReport,{content:state.content})}).use(createPinia()).use(router).use(ElementPlus).mount("#app");window.showReport=(text)=>{state.view="ai";state.content=text};window.showEvidence=(view,record)=>{state.view=view;state.record=record};window.ready=true;</script></body></html>',
+    '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><style>body{margin:0;padding:24px;background:#f4f6fa;font:14px system-ui;--el-text-color-primary:#303133;--el-border-color:#ddd;--el-fill-color-light:#f5f7fa;--el-fill-color-lighter:#fafafa;--el-color-primary:#409eff}#app{max-width:900px;margin:auto;background:white;padding:20px;box-sizing:border-box}</style></head><body><div id="app"></div><script type="module">import {createApp, reactive, h} from "vue";import ElementPlus from "element-plus";import "element-plus/dist/index.css";import {createPinia} from "pinia";import {createRouter,createMemoryHistory} from "vue-router";import Monitor from "/src/views/backend/monitor/index.vue";const router=createRouter({history:createMemoryHistory(),routes:[{path:"/rules",component:{render:()=>null}}]});await router.push("/rules");import Events from "/src/views/backend/monitor/events.vue";import AiReport from "/src/views/backend/monitor/AiReport.vue";import TrafficEvidence from "/src/views/backend/monitor/TrafficEvidence.vue";import SiteReport from "/src/views/backend/monitor/SiteReport.vue";const state=reactive({content:"",record:{},view:"ai"});createApp({setup:()=>()=>state.view==="rules"?h(Monitor):state.view==="events"?h(Events):["udp","metrics"].includes(state.view)?h(TrafficEvidence,{record:state.record,windowStatistics:state.view==="metrics"}):state.view==="site"?h(SiteReport,{record:state.record}):h(AiReport,{content:state.content})}).use(createPinia()).use(router).use(ElementPlus).mount("#app");window.showReport=(text)=>{state.view="ai";state.content=text};window.showEvidence=(view,record)=>{state.view=view;state.record=record};window.ready=true;</script></body></html>',
   );
   server = await createServer({
     root: webRoot,
@@ -166,8 +166,8 @@ try {
   }));
   await page.getByText("规则最大窗口流数／阈值", {exact: true}).waitFor();
   udpText = await page.locator("body").textContent();
-  assert.ok(udpText.includes("1056 / 1000 流") && udpText.includes("流数量取评估范围内单个采集窗口的最大值"));
-  assert.ok(udpText.includes("表格流数之和不代表全量流数"));
+  assert.ok(udpText.includes("1056 / 1000 流") && udpText.includes("流数取单采集窗口最大值"));
+  assert.ok(udpText.includes("样本数量不代表全部目标数"));
   await page.evaluate(() => window.showEvidence("metrics", {
     id: 1, ip: "203.0.113.10", window_start: "2026-10-04 06:31:27.000000", window_end: "2026-10-04 06:31:57.000000",
     evidence: {udp_stats_version: 1, udp_filter_version: 1, udp_flows_out: 1056, udp_packets_out: 24325, udp_packets_in: 10350,
@@ -176,7 +176,7 @@ try {
       udp_endpoints: [{peer_ip: "1.1.1.1", peer_port: 53, flows: 56, packets_out: 925, packets_in: 700, bytes_out: 60000, bytes_in: 200000}]}
   }));
   await page.getByRole("heading", {name: "UDP 流量统计", exact: true}).waitFor();
-  const metricText = await page.locator(".udp-statistics").textContent();
+  const metricText = await page.locator("body").textContent();
   assert.ok(metricText.includes("810.8 包/秒") && metricText.includes("5.28 Mbps / 0.85 Mbps"));
   assert.ok(metricText.includes("30 秒；") && metricText.includes("1,056（本窗口不同五元组）"));
   assert.ok(metricText.includes("1,000 / 23,400") && metricText.includes("原始 UDP 总量包含 DNS"));
@@ -194,6 +194,7 @@ try {
       connection_analysis: {conclusion: "连接数量或带宽阈值只能证明活跃程度", completion_ratio: 1}}
   }));
   await page.getByText("登录失败次数", {exact: true}).waitFor();
+  assert.equal(await page.locator(".evidence-notes").getAttribute("open"), null);
   assert.equal(await page.getByText("不可观测", {exact: true}).count(), 1);
   assert.equal(await page.getByText("样本 TCP 建连尝试", {exact: true}).count(), 0);
   assert.equal(await page.getByText("完整握手", {exact: true}).count(), 0);
@@ -215,20 +216,6 @@ try {
     assert.ok(serviceText.includes("317 次主动 SYN 尝试") && serviceText.includes("不能据此自动放行白名单"));
     assert.equal(await page.getByText("完整握手", {exact: true}).count(), 0);
   }
-  await page.evaluate(() => window.showEvidence("review", {
-    event: {id: 1, ip: "203.0.113.10", kinds: ["rdp_connections"]}, timeline: [], totals: {},
-    reasons: [], normal_explanations: [], targets: [], port_targets: [], request_hints: [], evidence_gaps: [], next_steps: []
-  }));
-  await page.getByRole("heading", {name: "IP 审核报告", exact: true}).waitFor();
-  assert.equal(await page.getByText("登录失败次数", {exact: true}).count(), 1);
-  assert.equal(await page.getByText("TCP 发起", {exact: true}).count(), 0);
-  assert.equal(await page.getByText("主要目标连接样本", {exact: true}).count(), 0);
-  await page.evaluate(() => window.showEvidence("review", {
-    event: {id: 2, ip: "203.0.113.10", kinds: ["rdp_connections", "smb_connections"]}, timeline: [], totals: {},
-    reasons: [], normal_explanations: [], targets: [], port_targets: [], request_hints: [], evidence_gaps: [], next_steps: []
-  }));
-  await page.getByText("主要目标连接样本", {exact: true}).waitFor();
-  assert.equal(await page.getByText("TCP 发起", {exact: true}).count(), 1);
   await page.evaluate(() => window.showEvidence("udp", {
     title: "TCP 连接数量提醒", kind: "tcp_connection_burst",
     evidence: {value: 3226, threshold: 2000, window_seconds: 60, rule_observed_span_seconds: 61, rule_window_count: 2,
@@ -284,8 +271,9 @@ try {
   await page.getByText("3389 仅有 TLS 线索，尚无网页证据；不自动探测，需要时可手动验证。", {exact: true}).waitFor();
   assert.ok((await page.locator(".site-report").textContent()).includes("TLS 握手；SNI 本身不能证明网站"));
   const eventFixture = {id: 933, title: "SMB 服务高频连接（待复核）", ip: "103.123.132.239", node_name: "TW 2", severity: "medium", status: "open", kinds: ["horizontal_scan", "smb_connections"], quality: {}, first_seen_at: "2026-10-03 07:01:48", last_seen_at: "2026-10-03 07:02:48"};
-  const captureFixture = {id: "test-pcap", status: "uploaded", bytes: 4, metadata: {}, created_at: "2026-10-03 07:01:48"};
-  let requestedMode = null;
+  const captureFixture = {id: "test-pcap", status: "uploaded", bytes: 4, snaplen: 2048, max_bytes: 8388608, duration_seconds: 60, metadata: {started_at: "2026-10-03T07:01:48Z", ended_at: "2026-10-03T07:02:01Z", stop_reason: "size"}, created_at: "2026-10-03 07:01:48"};
+  const ruleFixture = {id: 1, title: "SMB 服务高频连接（待复核）", kind: "smb_connections", assessment_category: "needs_review", evidence: {value: 317, threshold: 60, window_seconds: 60, sample: {tcp_attempts: 317, ports: [445]}, note: "Fixture long explanation remains available on demand"}};
+  let requestedMode = null, requestedCapture = null, reviewReportRequests = 0;
   const nodeFixtures = [{id: "00000000-0000-4000-8000-000000000001", name: "HK 1"}, {id: "00000000-0000-4000-8000-000000000002", name: "TW 2"}];
   const qualityRule = {id: 4, name: "采集覆盖下降", kind: "capture_degraded", threshold: 1, window_seconds: 60, cooldown_seconds: 600, severity: "medium", enabled: true, node_id: null, node_ids: null};
   let savedQualityRule = null;
@@ -302,10 +290,11 @@ try {
     else if (action === "nodes") data = {list: nodeFixtures, super: true};
     else if (action === "count") data = {total: 1};
     else if (action === "detail" && url.pathname.includes("/Monitor/")) data = {record: qualityRule};
-    else if (action === "detail" || action === "progress") data = {event: eventFixture, alerts: [], captures: [captureFixture], analyses: [], ai: {enabled: true, endpoint: "https://api.deepseek.com/chat/completions", model: "deepseek-flash"}};
-    else if (action === "reviewReport") data = {report: {event: eventFixture, conclusion: "疑似异常，待复核", category: "needs_review", scope: "Current observed windows only", totals: {attempts: 10, paired_windows: 1, paired_attempts: 10, completed: 8}, timeline: [], reasons: [], normal_explanations: [], targets: [], port_targets: [], request_hints: [], evidence_gaps: [], next_steps: []}};
+    else if (action === "detail" || action === "progress") data = {event: eventFixture, alerts: [ruleFixture], captures: [captureFixture], analyses: [], ai: {enabled: true, endpoint: "https://api.deepseek.com/chat/completions", model: "deepseek-flash"}};
+    else if (action === "reviewReport") {reviewReportRequests++; data = {};}
     else if (action === "save") {savedQualityRule = route.request().postDataJSON().data; data = {id: 4};}
     else if (action === "whitelistPreview") data = {target_ports: {"112.121.183.102": [11000,11001,11002], "43.128.8.64": [3389]}, fingerprint: "reviewed-profile"};
+    else if (action === "capture") {requestedCapture = route.request().postDataJSON(); data = {id: "new-capture"};}
     else if (action === "requestAi") requestedMode = route.request().postDataJSON().evidence_mode;
     else if (action === "download") {
       await new Promise(resolve => setTimeout(resolve, 65000));
@@ -373,11 +362,41 @@ try {
   assert.ok(countBox.y >= headlineBox.y + headlineBox.height, "Other rule hits must remain visible below the headline");
   await page.getByRole("button", {name: "共 2 类命中，查看全部", exact: true}).click();
   await page.getByRole("heading", {name: "SMB 服务高频连接（待复核） · 103.123.132.239", exact: true}).waitFor();
-  await page.getByRole("heading", {name: "IP 审核报告", exact: true}).waitFor();
+  assert.equal(await page.getByRole("heading", {name: "IP 审核报告", exact: true}).count(), 0);
+  assert.equal(reviewReportRequests, 0);
   const detailHeadings = await page.locator(".el-drawer h3").allTextContents();
   assert.ok(detailHeadings.indexOf("规则证据（主要告警优先）") < detailHeadings.indexOf("PCAP 抓包留存"));
   assert.ok(detailHeadings.indexOf("PCAP 抓包留存") < detailHeadings.indexOf("手动 AI 分析"));
-  assert.equal(detailHeadings.at(-1), "IP 审核报告");
+  assert.equal(detailHeadings.at(-1), "手动 AI 分析");
+  await page.locator(".el-drawer .el-collapse-item__header").first().click();
+  const ruleContent = page.locator(".el-drawer .el-collapse-item__content").first();
+  assert.equal(await ruleContent.locator("h3").count(), 0);
+  assert.equal(await ruleContent.getByText("SYN-ACK 回复", {exact: true}).count(), 0);
+  assert.equal(await ruleContent.getByText(ruleFixture.evidence.note, {exact: true}).isVisible(), false);
+  assert.equal(await ruleContent.locator("pre").count(), 0);
+  await ruleContent.getByText("原始结构化证据", {exact: true}).click();
+  await ruleContent.locator("pre").waitFor();
+  assert.ok((await ruleContent.locator("pre").textContent()).includes('"tcp_attempts": 317'));
+  await ruleContent.getByText("原始结构化证据", {exact: true}).click();
+  await ruleContent.getByText("计数口径与证据限制", {exact: true}).click();
+  await ruleContent.getByText(ruleFixture.evidence.note, {exact: true}).waitFor({state: "visible"});
+  await ruleContent.getByText("计数口径与证据限制", {exact: true}).click();
+  assert.ok((await page.locator(".el-drawer").textContent()).includes("13.0 秒 · 达到文件上限"));
+  const captureForm = page.locator(".capture-options");
+  assert.ok((await captureForm.textContent()).includes("8 MiB"));
+  await captureForm.locator(".el-form-item").filter({hasText: "每包保留长度"}).locator(".el-select").click();
+  await page.getByRole("option", {name: "每包最多 512 字节", exact: true}).click();
+  await captureForm.locator(".el-form-item").filter({hasText: "文件上限"}).locator(".el-select").click();
+  await page.getByRole("option", {name: "4 MiB", exact: true}).click();
+  await captureForm.locator(".el-form-item").filter({hasText: "最长时长"}).locator(".el-select").click();
+  await page.getByRole("option", {name: "30 秒", exact: true}).click();
+  await captureForm.getByRole("button", {name: "申请定向抓包", exact: true}).click();
+  await page.waitForFunction(() => document.querySelector(".el-message--success"));
+  assert.deepEqual(requestedCapture, {id: 933, snaplen: 512, max_mib: 4, duration_seconds: 30});
+  assert.equal(reviewReportRequests, 0);
+  if (process.env.AI_REPORT_SCREENSHOTS) {
+    await page.screenshot({path: process.env.AI_REPORT_SCREENSHOTS + "/event-evidence.png", fullPage: true});
+  }
   await page.getByRole("button", {name: "AI 分析", exact: true}).click();
   await page.getByText("逐包文本前 2 MiB", {exact: true}).click();
   await page.getByRole("button", {name: "提交分析", exact: true}).click();

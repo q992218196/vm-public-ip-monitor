@@ -123,20 +123,37 @@
                         <el-button @click="openReview([detail.event.id])">人工审核</el-button
                         ><el-button v-if="!detail.event.kinds.includes('capture_degraded')" type="warning" @click="whitelist(detail.event.id)"
                             >加入白名单</el-button
-                        ><el-select v-model="snaplen" class="capture-length"
-                            ><el-option :value="2048" label="每包前 2048 字节" /><el-option
-                                :value="65535"
-                                label="完整包（最多 65535 字节）" /></el-select
-                        ><el-button type="primary" :loading="capturing" :disabled="!detail.event.ip" @click="capture">申请定向抓包</el-button>
+                        >
                     </div>
-                    <p>抓包只记录申请后的流量：最长 60 秒、32 MiB；同一节点同时采集一个 IP。原始文件可能包含明文请求数据，下载仅限管理员。</p>
+                    <el-form v-if="isAdmin && detail.event.ip" inline class="capture-options">
+                        <el-form-item label="每包保留长度"
+                            ><el-select v-model="snaplen" class="capture-length">
+                                <el-option :value="256" label="每包最多 256 字节" /><el-option :value="512" label="每包最多 512 字节" />
+                                <el-option :value="2048" label="每包最多 2048 字节" /><el-option
+                                    :value="65535"
+                                    label="每包最多 65535 字节"
+                                /> </el-select
+                        ></el-form-item>
+                        <el-form-item label="文件上限"
+                            ><el-select v-model="captureMaxMiB" class="capture-budget">
+                                <el-option v-for="size in [1, 4, 8, 16, 32]" :key="size" :value="size" :label="size + ' MiB'" /> </el-select
+                        ></el-form-item>
+                        <el-form-item label="最长时长"
+                            ><el-select v-model="captureDuration" class="capture-budget">
+                                <el-option v-for="seconds in [15, 30, 60]" :key="seconds" :value="seconds" :label="seconds + ' 秒'" /> </el-select
+                        ></el-form-item>
+                        <el-form-item><el-button type="primary" :loading="capturing" @click="capture">申请定向抓包</el-button></el-form-item>
+                    </el-form>
+                    <p class="capture-help">
+                        每包长度与文件上限独立；达到时长或文件上限即停止。256／512 字节可能截断 TLS 和应用证据；只记录领取任务后的流量。
+                    </p>
                     <h3>规则证据（主要告警优先）</h3>
                     <el-collapse
                         ><el-collapse-item v-for="alert in detail.alerts" :key="alert.id" :name="alert.id" :title="alert.title"
-                            ><TrafficEvidence :record="{ ...alert, ip: detail.event.ip }" />
-                            <details>
+                            ><TrafficEvidence :record="{ ...alert, ip: detail.event.ip }" compact />
+                            <details @toggle="toggleRawEvidence($event, alert.id)">
                                 <summary>原始结构化证据</summary>
-                                <pre>{{ JSON.stringify(alert.evidence, null, 2) }}</pre>
+                                <pre v-if="rawEvidenceOpen.includes(alert.id)">{{ JSON.stringify(alert.evidence, null, 2) }}</pre>
                             </details></el-collapse-item
                         ></el-collapse
                     >
@@ -146,7 +163,16 @@
                             ><template #default="scope">{{ time(scope.row.created_at) }}</template></el-table-column
                         ><el-table-column label="状态" width="100"
                             ><template #default="scope">{{ label(scope.row.status) }}</template></el-table-column
-                        ><el-table-column label="大小／截断／丢弃" min-width="130"
+                        ><el-table-column label="抓包设置" min-width="150"
+                            ><template #default="scope">
+                                {{ scope.row.snaplen }} 字节/包 · {{ scope.row.max_bytes ? scope.row.max_bytes / 1048576 + ' MiB' : '—' }} ·
+                                {{ scope.row.duration_seconds ?? '—' }} 秒
+                            </template></el-table-column
+                        >
+                        <el-table-column label="实际时长／停止原因" min-width="170"
+                            ><template #default="scope">{{ captureResult(scope.row) }}</template></el-table-column
+                        >
+                        <el-table-column label="大小／截断／丢弃" min-width="130"
                             ><template #default="scope"
                                 >{{ (scope.row.bytes / 1048576).toFixed(2) }} MiB / {{ scope.row.metadata?.snaplen_truncated ?? '—' }} /
                                 {{ scope.row.metadata?.queue_drops ?? '—' }}</template
@@ -185,14 +211,6 @@
                             ></el-table-column
                         ></el-table
                     >
-                    <div v-loading="reviewReportLoading">
-                        <EventReviewReport v-if="reviewReport" :report="reviewReport" /><el-alert
-                            v-if="reviewReportError"
-                            :title="reviewReportError"
-                            type="error"
-                            :closable="false"
-                        />
-                    </div>
                 </template>
             </div>
         </el-drawer>
@@ -438,7 +456,6 @@ import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, reactive, r
 import { ElMessage } from 'element-plus'
 import createAxios from '/@/utils/axios'
 import TrafficEvidence from './TrafficEvidence.vue'
-import EventReviewReport from './EventReviewReport.vue'
 const AiReport = defineAsyncComponent(() => import('./AiReport.vue'))
 const whitelistOpen = ref(false)
 const whitelistProfile = ref<Record<string, number[]>>({})
@@ -453,6 +470,7 @@ const aiRequestOpen = ref(false)
 const aiCapture = ref<any>(null)
 const aiMode = ref<'summary' | 'full_packets' | 'packet_excerpt'>('summary')
 const evidenceOpen = ref<string[]>([])
+const rawEvidenceOpen = ref<number[]>([])
 const statuses: Record<string, string> = { open: '待处理', acknowledged: '观察中', normal: '已核查正常', resolved: '已处理' }
 const names: Record<string, string> = {
     ...statuses,
@@ -507,6 +525,8 @@ const detailOpen = ref(false),
     detail = ref<any>(null),
     detailId = ref(0),
     snaplen = ref(2048),
+    captureMaxMiB = ref(8),
+    captureDuration = ref(60),
     capturing = ref(false),
     downloading = ref(''),
     requestingAi = ref('')
@@ -521,15 +541,12 @@ const reviewOpen = ref(false),
 const captureReportOpen = ref(false),
     captureReportLoading = ref(false),
     captureReport = ref<any>(null)
-const reviewReport = ref<any>(null),
-    reviewReportLoading = ref(false),
-    reviewReportError = ref('')
 let poll: ReturnType<typeof setTimeout> | undefined
 let generation = 0,
     detailGeneration = 0
 const qualityText = computed(() => {
     const q = detail.value?.event?.quality || {}
-    return `采集窗口质量：内核丢弃 ${q.kernel_drops ?? '未知'}，状态丢弃 ${q.state_dropped ?? '未知'}，重组丢弃 ${q.reassembly_dropped ?? '未知'}。统计来自 ${time(q.observed_at)}，不等于 PCAP 采集全程；未看到回复不能直接证明失败。`
+    return `窗口采集质量：内核丢弃 ${q.kernel_drops ?? '未知'}，状态丢弃 ${q.state_dropped ?? '未知'}，重组丢弃 ${q.reassembly_dropped ?? '未知'} · ${time(q.observed_at)}`
 })
 const api = (action: string, data: any = {}, method: 'get' | 'post' = 'get') =>
     createAxios({ url: '/admin/EventEvidence/' + action, method, ...(method === 'get' ? { params: data } : { data }) })
@@ -593,8 +610,7 @@ function filterBy(key: string, value: string) {
 async function openDetail(id: number) {
     detailId.value = id
     detail.value = null
-    reviewReport.value = null
-    reviewReportError.value = ''
+    rawEvidenceOpen.value = []
     detailOpen.value = true
     detailLoading.value = true
     detailError.value = ''
@@ -609,7 +625,6 @@ async function refreshDetail() {
         const r = await api('detail', { id })
         if (g !== detailGeneration || !detailOpen.value || detailId.value !== id) return
         detail.value = r.data
-        loadReviewReport(id, g)
         if (
             r.data.captures.some((c: any) => ['pending', 'leased'].includes(c.status)) ||
             r.data.analyses.some((a: any) => ['pending', 'running'].includes(a.status))
@@ -641,18 +656,12 @@ function closeDetail() {
     detailGeneration++
     detailId.value = 0
     detail.value = null
-    reviewReportLoading.value = false
+    rawEvidenceOpen.value = []
 }
-async function loadReviewReport(id: number, g: number) {
-    reviewReportLoading.value = true
-    try {
-        const r = await api('reviewReport', { id })
-        if (g === detailGeneration && detailOpen.value && id === detailId.value) reviewReport.value = r.data.report
-    } catch {
-        if (g === detailGeneration && detailOpen.value) reviewReportError.value = '审核报告加载失败；规则和抓包证据仍可查看'
-    } finally {
-        if (g === detailGeneration) reviewReportLoading.value = false
-    }
+function toggleRawEvidence(event: Event, id: number) {
+    const opened = (event.target as HTMLDetailsElement).open
+    rawEvidenceOpen.value = rawEvidenceOpen.value.filter((value) => value !== id)
+    if (opened) rawEvidenceOpen.value.push(id)
 }
 function openReview(ids: number[]) {
     reviewIds.value = ids
@@ -703,12 +712,23 @@ async function saveWhitelist() {
 async function capture() {
     capturing.value = true
     try {
-        await api('capture', { id: detailId.value, snaplen: snaplen.value }, 'post')
+        await api(
+            'capture',
+            { id: detailId.value, snaplen: snaplen.value, max_mib: captureMaxMiB.value, duration_seconds: captureDuration.value },
+            'post'
+        )
         ElMessage.success('抓包任务已提交')
         await refreshProgress()
     } finally {
         capturing.value = false
     }
+}
+function captureResult(item: any) {
+    const meta = item.metadata || {}
+    const seconds = (Date.parse(meta.ended_at) - Date.parse(meta.started_at)) / 1000
+    const duration = Number.isFinite(seconds) && seconds >= 0 ? seconds.toFixed(1) + ' 秒' : '—'
+    const stops: Record<string, string> = { size: '达到文件上限', duration: '达到时长', shutdown: 'Agent 停止' }
+    return `${duration} · ${stops[meta.stop_reason] || '—'}`
 }
 function cancelDownload() {
     downloadController?.abort()
@@ -877,6 +897,17 @@ onBeforeUnmount(() => {
 }
 .capture-length {
     width: 220px;
+}
+.capture-budget {
+    width: 110px;
+}
+.capture-options {
+    margin-top: 16px;
+}
+.capture-help {
+    font-size: 12px;
+    color: var(--el-text-color-secondary);
+    line-height: 1.6;
 }
 .columns {
     text-align: right;
