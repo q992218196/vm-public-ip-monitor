@@ -14,7 +14,16 @@ class IngestController extends Controller
 {
     public function __invoke(Request $r)
     {
-        abort_if(strlen($r->getContent()) > 8 * 1024 * 1024, 413);
+        $wireBytes = strlen($r->getContent());
+        abort_if($wireBytes > 8 * 1024 * 1024, 413);
+        $node = $r->attributes->get('node');
+        $identity = $r->validate(['batch_id' => 'required|string|regex:/^[a-zA-Z0-9-]{16,64}$/']);
+        if (! Batch::where('node_id', $node->id)->where('batch_id', $identity['batch_id'])->exists()) {
+            // Avoid expanding thousands of wildcard validation rules for requests
+            // that cannot fit. The transaction still checks normalized bytes.
+            $pending = Batch::where('node_id', $node->id)->whereNull('processed_at')->sum('payload_bytes');
+            abort_if($pending + $wireBytes > config('monitor.pending_bytes_per_node'), 429, '节点接收队列已达容量上限，请等待分析完成');
+        }
         $v = $r->validate([
             'batch_id' => 'required|string|regex:/^[a-zA-Z0-9-]{16,64}$/',
             'window_start' => 'required|date', 'window_end' => 'required|date',
@@ -106,7 +115,6 @@ class IngestController extends Controller
         if ($end->isAfter(now()->addMinutes(5)) || $start->isBefore(now()->subDays(14)) || $start->diffInSeconds($end) > 600) {
             throw ValidationException::withMessages(['window_start' => '窗口必须在过去14天内、长度不超过600秒，未来偏差不超过5分钟']);
         }
-        $node = $r->attributes->get('node');
         $seen = [];
         $v['vpn'] ??= [];
         $v['proxies'] ??= [];

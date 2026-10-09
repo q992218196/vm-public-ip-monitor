@@ -546,6 +546,25 @@ class MonitorTest extends TestCase
         Queue::assertPushed(ProcessBatch::class, 2);
     }
 
+    public function test_full_inbox_rejects_before_nested_validation_but_duplicates_remain_acknowledged(): void
+    {
+        $node = $this->node();
+        $payload = $this->payload();
+        $this->upload($node, $payload)->assertOk();
+        config(['monitor.pending_bytes_per_node' => Batch::firstOrFail()->payload_bytes]);
+        $this->upload($node, $payload)->assertOk()->assertJson(['accepted' => true, 'duplicate' => true]);
+        $new = $payload;
+        $new['batch_id'] = (string) Str::uuid();
+        $new['metrics'][0]['ip'] = 'not-an-ip';
+        $this->upload($node, $new)->assertStatus(429)->assertJsonPath('message', '节点接收队列已达容量上限，请等待分析完成');
+        $this->assertDatabaseCount('batches', 1);
+        config(['monitor.pending_bytes_per_node' => 67108864]);
+        $this->upload($node, $new)->assertUnprocessable();
+        $new['metrics'][0]['ip'] = $payload['metrics'][0]['ip'];
+        $this->upload($node, $new)->assertOk()->assertJson(['duplicate' => false]);
+        $this->assertDatabaseCount('batches', 2);
+    }
+
     public function test_active_discovery_respects_scope_and_rejects_large_ipv6_ranges(): void
     {
         $n = $this->node();
