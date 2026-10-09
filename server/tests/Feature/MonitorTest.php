@@ -556,6 +556,35 @@ class MonitorTest extends TestCase
         $this->assertDatabaseCount('ip_observations', 0);
     }
 
+    public function test_traffic_retention_preserves_cutoff_windows_and_pending_inbox(): void
+    {
+        $this->freezeTime();
+        config(['monitor.auto_probe' => false]);
+        $node = $this->node();
+        $this->upload($node, $this->payload())->assertOk();
+        $batch = Batch::firstOrFail();
+        ProcessBatch::dispatchSync($batch->id);
+        $template = TrafficMetric::firstOrFail();
+        $cutoff = now()->subDays(config('monitor.metrics_days'));
+        foreach ([['start' => $cutoff->copy()->subMinute(), 'end' => $cutoff->copy()->subSeconds(30), 'deleted' => true],
+            ['start' => $cutoff->copy()->subSeconds(15), 'end' => $cutoff->copy()->addSeconds(15), 'deleted' => false],
+            ['start' => $cutoff->copy()->subSeconds(30), 'end' => $cutoff, 'deleted' => false]] as $case) {
+            $inbox = $batch->replicate();
+            $inbox->batch_id = (string) Str::uuid();
+            $inbox->processed_at = null;
+            $inbox->save();
+            $metric = $template->replicate();
+            $metric->batch_id = $inbox->id;
+            $metric->window_start = $case['start'];
+            $metric->window_end = $case['end'];
+            $metric->save();
+            $this->artisan('monitor:maintain')->assertSuccessful();
+            $this->assertSame(! $case['deleted'], TrafficMetric::whereKey($metric->id)->exists());
+            $this->assertTrue(Batch::whereKey($inbox->id)->whereNull('processed_at')->exists());
+        }
+        $this->assertTrue(TrafficMetric::whereKey($template->id)->exists());
+    }
+
     public function test_maintenance_queues_existing_sites_only_when_auto_probe_is_enabled(): void
     {
         $node = $this->node();

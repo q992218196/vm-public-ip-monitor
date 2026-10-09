@@ -42,7 +42,7 @@ class Maintain extends Command
                     ->each(fn (Website $site) => $queue->enqueue($site, false));
             }
         }
-        TrafficMetric::where('window_end', '<', now()->subDays(config('monitor.metrics_days')))->delete();
+        $this->pruneTrafficMetrics();
         ProtocolObservation::where('window_end', '<', now()->subDays(config('monitor.protocol_days')))->delete();
         // Keep inbox IDs longer than the accepted replay horizon, preventing old
         // retries from creating a second copy after metric retention.
@@ -56,5 +56,25 @@ class Maintain extends Command
         }
 
         return self::SUCCESS;
+    }
+
+    private function pruneTrafficMetrics(): void
+    {
+        $cutoff = now()->subDays(config('monitor.metrics_days'));
+        $deadline = microtime(true) + 10;
+        // window_start is already indexed. Both bounds preserve windows that
+        // straddle the cutoff; short deletes release row locks between chunks.
+        for ($chunk = 0; $chunk < 10; $chunk++) {
+            $ids = TrafficMetric::where('window_start', '<', $cutoff)->where('window_end', '<', $cutoff)
+                ->orderBy('window_start')->limit(5000)->pluck('id');
+            if ($ids->isEmpty()) {
+                break;
+            }
+            TrafficMetric::whereIn('id', $ids)->where('window_end', '<', $cutoff)->delete();
+            if ($ids->count() < 5000 || microtime(true) >= $deadline) {
+                break;
+            }
+            usleep(50000);
+        }
     }
 }
