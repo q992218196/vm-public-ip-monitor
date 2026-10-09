@@ -3,6 +3,7 @@
 import concurrent.futures
 import http.client
 import socket
+import select
 import sys
 import time
 from urllib.parse import urlsplit
@@ -36,12 +37,19 @@ try:
             f"POST {upload} HTTP/1.1\r\nHost: {host}\r\nContent-Length: 24\r\n"
             "Content-Type: application/vnd.tcpdump.pcap\r\nConnection: close\r\n\r\nx".encode()
         )
+        # Let the server process this header before opening the next connection.
+        # Otherwise the fifth probe can win a slot and eject a parked upload.
+        readable, _, _ = select.select([connection], [], [], 0.15)
+        if readable:
+            raise AssertionError(f"Parked upload was rejected: {connection.recv(1024)!r}")
+    statuses = []
     for _ in range(20):
-        if status(upload, "POST") == 429:
+        statuses.append(status(upload, "POST"))
+        if statuses[-1] == 429:
             break
         time.sleep(0.1)
     else:
-        raise AssertionError("Expected a fifth upload to hit the four-upload limit")
+        raise AssertionError(f"Expected a fifth upload to hit the four-upload limit; received {statuses}")
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=12) as pool:
         results = list(pool.map(lambda _: status("/api/v1/agent/captures/claim"), range(36)))
