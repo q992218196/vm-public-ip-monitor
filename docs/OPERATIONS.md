@@ -118,6 +118,8 @@ Agent 从 UDP 报文结构识别 [WireGuard 握手](https://www.wireguard.com/pr
 
 PostgreSQL 不能简单用文件删除实现空间上限。设置保留期、监控分区余量，并配置数据库备份、autovacuum。几十台宿主机的数据库用量需真实采样评估；默认仅存聚合窗口，不保存所有逐连接明细。
 
+流量窗口默认保留 24 小时，使用 `MONITOR_METRICS_HOURS`（1–168），旧 `MONITOR_METRICS_DAYS` 已停用。独立命令 `monitor:prune-traffic` 每分钟分批清理，默认每轮最多 100 × 5,000 条、约 20 秒预算，单条 PostgreSQL 查询有 8 秒超时。原始批次去重记录、告警证据、PCAP 和 AI 报告分别保留，不跟随窗口清理。普通删除释放的是可复用空间，不能代替磁盘余量监控；空间不足时不要直接执行 `VACUUM FULL`。
+
 应用和 Nginx 日志可使用 `deploy/server/logrotate.conf`，自定义目录后同步修改路径。Docker 服务日志默认不保存，主要错误查看挂载目录中的应用日志与探测任务。
 
 ## 常用维护命令

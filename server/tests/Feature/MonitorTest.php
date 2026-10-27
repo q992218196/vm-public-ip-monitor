@@ -15,6 +15,7 @@ use App\Services\ProbeQueue;
 use App\Services\ScanAssessment;
 use Database\Seeders\MonitorSeeder;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Queue;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Str;
@@ -584,7 +585,7 @@ class MonitorTest extends TestCase
         $batch = Batch::firstOrFail();
         ProcessBatch::dispatchSync($batch->id);
         $template = TrafficMetric::firstOrFail();
-        $cutoff = now()->subDays(config('monitor.metrics_days'));
+        $cutoff = now()->subHours(config('monitor.metrics_hours'));
         foreach ([['start' => $cutoff->copy()->subMinute(), 'end' => $cutoff->copy()->subSeconds(30), 'deleted' => true],
             ['start' => $cutoff->copy()->subSeconds(15), 'end' => $cutoff->copy()->addSeconds(15), 'deleted' => false],
             ['start' => $cutoff->copy()->subSeconds(30), 'end' => $cutoff, 'deleted' => false]] as $case) {
@@ -597,17 +598,96 @@ class MonitorTest extends TestCase
             $metric->window_start = $case['start'];
             $metric->window_end = $case['end'];
             $metric->save();
-            $this->artisan('monitor:maintain')->assertSuccessful();
+            $this->artisan('monitor:prune-traffic')->assertSuccessful();
             $this->assertSame(! $case['deleted'], TrafficMetric::whereKey($metric->id)->exists());
             $this->assertTrue(Batch::whereKey($inbox->id)->whereNull('processed_at')->exists());
         }
         $this->assertTrue(TrafficMetric::whereKey($template->id)->exists());
     }
 
+    public function test_retention_commits_bounded_chunks_and_retries_remaining_rows(): void
+    {
+        $this->freezeTime();
+        $node = $this->node();
+        $this->upload($node, $this->payload())->assertOk();
+        $batch = Batch::firstOrFail();
+        ProcessBatch::dispatchSync($batch->id);
+        $template = TrafficMetric::firstOrFail()->getAttributes();
+        unset($template['id']);
+        $old = now()->subHours(25)->format('Y-m-d H:i:s.u');
+        $batchRows = [];
+        for ($i = 0; $i < 5001; $i++) {
+            $batchRows[] = ['node_id' => $node->id, 'batch_id' => 'retention-'.$i, 'window_start' => $old, 'window_end' => $old, 'processed_at' => now()];
+        }
+        foreach (array_chunk($batchRows, 500) as $rows) {
+            DB::table('batches')->insert($rows);
+        }
+        $metrics = Batch::where('batch_id', 'like', 'retention-%')->pluck('id')->map(fn ($id) => array_replace($template, ['batch_id' => $id, 'window_start' => $old, 'window_end' => $old]))->all();
+        foreach (array_chunk($metrics, 500) as $rows) {
+            DB::table('traffic_metrics')->insert($rows);
+        }
+        config(['monitor.metrics_prune_batches' => 1]);
+        $this->artisan('monitor:prune-traffic')->assertSuccessful();
+        $this->assertDatabaseCount('traffic_metrics', 2);
+        $this->assertDatabaseCount('batches', 5002);
+        $this->artisan('monitor:prune-traffic')->assertSuccessful();
+        $this->assertDatabaseCount('traffic_metrics', 1);
+        $this->assertDatabaseCount('batches', 5002);
+        foreach (['0', '169', 'invalid'] as $hours) {
+            $this->artisan('monitor:prune-traffic', ['--hours' => $hours])->assertFailed();
+        }
+        $this->assertDatabaseCount('traffic_metrics', 1);
+    }
+
+    public function test_protocol_rules_gate_records_and_alerts_by_selected_nodes(): void
+    {
+        $this->seed(MonitorSeeder::class);
+        $included = $this->node();
+        $excluded = $this->node();
+        Rule::whereIn('kind', ['vpn_protocol', 'proxy_suspect'])->get()->each(fn (Rule $rule) => $rule->update(['node_ids' => [$included->id]]));
+        $payload = $this->payload();
+        $payload['metrics'] = [];
+        $payload['sites'] = [];
+        $payload['vpn'] = [[
+            'ip' => '203.0.113.10', 'peer_ip' => '1.1.1.1', 'local_port' => 40000, 'peer_port' => 51820,
+            'protocol' => 'wireguard', 'initiator' => 'vm', 'request_count' => 1, 'response_count' => 1,
+            'request_length' => 148, 'response_length' => 92, 'request_header' => '010000007b000000', 'response_header' => '02000000c8010000',
+        ]];
+        $payload['proxies'] = [[
+            'ip' => '203.0.113.10', 'local_port' => 8443, 'transport' => 'tls', 'peer_count' => 3, 'session_count' => 4,
+            'bytes_from_peers' => 12000, 'bytes_to_peers' => 34000, 'peer_samples' => ['198.51.100.1'],
+            'egress_target_count' => 5, 'egress_target_samples' => ['192.0.2.1'],
+        ]];
+        foreach ([$included, $excluded] as $node) {
+            $payload['batch_id'] = (string) Str::uuid();
+            $this->upload($node, $payload)->assertOk();
+            ProcessBatch::dispatchSync(Batch::where('batch_id', $payload['batch_id'])->firstOrFail()->id);
+        }
+        $this->assertDatabaseCount('protocol_observations', 2);
+        $this->assertDatabaseMissing('protocol_observations', ['node_id' => $excluded->id]);
+        $this->assertDatabaseCount('alerts', 2);
+        foreach ([['enabled' => false], ['enabled' => true, 'node_ids' => []]] as $settings) {
+            Rule::whereIn('kind', ['vpn_protocol', 'proxy_suspect'])->get()->each(fn (Rule $rule) => $rule->update($settings));
+            $payload['batch_id'] = (string) Str::uuid();
+            $this->upload($included, $payload)->assertOk();
+            ProcessBatch::dispatchSync(Batch::where('batch_id', $payload['batch_id'])->firstOrFail()->id);
+            $this->assertDatabaseCount('protocol_observations', 2);
+            $this->assertDatabaseCount('alerts', 2);
+        }
+        Rule::whereIn('kind', ['vpn_protocol', 'proxy_suspect'])->update(['node_ids' => null]);
+        $payload['batch_id'] = (string) Str::uuid();
+        $this->upload($excluded, $payload)->assertOk();
+        ProcessBatch::dispatchSync(Batch::where('batch_id', $payload['batch_id'])->firstOrFail()->id);
+        $this->assertDatabaseCount('protocol_observations', 4);
+        $this->assertDatabaseCount('alerts', 4);
+    }
+
     public function test_maintenance_queues_existing_sites_only_when_auto_probe_is_enabled(): void
     {
         $node = $this->node();
-        $this->upload($node, $this->payload())->assertOk();
+        $payload = $this->payload();
+        $payload['sites'][0]['source'] = 'http_host';
+        $this->upload($node, $payload)->assertOk();
         ProcessBatch::dispatchSync(Batch::first()->id);
         config(['monitor.auto_probe' => false]);
         $this->artisan('monitor:maintain')->assertSuccessful();

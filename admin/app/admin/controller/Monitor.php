@@ -38,6 +38,8 @@ class Monitor extends Backend
 
     private const SERVICE_TARGET_RULE_KINDS = ['ssh_target_spread', 'rdp_target_spread', 'ftp_target_spread'];
 
+    private const MULTI_NODE_RULE_KINDS = ['capture_degraded', 'vpn_protocol', 'proxy_suspect'];
+
     private function table(string $resource): string
     {
         if (! isset(self::TABLES[$resource])) {
@@ -201,7 +203,7 @@ class Monitor extends Backend
         if ($node !== '' && $resource === 'rules') {
             $query->where(function ($scope) use ($node) {
                 $scope->where('m.node_id', $node)->whereOr(function ($quality) use ($node) {
-                    $quality->where('m.kind', 'capture_degraded')->whereNull('m.node_id')
+                    $quality->whereIn('m.kind', self::MULTI_NODE_RULE_KINDS)->whereNull('m.node_id')
                         ->whereRaw('(m.node_ids IS NULL OR m.node_ids::jsonb @> ?::jsonb)', [json_encode([$node])]);
                 });
             });
@@ -564,7 +566,7 @@ class Monitor extends Backend
             if (in_array($scope['kind'] ?? '', self::SERVICE_TARGET_RULE_KINDS, true) && ((int) ($scope['threshold'] ?? 0) < 2 || (int) ($scope['threshold'] ?? 0) > 128)) {
                 $this->error('服务多目标建连规则的不同目标 IP 数阈值必须在 2–128 之间。');
             }
-            if (($scope['kind'] ?? '') === 'capture_degraded') {
+            if (in_array($scope['kind'] ?? '', self::MULTI_NODE_RULE_KINDS, true)) {
                 if (array_key_exists('node_ids', $data) && $data['node_ids'] !== null && ! is_array($data['node_ids'])) {
                     $this->error('适用节点必须是列表或全部节点');
                 }
@@ -586,7 +588,7 @@ class Monitor extends Backend
                 $data['node_ids'] = $targets;
             } else {
                 if (! empty($data['node_ids'])) {
-                    $this->error('多选节点范围仅适用于采集覆盖下降规则');
+                    $this->error('此类型不支持多选节点范围');
                 }
                 $data['node_ids'] = null;
             }

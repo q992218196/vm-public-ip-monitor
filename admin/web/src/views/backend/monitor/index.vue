@@ -5,6 +5,8 @@
                 <h2>{{ definition.title }}</h2>
                 <p v-if="resource === 'alerts'">仅显示疑似异常、强异常及节点运行异常；一般流量活动在流量窗口查看。</p>
                 <p v-else-if="resource === 'rules'">UDP 包数／流数量仅用于流量统计，不作为异常告警。时间按浏览器本地时区显示。</p>
+                <p v-else-if="resource === 'websites'">仅 HTTP 证据、已验证或人工确认的网站进入自动验证；纯 TLS 握手在服务线索中查看，可手动验证。</p>
+                <p v-else-if="resource === 'protocols'">在检测规则中配置“VPN 双向握手”和“疑似加密代理”的启用范围；未启用节点不新增对应记录或告警。</p>
                 <p v-else>监控数据按需读取，证据在打开单条详情时加载；时间按浏览器本地时区显示。</p>
             </div>
             <div class="monitor-heading-actions">
@@ -120,7 +122,7 @@
                         <span v-else-if="resource === 'rules' && column.key === 'threshold' && isServiceTargetRule(scope.row.kind)"
                             >{{ scope.row.threshold }} 个目标 IP</span
                         >
-                        <span v-else-if="column.key === 'window_seconds' && scope.row.kind === 'capture_degraded'">每采集窗口</span>
+                        <span v-else-if="column.key === 'window_seconds' && isMultiNodeRule(scope.row.kind)">每采集窗口</span>
                         <el-tag
                             v-else-if="column.key === 'agent_update_status'"
                             :type="agentUpdateTag(scope.row)"
@@ -334,6 +336,12 @@
                     type="info"
                     :closable="false"
                     title="按每个采集窗口的内核丢包、状态丢弃与上报缓存丢弃之和判断。只在选定节点生成质量告警；关闭告警仍保留节点健康数据。"
+                />
+                <el-alert
+                    v-if="resource === 'rules' && ['vpn_protocol', 'proxy_suspect'].includes(form.kind)"
+                    type="info"
+                    :closable="false"
+                    title="可选择全部或指定节点。未启用节点不新增该类协议观察和告警，已有记录按保留期清理；不改变 Agent 的旁路采集方式。"
                 />
                 <el-alert
                     v-if="resource === 'rules' && isServiceTargetRule(form.kind)"
@@ -664,20 +672,27 @@ const editorFields = computed(() =>
     (definition.value.edit || [])
         .filter((field) => {
             if (resource.value !== 'rules') return true
-            if (form.kind !== 'capture_degraded') return !['node_scope', 'node_ids'].includes(field.key)
+            if (!isMultiNodeRule(form.kind)) return !['node_scope', 'node_ids'].includes(field.key)
             if (['node_id', 'window_seconds'].includes(field.key)) return false
             return field.key !== 'node_ids' || form.node_scope === 'selected'
         })
         .map((field) =>
             resource.value === 'rules' && form.kind === 'capture_degraded' && field.key === 'threshold'
                 ? { ...field, label: '每采集窗口丢弃计数阈值' }
-                : resource.value === 'rules' && isServiceTargetRule(form.kind) && field.key === 'threshold'
-                  ? { ...field, label: '不同目标 IP 数阈值（2–128）' }
-                  : field
+                : resource.value === 'rules' && form.kind === 'vpn_protocol' && field.key === 'threshold'
+                  ? { ...field, label: '单窗口双向握手配对阈值' }
+                  : resource.value === 'rules' && form.kind === 'proxy_suspect' && field.key === 'threshold'
+                    ? { ...field, label: '入站对端数阈值（实际至少 3）' }
+                    : resource.value === 'rules' && isServiceTargetRule(form.kind) && field.key === 'threshold'
+                      ? { ...field, label: '不同目标 IP 数阈值（2–128）' }
+                      : field
         )
 )
 function isServiceTargetRule(kind: unknown): boolean {
     return ['ssh_target_spread', 'rdp_target_spread', 'ftp_target_spread'].includes(String(kind))
+}
+function isMultiNodeRule(kind: unknown): boolean {
+    return ['capture_degraded', 'vpn_protocol', 'proxy_suspect'].includes(String(kind))
 }
 watch(
     () => form.kind,
@@ -847,7 +862,7 @@ function enabledState(value: unknown): boolean {
 }
 function ruleNodeScope(row: any): string {
     const name = (id: string) => nodes.value.find((node) => node.id === id)?.name || id
-    if (row.kind !== 'capture_degraded') return row.node_id ? name(row.node_id) : '全部节点'
+    if (!isMultiNodeRule(row.kind)) return row.node_id ? name(row.node_id) : '全部节点'
     const ids = row.node_ids
     if (ids === null || ids === undefined) return row.node_id ? name(row.node_id) : '全部节点'
     return ids.length ? '指定节点：' + ids.map(name).join('、') : '未选择节点（不生成告警）'
@@ -961,7 +976,7 @@ async function save() {
             ElMessage.warning('服务多目标建连规则的不同目标 IP 数阈值必须在 2–128 之间')
             return
         }
-        if (data.kind === 'capture_degraded') {
+        if (isMultiNodeRule(data.kind)) {
             if (data.node_scope === 'selected' && (!Array.isArray(data.node_ids) || !data.node_ids.length)) {
                 ElMessage.warning('请选择至少一个适用节点，或改为全部节点')
                 return

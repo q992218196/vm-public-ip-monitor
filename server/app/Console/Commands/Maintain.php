@@ -7,10 +7,10 @@ use App\Models\Batch;
 use App\Models\Node;
 use App\Models\ProbeTask;
 use App\Models\ProtocolObservation;
-use App\Models\TrafficMetric;
 use App\Models\Website;
 use App\Services\Analyzer;
 use App\Services\ProbeQueue;
+use App\Services\WebsiteDiscovery;
 use Illuminate\Console\Command;
 use Illuminate\Database\Eloquent\Builder;
 
@@ -28,12 +28,12 @@ class Maintain extends Command
         ProbeTask::where('status', 'leased')->where('leased_until', '<', now())->where('attempts', '>=', 3)->update(['status' => 'failed', 'last_error' => '工作节点租约连续超时']);
         ProbeTask::whereIn('request_source', ['auto', 'legacy'])->where('mode', 'normal')
             ->where(fn (Builder $query) => $query->where('status', 'pending')->orWhere(fn (Builder $expired) => $expired->where('status', 'leased')->where('leased_until', '<', now())))
-            ->whereHas('website', fn (Builder $query) => $query->whereIn('discovery_kind', ['rdp', 'tls_unknown']))
+            ->whereDoesntHave('website', fn (Builder $query) => WebsiteDiscovery::automaticCandidates($query))
             ->update(['status' => 'skipped', 'lease_token' => null, 'leased_until' => null, 'last_error' => '服务线索不自动探测网页；需要时可手动验证']);
         if (config('monitor.auto_probe')) {
             $capacity = max(0, 1000 - ProbeTask::whereIn('status', ['pending', 'leased'])->count());
             if ($capacity > 0) {
-                Website::where('discovery_kind', 'web_candidate')->where(fn (Builder $query) => $query->whereNull('last_probed_at')->orWhere('last_probed_at', '<', now()->subDay()))
+                WebsiteDiscovery::automaticCandidates(Website::query())->where(fn (Builder $query) => $query->whereNull('last_probed_at')->orWhere('last_probed_at', '<', now()->subDay()))
                     ->whereDoesntHave('task', fn (Builder $query) => $query->whereIn('status', ['pending', 'leased'])->orWhere(fn (Builder $recent) => $recent->where('status', '<>', 'skipped')->where('updated_at', '>', now()->subDay())))
                     ->orderByRaw('CASE WHEN last_probed_at IS NULL THEN 0 ELSE 1 END')
                     ->orderBy('last_probed_at')
@@ -42,7 +42,6 @@ class Maintain extends Command
                     ->each(fn (Website $site) => $queue->enqueue($site, false));
             }
         }
-        $this->pruneTrafficMetrics();
         ProtocolObservation::where('window_end', '<', now()->subDays(config('monitor.protocol_days')))->delete();
         // Keep inbox IDs longer than the accepted replay horizon, preventing old
         // retries from creating a second copy after metric retention.
@@ -56,25 +55,5 @@ class Maintain extends Command
         }
 
         return self::SUCCESS;
-    }
-
-    private function pruneTrafficMetrics(): void
-    {
-        $cutoff = now()->subDays(config('monitor.metrics_days'));
-        $deadline = microtime(true) + 10;
-        // window_start is already indexed. Both bounds preserve windows that
-        // straddle the cutoff; short deletes release row locks between chunks.
-        for ($chunk = 0; $chunk < 10; $chunk++) {
-            $ids = TrafficMetric::where('window_start', '<', $cutoff)->where('window_end', '<', $cutoff)
-                ->orderBy('window_start')->limit(5000)->pluck('id');
-            if ($ids->isEmpty()) {
-                break;
-            }
-            TrafficMetric::whereIn('id', $ids)->where('window_end', '<', $cutoff)->delete();
-            if ($ids->count() < 5000 || microtime(true) >= $deadline) {
-                break;
-            }
-            usleep(50000);
-        }
     }
 }

@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use App\Models\ProbeTask;
 use App\Services\Screenshots;
+use App\Services\WebsiteDiscovery;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 
@@ -13,7 +14,7 @@ class ProbeController extends Controller
     {
         return DB::transaction(function () {
             $task = ProbeTask::where('attempts', '<', 3)->where('available_at', '<=', now())->where(fn ($q) => $q->where('status', 'pending')->orWhere(fn ($q) => $q->where('status', 'leased')->where('leased_until', '<', now())))
-                ->where(fn ($q) => $q->where('request_source', 'manual')->orWhere('mode', 'origin_test')->orWhereHas('website', fn ($site) => $site->where('discovery_kind', 'web_candidate')))
+                ->where(fn ($q) => $q->where('request_source', 'manual')->orWhere('mode', 'origin_test')->orWhereHas('website', fn ($site) => WebsiteDiscovery::automaticCandidates($site)))
                 ->orderByRaw("CASE WHEN request_source = 'manual' OR mode = 'origin_test' THEN 0 ELSE 1 END")->orderBy('id')->lockForUpdate()->first();
             if (! $task) {
                 return response()->json(['task' => null]);

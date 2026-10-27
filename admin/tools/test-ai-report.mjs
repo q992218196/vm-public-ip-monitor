@@ -268,7 +268,7 @@ try {
     status: "observed", discovery_kind: "tls_unknown", source: "tls_sni",
     ownership_status: "ip_only", ip: "203.0.113.10", port: 3389, scheme: "https",
   }));
-  await page.getByText("3389 仅有 TLS 线索，尚无网页证据；不自动探测，需要时可手动验证。", {exact: true}).waitFor();
+  await page.getByText("仅有 TLS 线索，尚无 HTTP 网页证据；不自动探测，需要时可手动验证。", {exact: true}).waitFor();
   assert.ok((await page.locator(".site-report").textContent()).includes("TLS 握手；SNI 本身不能证明网站"));
   const eventFixture = {id: 933, title: "SMB 服务高频连接（待复核）", ip: "103.123.132.239", node_name: "TW 2", severity: "medium", status: "open", kinds: ["horizontal_scan", "smb_connections"], quality: {}, first_seen_at: "2026-10-03 07:01:48", last_seen_at: "2026-10-03 07:02:48"};
   const captureFixture = {id: "test-pcap", status: "uploaded", bytes: 4, snaplen: 2048, max_bytes: 8388608, duration_seconds: 60, metadata: {started_at: "2026-10-03T07:01:48Z", ended_at: "2026-10-03T07:02:01Z", stop_reason: "size"}, created_at: "2026-10-03 07:01:48"};
@@ -344,6 +344,22 @@ try {
   assert.deepEqual(savedQualityRule.node_ids, nodeFixtures.map(node => node.id));
   assert.equal(savedQualityRule.node_id, null);
   assert.equal(savedQualityRule.kind, "capture_degraded");
+  for (const [label, kind] of [["VPN 双向握手", "vpn_protocol"], ["疑似加密代理", "proxy_suspect"]]) {
+    await ruleRows.nth(3).getByRole("button", {name: "编辑", exact: true}).click();
+    await qualityDialog.waitFor({state: "visible"});
+    await qualityDialog.locator(".el-form-item").filter({hasText: "检测类型"}).locator(".el-select").click();
+    await page.getByRole("option", {name: label, exact: true}).click();
+    await qualityDialog.getByText("指定节点", {exact: true}).click();
+    assert.equal(await qualityDialog.getByText("评估窗口秒", {exact: true}).count(), 0);
+    const scopedSelect = qualityDialog.locator(".el-form-item").filter({hasText: "指定节点（可多选）"}).locator(".el-select");
+    await scopedSelect.click();
+    await page.getByRole("option", {name: "HK 1", exact: true}).click();
+    await qualityDialog.getByRole("button", {name: "保存", exact: true}).click();
+    await qualityDialog.waitFor({state: "hidden"});
+    assert.equal(savedQualityRule.kind, kind);
+    assert.deepEqual(savedQualityRule.node_ids, [nodeFixtures[0].id]);
+    assert.equal(savedQualityRule.node_id, null);
+  }
   await page.evaluate(() => window.showEvidence("events", {}));
   await page.getByText("仅显示疑似异常、强异常及节点运行异常；一般流量活动在流量窗口查看。同节点、IP 的持续行为合并为事件。", {exact: true}).waitFor();
   await page.locator(".filters .el-select").last().click();

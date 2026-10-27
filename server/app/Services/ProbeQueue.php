@@ -12,7 +12,7 @@ class ProbeQueue
     {
         return DB::transaction(function () use ($site, $force) {
             $site = Website::whereKey($site->id)->lockForUpdate()->firstOrFail();
-            if (! $force && $site->discovery_kind !== 'web_candidate') {
+            if (! $force && ! WebsiteDiscovery::canProbeAutomatically($site)) {
                 return null;
             }
             $task = ProbeTask::firstOrCreate(['website_id' => $site->id], ['status' => 'pending', 'available_at' => now(), 'request_source' => $force ? 'manual' : 'auto']);

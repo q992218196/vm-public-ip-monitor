@@ -11,6 +11,7 @@ use App\Models\Website;
 use App\Services\ProbeQueue;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Str;
 use Tests\TestCase;
@@ -44,7 +45,7 @@ class WebsiteDiscoveryTest extends TestCase
         $this->assertSame('rdp', Website::where('source', 'rdp_negotiation')->firstOrFail()->discovery_kind);
         $this->artisan('monitor:maintain')->assertSuccessful();
         $this->assertDatabaseCount('websites', 4);
-        $this->assertDatabaseCount('probe_tasks', 2);
+        $this->assertDatabaseCount('probe_tasks', 1);
         foreach (Website::whereIn('discovery_kind', ['rdp', 'tls_unknown'])->get() as $site) {
             $this->assertNull(app(ProbeQueue::class)->enqueue($site, false));
         }
@@ -72,7 +73,7 @@ class WebsiteDiscoveryTest extends TestCase
         $this->upload([$this->hint(), $this->hint('tls_sni', 3389, '203.0.113.10')]);
         $this->assertDatabaseCount('websites', 1);
         $this->upload([$this->hint('tls_alpn')]);
-        $this->assertSame('web_candidate', Website::firstOrFail()->discovery_kind);
+        $this->assertSame('tls_unknown', Website::firstOrFail()->discovery_kind);
         $this->upload([$this->hint()]);
         $this->assertSame('tls_alpn', Website::firstOrFail()->source);
     }
@@ -80,7 +81,7 @@ class WebsiteDiscoveryTest extends TestCase
     public function test_new_rdp_evidence_cancels_only_unexecuted_automatic_task(): void
     {
         $this->upload([$this->hint('tls_alpn'), $this->hint('tls_alpn', 13389)]);
-        $auto = app(ProbeQueue::class)->enqueue(Website::where('port', 3389)->firstOrFail(), false);
+        $auto = ProbeTask::create(['website_id' => Website::where('port', 3389)->firstOrFail()->id, 'status' => 'pending', 'available_at' => now(), 'request_source' => 'auto']);
         $manual = app(ProbeQueue::class)->enqueue(Website::where('port', 13389)->firstOrFail(), true);
         $this->upload([$this->hint('rdp_negotiation'), $this->hint('rdp_negotiation', 13389)]);
         $this->assertSame('skipped', $auto->fresh()->status);
@@ -91,7 +92,7 @@ class WebsiteDiscoveryTest extends TestCase
     public function test_failed_probe_cools_down_for_a_day_but_manual_retry_is_immediate(): void
     {
         $this->freezeTime();
-        $this->upload([$this->hint('tls_alpn')]);
+        $this->upload([$this->hint('http_host')]);
         $site = Website::firstOrFail();
         $task = app(ProbeQueue::class)->enqueue($site, false);
         $task->update(['status' => 'failed']);
@@ -105,7 +106,7 @@ class WebsiteDiscoveryTest extends TestCase
     public function test_http_candidates_restore_skipped_task_and_manual_work_is_claimed_first(): void
     {
         config(['monitor.worker_token' => $this->token]);
-        $this->upload([$this->hint('tls_alpn'), $this->hint('tls_alpn', 13389)]);
+        $this->upload([$this->hint('http_host'), $this->hint('http_host', 13389)]);
         $auto = app(ProbeQueue::class)->enqueue(Website::where('port', 3389)->firstOrFail(), false);
         $auto->update(['status' => 'skipped']);
         $this->artisan('monitor:maintain')->assertSuccessful();
@@ -127,6 +128,51 @@ class WebsiteDiscoveryTest extends TestCase
         $this->assertNull($sites[0]->task->lease_token);
         $this->assertSame('leased', $sites[1]->task->status);
         $this->assertSame('leased', $sites[2]->task->status);
+    }
+
+    public function test_http_priority_upgrade_drains_legacy_tls_backlog_on_all_ports(): void
+    {
+        config(['monitor.worker_token' => $this->token]);
+        $this->upload([$this->hint('tls_sni', 443), $this->hint('tls_alpn', 8443), $this->hint('tls_sni', 9443), $this->hint('tls_sni', 10443)]);
+        $sites = Website::orderBy('id')->get();
+        foreach ($sites as $i => $site) {
+            $site->update(['discovery_kind' => 'web_candidate']);
+            ProbeTask::create(['website_id' => $site->id, 'status' => 'pending', 'available_at' => now(), 'request_source' => $i === 1 ? 'manual' : 'auto']);
+        }
+        $sites[2]->update(['http_status' => 200, 'status' => 'verified']);
+        $sites[3]->update(['ownership_status' => 'manual']);
+        $this->assertNull(app(ProbeQueue::class)->enqueue($sites[0]->fresh(), false));
+        $this->withToken($this->token)->postJson('/api/v1/worker/claim')->assertOk()->assertJsonPath('task.id', $sites[1]->task->id);
+        $migration = require database_path('migrations/2026_10_27_070832_prioritize_http_discovery_and_tune_retention.php');
+        $migration->up();
+        $migration->up();
+        $this->assertSame('tls_unknown', $sites[0]->fresh()->discovery_kind);
+        $this->assertSame('skipped', $sites[0]->task->fresh()->status);
+        $this->assertSame('tls_unknown', $sites[1]->fresh()->discovery_kind);
+        $this->assertSame('leased', $sites[1]->task->fresh()->status);
+        foreach ([2, 3] as $i) {
+            $this->assertSame('web_candidate', $sites[$i]->fresh()->discovery_kind);
+            $this->assertSame('pending', $sites[$i]->task->fresh()->status);
+        }
+        $this->assertDatabaseCount('websites', 4);
+        if (DB::getDriverName() === 'pgsql') {
+            $options = DB::selectOne("SELECT reloptions::text AS options FROM pg_class WHERE oid='traffic_metrics'::regclass")->options;
+            $this->assertStringContainsString('autovacuum_vacuum_scale_factor=0.02', $options);
+        }
+    }
+
+    public function test_repeated_site_sightings_coalesce_timestamp_writes(): void
+    {
+        $this->freezeTime();
+        $this->upload([$this->hint('http_host', 8080)]);
+        $site = Website::firstOrFail();
+        $first = $site->last_seen_at->toIso8601String();
+        $this->travel(30)->seconds();
+        $this->upload([$this->hint('http_host', 8080)]);
+        $this->assertSame($first, $site->fresh()->last_seen_at->toIso8601String());
+        $this->travel(5)->minutes();
+        $this->upload([$this->hint('http_host', 8080)]);
+        $this->assertNotSame($first, $site->fresh()->last_seen_at->toIso8601String());
     }
 
     public function test_upgrade_moves_only_unverified_tls_and_cancels_pending_normal_tasks(): void

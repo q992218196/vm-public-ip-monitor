@@ -30,7 +30,8 @@ class Analyzer
         $p = $batch->payload;
         $at = $batch->window_end;
         $this->observed = [];
-        $this->rules = Rule::where('enabled', true)->whereNotIn('kind', ['horizontal_scan', 'suspected_bruteforce', ...AlertNotificationPolicy::RETIRED_RULES])->where(fn ($q) => $q->whereNull('node_id')->orWhere('node_id', $node->id))->get();
+        $this->rules = Rule::where('enabled', true)->whereNotIn('kind', ['horizontal_scan', 'suspected_bruteforce', ...AlertNotificationPolicy::RETIRED_RULES])->where(fn ($q) => $q->whereNull('node_id')->orWhere('node_id', $node->id))->get()
+            ->filter(fn ($rule) => $rule->node_ids === null || in_array($node->id, $rule->node_ids, true));
         $this->exclusions = Exclusion::where('expires_at', '>', $at)->where(fn ($q) => $q->whereNull('node_id')->orWhere('node_id', $node->id))->get();
         foreach ($p['metrics'] as $m) {
             $m['capture_quality'] = array_intersect_key($p['health'], array_flip(['captured', 'kernel_drops', 'decode_skipped', 'state_dropped', 'reassembly_dropped', 'interfaces', 'version']));
@@ -45,14 +46,15 @@ class Analyzer
                 $s['host'] = '';
             }
             $key = hash('sha256', implode('|', [$s['ip'], $s['port'], $s['scheme'], $s['host']]));
-            $website = Website::firstOrCreate(['fingerprint' => $key], ['ip_asset_id' => $asset->id, 'port' => $s['port'], 'scheme' => $s['scheme'], 'host' => $s['host'], 'source' => $s['source'], 'ownership_status' => ($s['host'] === '' || (filter_var(trim($s['host'], '[]'), FILTER_VALIDATE_IP) && inet_pton(trim($s['host'], '[]')) === inet_pton($s['ip']))) ? 'ip_only' : 'unverified', 'first_seen_at' => $at, 'last_seen_at' => $at]);
-            if ($website->last_seen_at->lt($at)) {
+            $website = Website::firstOrCreate(['fingerprint' => $key], ['ip_asset_id' => $asset->id, 'port' => $s['port'], 'scheme' => $s['scheme'], 'host' => $s['host'], 'source' => $s['source'], 'discovery_kind' => WebsiteDiscovery::kind($s['source'], $s['port']), 'ownership_status' => ($s['host'] === '' || (filter_var(trim($s['host'], '[]'), FILTER_VALIDATE_IP) && inet_pton(trim($s['host'], '[]')) === inet_pton($s['ip']))) ? 'ip_only' : 'unverified', 'first_seen_at' => $at, 'last_seen_at' => $at]);
+            if ($website->last_seen_at->lte($at->copy()->subMinutes(5))) {
                 $website->update(['last_seen_at' => $at]);
             }
             if ($website->source !== 'manual' && $website->ownership_status !== 'manual' && $website->http_status === null && $website->status !== 'verified' && $website->manual_category === null && $website->screenshot_path === null) {
                 $kind = WebsiteDiscovery::kind($s['source'], $s['port']);
                 $changed = false;
-                if ($kind !== 'tls_unknown' || ! in_array($website->source, ['tls_alpn', 'http_host', 'rdp_negotiation'], true)) {
+                $priority = ['tls_sni' => 0, 'tls_alpn' => 1, 'rdp_negotiation' => 2, 'http_host' => 3];
+                if (($priority[$s['source']] ?? 0) >= ($priority[$website->source] ?? 0)) {
                     $website->fill(['discovery_kind' => $kind, 'source' => $s['source']]);
                     $changed = $website->isDirty(['discovery_kind', 'source']);
                     if ($changed) {
@@ -65,7 +67,7 @@ class Analyzer
             }
         }
         $vpnRule = $this->rules->where('kind', 'vpn_protocol')->sortByDesc(fn ($rule) => $rule->node_id !== null)->first();
-        foreach ($p['vpn'] ?? [] as $observation) {
+        foreach ($vpnRule ? ($p['vpn'] ?? []) : [] as $observation) {
             $asset = $this->observe($observation['ip'], $node, $at);
             $stored = ProtocolObservation::create([
                 'batch_id' => $batch->id,
@@ -97,7 +99,7 @@ class Analyzer
             }
         }
         $proxyRule = $this->rules->where('kind', 'proxy_suspect')->sortByDesc(fn ($rule) => $rule->node_id !== null)->first();
-        foreach ($p['proxies'] ?? [] as $observation) {
+        foreach ($proxyRule ? ($p['proxies'] ?? []) : [] as $observation) {
             $asset = $this->observe($observation['ip'], $node, $at);
             $candidates = match ($observation['transport']) {
                 'opaque_tcp' => ['Shadowsocks (SS)', 'ShadowsocksR (SSR)', 'VMess'],
@@ -167,7 +169,7 @@ class Analyzer
 
     private function detect(Node $node, IpAsset $asset, Batch $batch): void
     {
-        $trafficRules = $this->rules->where('kind', '!=', 'capture_degraded')->whereNotIn('kind', AlertNotificationPolicy::RETIRED_RULES);
+        $trafficRules = $this->rules->whereNotIn('kind', ['capture_degraded', 'vpn_protocol', 'proxy_suspect', ...AlertNotificationPolicy::RETIRED_RULES]);
         if ($trafficRules->isEmpty()) {
             return;
         }

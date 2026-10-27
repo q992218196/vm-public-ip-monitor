@@ -288,6 +288,33 @@ if ($qualityRule['node_ids'] !== null || ! in_array($qualityRule['enabled'], [fa
 }
 echo "Capture quality rules enforce multi-node scope, validation and administrator permissions.\n";
 
+foreach (['vpn_protocol', 'proxy_suspect'] as $kind) {
+    $protocolData = ['name' => 'Scoped '.$kind, 'kind' => $kind, 'threshold' => 3, 'severity' => 'medium', 'enabled' => true, 'node_ids' => [$qualityNodes[1]]];
+    $protocolId = $ok($request('save', ['resource' => 'rules', 'data' => $protocolData], true, false, 'Monitor'))['id'];
+    $protocolRule = $ok($request('detail', ['resource' => 'rules', 'id' => $protocolId], false, true, 'Monitor'))['record'];
+    if ($protocolRule['node_ids'] !== [$qualityNodes[1]]) {
+        throw new RuntimeException('Protocol node scope was not saved');
+    }
+    $filtered = $ok($request('index', ['resource' => 'rules', 'node' => $qualityNodes[0]], false, false, 'Monitor'))['list'];
+    if (in_array($protocolId, array_column($filtered, 'id'))) {
+        throw new RuntimeException('Protocol node scope leaks into unrelated node filter');
+    }
+    $filtered = $ok($request('index', ['resource' => 'rules', 'node' => $qualityNodes[1]], false, false, 'Monitor'))['list'];
+    if (! in_array($protocolId, array_column($filtered, 'id'))) {
+        throw new RuntimeException('Protocol node filter misses selected node');
+    }
+    $protocolData['node_ids'] = ['00000000-0000-4000-8000-999999999999'];
+    if (($request('save', ['resource' => 'rules', 'id' => $protocolId, 'data' => $protocolData], true, false, 'Monitor')['code'] ?? null) === 1) {
+        throw new RuntimeException('Unknown protocol node accepted');
+    }
+    $ok($request('save', ['resource' => 'rules', 'id' => $protocolId, 'data' => ['enabled' => false, 'node_ids' => null]], true, false, 'Monitor'));
+    $protocolRule = $ok($request('detail', ['resource' => 'rules', 'id' => $protocolId], false, false, 'Monitor'))['record'];
+    if ($protocolRule['node_ids'] !== null || ! in_array($protocolRule['enabled'], [false, 'f', 0, '0'], true)) {
+        throw new RuntimeException('Protocol scope cannot restore all nodes or disable');
+    }
+}
+echo "Protocol rules support validated multi-node selection and node filtering.\n";
+
 // Notifications use only stored classifications and kinds; evidence remains accessible on demand.
 $notificationNode = $qualityNodes[0];
 $originalEventTotal = $ok($request('count'))['total'];
