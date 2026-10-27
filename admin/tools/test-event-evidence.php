@@ -191,7 +191,7 @@ if (($request('testOrigin', ['id' => $foreignId], true, true, 'Monitor')['code']
 $ok($request('testOrigin', ['id' => $foreignId], true, false, 'Monitor'));
 $site = $db->query('SELECT source,ownership_status FROM websites WHERE id='.$foreignId)->fetch(PDO::FETCH_ASSOC);
 $task = $db->query('SELECT status,mode FROM probe_tasks')->fetch(PDO::FETCH_ASSOC);
-if ($site['source'] !== 'http_host' || $site['ownership_status'] !== 'dns_mismatch' || $task['mode'] !== 'origin_test' || $task['status'] !== 'pending') {
+if ($site['source'] !== 'http_response' || $site['ownership_status'] !== 'dns_mismatch' || $task['mode'] !== 'origin_test' || $task['status'] !== 'pending') {
     throw new RuntimeException('Origin test silently registers ownership');
 }
 $db->exec("UPDATE probe_tasks SET status='leased',lease_token='old-origin-task',leased_until=now()+INTERVAL '3 minute'");
