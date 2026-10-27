@@ -90,6 +90,8 @@ docker compose -f compose.yml -f compose.buildadmin.yml --profile agent-build ru
 
 上面保留 3 个分析进程；其他部署可按原有数量调整 `--scale queue=3`。`schedule:clear-cache` 仅释放定时任务锁，不会清空 Redis 队列。
 
+主控接收接口更新增加独立控制进程池：普通上报和 PCAP 上传仍最多 5 个 PHP 进程，更新检查和抓包任务领取另有最多 2 个按需进程，继续共用 `app` 原有 **1 GiB** 内存上限。需要同时重建并替换 `app` 与 `web`，不能只把新的 Nginx 配置热加载到旧 `app`；旧容器没有新的内部 9001 监听端口。这项主控修复不需要发布新的 Agent 版本。
+
 如果已启用网站 worker，恢复它：
 
 ```sh
@@ -289,6 +291,7 @@ AI 报告优先回答本次抓包窗口该 IP 是否有对外攻击证据，分�
 | --- | --- |
 | 后台打不开／登录失败 | 域名、80/443、`https`、`buildadmin-web`、`buildadmin-app`、MySQL |
 | Agent HTTP 502 | `app`、`web`、`https`，查看 nginx 和 PHP 日志；不要删除节点缓存 |
+| 更新、抓包领取、上报同时超时 | 检查主控 PHP 进程池、数据库等待及 Redis；按下节同时更新 `app` 与 `web`，仅重启 Agent 不能解除主控堵塞 |
 | 抓包轮询 HTTP 503 | nginx 日志若有 `limiting connections by zone "monitor_capture"`，升级主控 `web`；旧配置把领取指令也算入全局 4 个上传名额，新配置只限制 PCAP 上传 |
 | Agent connection refused | 当时无法连接主控 443；检查 HTTPS 入口是否正在重建、是否运行以及网络连接，重启 Agent 不会修复主控入口 |
 | Agent HTTP 429 | 上报限流或主控积压，检查分析队列和数据库；批次会保留重试 |
@@ -309,21 +312,32 @@ curl -sS -o /dev/null -w 'Agent API: %{http_code}\n' 'https://vm-monitor.lcayun.
 
 无 Agent 令牌的最后一项正常应为 **401**。示例域名和自定义目录请替换。BuildAdmin 日志在 `buildadmin/runtime`；节点日志在宿主机的 `data_dir/logs/agent.log`。
 
-### 抓包轮询被限流时快速修复
+### 控制接口超时或抓包轮询被限流
 
-本次修复不需要更新节点、重新编译 Agent 或重建 HTTPS 入口。主控拉取代码后可以先平滑更新 Nginx 配置，保留一个回退副本：
+主控修复不需要更新节点、重新编译 Agent 或重建 HTTPS 入口。新的 Nginx 控制路由依赖 `app` 的独立 9001 进程池，必须一起更新；不要只复制配置到旧 `web`。在主控执行：
 
 ```sh
 cd /home/vm-monitor-src
 git pull --ff-only
 cd deploy
-docker compose -f compose.yml -f compose.buildadmin.yml exec -T web cp /etc/nginx/conf.d/default.conf /etc/nginx/conf.d/default.conf.before-capture-fix
-docker compose -f compose.yml -f compose.buildadmin.yml cp server/nginx.conf web:/etc/nginx/conf.d/default.conf
-docker compose -f compose.yml -f compose.buildadmin.yml exec -T web nginx -t
-docker compose -f compose.yml -f compose.buildadmin.yml exec -T web nginx -s reload
+docker compose -f compose.yml -f compose.buildadmin.yml build app web
+docker compose -f compose.yml -f compose.buildadmin.yml run --rm --no-deps app php-fpm -t
+docker compose -f compose.yml -f compose.buildadmin.yml run --rm --no-deps web nginx -t
+docker compose -f compose.yml -f compose.buildadmin.yml stop app queue scheduler ai-queue
+docker compose -f compose.yml -f compose.buildadmin.yml run --rm --no-deps app php artisan migrate --force
+docker compose -f compose.yml -f compose.buildadmin.yml run --rm --no-deps app php artisan schedule:clear-cache
+docker compose -f compose.yml -f compose.buildadmin.yml up -d --no-deps --force-recreate --scale queue=3 app web queue scheduler ai-queue
+curl -sS --max-time 15 -o /dev/null -w '更新接口 HTTP %{http_code}\n' 'https://vm-monitor.lcayun.cn/api/v1/agent/update?version=1.6.0'
+curl -sS --max-time 15 -o /dev/null -w '抓包领取 HTTP %{http_code}\n' 'https://vm-monitor.lcayun.cn/api/v1/agent/captures/claim'
 ```
 
-`nginx -t` 失败时不要执行 reload，使用容器内的 `.before-capture-fix` 副本恢复。随后按“升级主控”步骤重建 `app`、`web`、`queue`、`scheduler`，让修复在容器重建后也保留。空闲抓包轮询不再等待批次分析持有的节点锁，重复服务线索不再反复更新分类及探测任务。
+两项配置检查通过后才替换容器；无令牌访问应返回 **401**。普通批次和 PCAP 上传使用 9000 池，只有两个精确路径的 GET 使用 9001 池，认证和限流继续生效。PCAP 仍保留 120 秒 PHP 执行预算，普通池总请求上限 125 秒、Nginx 等待 130 秒；控制池请求上限 20 秒，Nginx 等待 25 秒。控制隔离能避免普通池排队拖住控制请求，数据库、Redis 或内存耗尽仍需单独排查。
+
+本次接收端按单条指标验证嵌套字段，保留数量上限、字段约束和统计一致性检查；已经持久化接收的同节点批次直接确认，不重复深层校验，也不覆盖健康数据。截图清理由每张图单独查库改为每批最多 200 个路径查询，并增加仅覆盖非空截图路径的索引。索引在 PostgreSQL 中并发创建，大表上首次迁移可能需要等待；不要因暂时没有输出就重复启动迁移。清理保留在用截图和最近 24 小时文件，与截图写入共用文件锁；查询失败会停止当前批清理。
+
+请求超过 5 秒时，PHP 尝试记录调用栈到 `storage/logs/php-fpm-www-slow.log` 或 `php-fpm-control-slow.log`；同时查看 `php-fpm.log` 中的进程数上限、终止和慢日志错误。容器若不允许抓取调用栈，以数据库等待、Nginx 错误和 FPM 日志为准，不必额外放开容器权限。
+
+节点日志出现 `started 1.6.0` 表示已经启动新版本。后台“当前版本”来自成功接收的上报；主控阻塞时，它可能仍显示旧版本或“等待节点领取”，不能据此反复下发或重启节点。修复后确认“最近上报”持续更新，再检查后台版本；保留节点本地缓存等待自动重试。
 
 ### 上报队列满时检查分析进度
 

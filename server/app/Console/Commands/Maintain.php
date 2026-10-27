@@ -10,6 +10,7 @@ use App\Models\ProtocolObservation;
 use App\Models\Website;
 use App\Services\Analyzer;
 use App\Services\ProbeQueue;
+use App\Services\Screenshots;
 use App\Services\WebsiteDiscovery;
 use Illuminate\Console\Command;
 use Illuminate\Database\Eloquent\Builder;
@@ -20,7 +21,7 @@ class Maintain extends Command
 
     protected $description = 'Retention, stale leases and offline detection';
 
-    public function handle(Analyzer $analyzer, ProbeQueue $queue): int
+    public function handle(Analyzer $analyzer, ProbeQueue $queue, Screenshots $screenshots): int
     {
         foreach (Node::where('enabled', true)->whereNotNull('last_seen_at')->where('last_seen_at', '<', now()->subMinutes(config('monitor.offline_minutes')))->get() as $node) {
             $analyzer->alert($node, null, 'node_offline', 'high', '节点上报中断', ['last_seen_at' => $node->last_seen_at], now(), 3600);
@@ -47,12 +48,7 @@ class Maintain extends Command
         // retries from creating a second copy after metric retention.
         Batch::whereNotNull('processed_at')->where('window_end', '<', now()->subDays(16))->delete();
         Alert::where('status', 'resolved')->where('last_seen_at', '<', now()->subDays(config('monitor.alerts_days')))->delete();
-        $root = storage_path('app/private/screenshots');
-        foreach (glob($root.'/*.png') ?: [] as $f) {
-            if (filemtime($f) < time() - 86400 && ! Website::where('screenshot_path', 'screenshots/'.basename($f))->exists()) {
-                unlink($f);
-            }
-        }
+        $screenshots->prune();
 
         return self::SUCCESS;
     }

@@ -343,6 +343,7 @@ class MonitorTest extends TestCase
         $payload['metrics'][0]['outbound_endpoints'] = [$endpoint];
         $this->upload($node, $payload)->assertOk();
         $this->assertSame('/api', Batch::firstOrFail()->payload['metrics'][0]['outbound_endpoints'][0]['http_path']);
+        $payload['batch_id'] = Str::uuid()->toString();
         $payload['metrics'][0]['outbound_endpoints'] = array_fill(0, 9, $endpoint);
         $this->upload($node, $payload)->assertUnprocessable();
     }

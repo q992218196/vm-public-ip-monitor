@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use App\Models\Batch;
 use App\Models\Node;
+use App\Support\IngestPayloadValidator;
 use App\Support\Ip;
 use Carbon\CarbonImmutable;
 use Illuminate\Http\Request;
@@ -18,96 +19,14 @@ class IngestController extends Controller
         abort_if($wireBytes > 8 * 1024 * 1024, 413);
         $node = $r->attributes->get('node');
         $identity = $r->validate(['batch_id' => 'required|string|regex:/^[a-zA-Z0-9-]{16,64}$/']);
-        if (! Batch::where('node_id', $node->id)->where('batch_id', $identity['batch_id'])->exists()) {
-            // Avoid expanding thousands of wildcard validation rules for requests
-            // that cannot fit. The transaction still checks normalized bytes.
-            $pending = Batch::where('node_id', $node->id)->whereNull('processed_at')->sum('payload_bytes');
-            abort_if($pending + $wireBytes > config('monitor.pending_bytes_per_node'), 429, '节点接收队列已达容量上限，请等待分析完成');
+        if (Batch::where('node_id', $node->id)->where('batch_id', $identity['batch_id'])->exists()) {
+            return response()->json(['accepted' => true, 'duplicate' => true]);
         }
-        $v = $r->validate([
-            'batch_id' => 'required|string|regex:/^[a-zA-Z0-9-]{16,64}$/',
-            'window_start' => 'required|date', 'window_end' => 'required|date',
-            'health' => 'required|array', 'health.version' => 'required|string|max:32',
-            'health.update_error' => 'sometimes|string|max:255',
-            'health.interfaces' => 'sometimes|array|max:8', 'health.interfaces.*' => 'string|max:64',
-            'health.*' => ['nullable'],
-            'metrics' => 'present|array|max:8192', 'sites' => 'present|array|max:4096', 'vpn' => 'sometimes|array|max:2048', 'proxies' => 'sometimes|array|max:256',
-            'proxies.*.ip' => 'required|ip', 'proxies.*.local_port' => 'required|integer|min:1|max:65535',
-            'proxies.*.transport' => 'required|in:opaque_tcp,opaque_udp,tls,quic',
-            'proxies.*.peer_count' => 'required|integer|min:3|max:4096', 'proxies.*.session_count' => 'required|integer|min:3|max:4096',
-            'proxies.*.bytes_from_peers' => 'required|integer|min:0|max:1000000000000000',
-            'proxies.*.bytes_to_peers' => 'required|integer|min:0|max:1000000000000000',
-            'proxies.*.peer_samples' => 'required|array|min:1|max:8', 'proxies.*.peer_samples.*' => 'ip',
-            'proxies.*.egress_target_count' => 'required|integer|min:5|max:256',
-            'proxies.*.egress_target_samples' => 'required|array|min:1|max:8', 'proxies.*.egress_target_samples.*' => 'ip',
-            'vpn.*.ip' => 'required|ip', 'vpn.*.peer_ip' => 'required|ip',
-            'vpn.*.local_port' => 'required|integer|min:1|max:65535', 'vpn.*.peer_port' => 'required|integer|min:1|max:65535',
-            'vpn.*.protocol' => 'required|in:wireguard,openvpn,ikev2', 'vpn.*.initiator' => 'required|in:vm,peer',
-            'vpn.*.request_count' => 'required|integer|min:1|max:1000000', 'vpn.*.response_count' => 'required|integer|min:1|max:1000000',
-            'vpn.*.request_length' => 'required|integer|min:8|max:65535', 'vpn.*.response_length' => 'required|integer|min:8|max:65535',
-            'vpn.*.request_header' => 'required|string|regex:/^[a-f0-9]{16}$/', 'vpn.*.response_header' => 'required|string|regex:/^[a-f0-9]{16}$/',
-            'metrics.*.ip' => 'required|ip', 'metrics.*.targets' => 'present|array|max:16', 'metrics.*.targets.*' => 'ip',
-            'metrics.*.ports' => 'sometimes|array|max:256', 'metrics.*.ports.*' => 'integer|min:1|max:65535',
-            'metrics.*.target_endpoints' => 'sometimes|array|max:32', 'metrics.*.target_endpoints.*' => 'string|max:64',
-            'metrics.*.port_samples_truncated' => 'sometimes|boolean', 'metrics.*.endpoint_samples_truncated' => 'sometimes|boolean',
-            'metrics.*.cardinality_capped' => 'required|boolean',
-            'metrics.*.service_target_stats_version' => 'sometimes|integer|in:1',
-            'metrics.*.service_targets' => 'sometimes|array|max:3',
-            'metrics.*.service_targets.*' => 'array:service,targets,targets_capped,attempts,ports',
-            'metrics.*.service_targets.*.service' => 'required|in:ssh,rdp,ftp',
-            'metrics.*.service_targets.*.targets' => 'required|array|min:1|max:128',
-            'metrics.*.service_targets.*.targets.*' => 'required|ip',
-            'metrics.*.service_targets.*.targets_capped' => 'required|boolean',
-            'metrics.*.service_targets.*.attempts' => 'required|integer|min:1|max:1000000000000000',
-            'metrics.*.service_targets.*.ports' => 'required|array|min:1|max:2',
-            'metrics.*.service_targets.*.ports.*' => 'required|integer|in:21,22,990,3389',
-            'metrics.*.udp_stats_version' => 'sometimes|integer|in:1',
-            'metrics.*.udp_filter_version' => 'sometimes|integer|in:1',
-            ...collect(['udp_non_dns_flows_out', 'udp_non_dns_packets_out'])->mapWithKeys(fn ($f) => ["metrics.*.$f" => 'required_with:metrics.*.udp_filter_version|integer|min:0|max:1000000000000000'])->all(),
-            'metrics.*.udp_non_dns_endpoints' => 'sometimes|array|max:8',
-            'metrics.*.udp_non_dns_endpoints.*' => 'array:peer_ip,peer_port,flows,packets_out,packets_in,bytes_out,bytes_in',
-            'metrics.*.udp_non_dns_endpoints.*.peer_ip' => 'required|ip',
-            'metrics.*.udp_non_dns_endpoints.*.peer_port' => 'required|integer|min:0|max:65535|not_in:53',
-            ...collect(['flows', 'packets_out', 'packets_in', 'bytes_out', 'bytes_in'])->mapWithKeys(fn ($f) => ["metrics.*.udp_non_dns_endpoints.*.$f" => 'required|integer|min:0|max:1000000000000000'])->all(),
-            'metrics.*.udp_flows_capped' => 'sometimes|boolean', 'metrics.*.udp_endpoints_truncated' => 'sometimes|boolean',
-            ...collect(['udp_flows_out', 'udp_packets_out', 'udp_packets_in', 'udp_bytes_out', 'udp_bytes_in'])->mapWithKeys(fn ($f) => ["metrics.*.$f" => 'required_with:metrics.*.udp_stats_version|integer|min:0|max:1000000000000000'])->all(),
-            'metrics.*.udp_endpoints' => 'sometimes|array|max:8',
-            'metrics.*.udp_endpoints.*' => 'array:peer_ip,peer_port,flows,packets_out,packets_in,bytes_out,bytes_in',
-            'metrics.*.udp_endpoints.*.peer_ip' => 'required|ip', 'metrics.*.udp_endpoints.*.peer_port' => 'required|integer|min:0|max:65535',
-            ...collect(['flows', 'packets_out', 'packets_in', 'bytes_out', 'bytes_in'])->mapWithKeys(fn ($f) => ["metrics.*.udp_endpoints.*.$f" => 'required|integer|min:0|max:1000000000000000'])->all(),
-            'metrics.*.synack_replies' => 'sometimes|integer|min:0|max:1000000000000000',
-            'metrics.*.connection_stats_version' => 'sometimes|integer|in:1',
-            ...collect(['completed_handshakes', 'rst_replies', 'mature_attempts', 'mature_no_reply'])->mapWithKeys(fn ($f) => ["metrics.*.$f" => 'sometimes|integer|min:0|max:1000000000000000'])->all(),
-            'metrics.*.port_scan_targets' => 'sometimes|array|max:8',
-            'metrics.*.port_scan_targets.*' => 'array:peer_ip,port_count,ports,truncated',
-            'metrics.*.port_scan_targets.*.peer_ip' => 'required|ip',
-            'metrics.*.port_scan_targets.*.port_count' => 'required|integer|min:1|max:256',
-            'metrics.*.port_scan_targets.*.ports' => 'required|array|max:128',
-            'metrics.*.port_scan_targets.*.ports.*' => 'integer|min:1|max:65535',
-            'metrics.*.port_scan_targets.*.truncated' => 'required|boolean',
-            'metrics.*.outbound_samples_truncated' => 'sometimes|boolean',
-            'metrics.*.outbound_endpoints' => 'sometimes|array|max:8',
-            'metrics.*.outbound_endpoints.*' => 'array:peer_ip,peer_port,attempts,synack_replies,payload_out,payload_in,scheme,host,http_method,http_path,query_keys,completed_handshakes,rst_replies,max_observed_span_ms',
-            ...collect(['completed_handshakes', 'rst_replies'])->mapWithKeys(fn ($f) => ["metrics.*.outbound_endpoints.*.$f" => 'sometimes|integer|min:0|max:1000000000000000'])->all(),
-            'metrics.*.outbound_endpoints.*.max_observed_span_ms' => 'sometimes|integer|min:0|max:60000',
-            'metrics.*.outbound_endpoints.*.peer_ip' => 'required|ip',
-            'metrics.*.outbound_endpoints.*.peer_port' => 'required|integer|min:1|max:65535',
-            'metrics.*.outbound_endpoints.*.attempts' => 'required|integer|min:0|max:1000000000000000',
-            'metrics.*.outbound_endpoints.*.synack_replies' => 'required|integer|min:0|max:1000000000000000',
-            'metrics.*.outbound_endpoints.*.payload_out' => 'required|integer|min:0|max:1000000000000000',
-            'metrics.*.outbound_endpoints.*.payload_in' => 'required|integer|min:0|max:1000000000000000',
-            'metrics.*.outbound_endpoints.*.scheme' => 'sometimes|in:http,https',
-            'metrics.*.outbound_endpoints.*.host' => 'sometimes|string|max:253',
-            'metrics.*.outbound_endpoints.*.http_method' => 'sometimes|in:GET,HEAD,POST,PUT,OPTIONS,DELETE,PATCH',
-            'metrics.*.outbound_endpoints.*.http_path' => 'sometimes|string|max:256',
-            'metrics.*.outbound_endpoints.*.query_keys' => 'sometimes|array|max:8',
-            'metrics.*.outbound_endpoints.*.query_keys.*' => 'string|max:32',
-            'sites.*.ip' => 'required|ip', 'sites.*.port' => 'required|integer|min:1|max:65535',
-            'sites.*.scheme' => 'required|in:http,https', 'sites.*.host' => ['present', 'nullable', 'string', 'max:253', 'regex:/^[a-zA-Z0-9.\-:\[\]]*$/'],
-            'sites.*.source' => 'required|in:http_host,http_response,tls_sni,tls_alpn,rdp_negotiation',
-            'sites.*.http_status' => 'sometimes|integer|min:100|max:599',
-            ...collect(['bytes_out', 'bytes_in', 'packets_out', 'packets_in', 'tcp_attempts', 'unique_targets', 'max_ports_per_target', 'max_attempts_per_target', 'auth_attempts'])->mapWithKeys(fn ($f) => ["metrics.*.$f" => 'required|integer|min:0|max:1000000000000000'])->all(),
-        ]);
+        // The durable acknowledgement already exists for duplicate batch IDs.
+        // New payloads still receive a transaction-protected capacity check below.
+        $pending = Batch::where('node_id', $node->id)->whereNull('processed_at')->sum('payload_bytes');
+        abort_if($pending + $wireBytes > config('monitor.pending_bytes_per_node'), 429, '节点接收队列已达容量上限，请等待分析完成');
+        $v = app(IngestPayloadValidator::class)->validate($r->all());
         $start = CarbonImmutable::parse($v['window_start']);
         $end = CarbonImmutable::parse($v['window_end']);
         if (! $end->isAfter($start)) {
@@ -229,18 +148,19 @@ class IngestController extends Controller
         $duplicate = DB::transaction(function () use ($node, $v, $start, $end) {
             $locked = Node::whereKey($node->id)->lockForUpdate()->firstOrFail();
             $exists = Batch::where('node_id', $node->id)->where('batch_id', $v['batch_id'])->exists();
-            if (! $exists) {
-                $bytes = strlen(json_encode($v));
-                $pending = Batch::where('node_id', $node->id)->whereNull('processed_at')->sum('payload_bytes');
-                abort_if($pending + $bytes > config('monitor.pending_bytes_per_node'), 429, '节点接收队列已达容量上限，请等待分析完成');
-                Batch::create(['node_id' => $node->id, 'batch_id' => $v['batch_id'], 'payload' => $v, 'payload_bytes' => $bytes, 'window_start' => $start, 'window_end' => $end]);
+            if ($exists) {
+                return true;
             }
+            $bytes = strlen(json_encode($v));
+            $pending = Batch::where('node_id', $node->id)->whereNull('processed_at')->sum('payload_bytes');
+            abort_if($pending + $bytes > config('monitor.pending_bytes_per_node'), 429, '节点接收队列已达容量上限，请等待分析完成');
+            Batch::create(['node_id' => $node->id, 'batch_id' => $v['batch_id'], 'payload' => $v, 'payload_bytes' => $bytes, 'window_start' => $start, 'window_end' => $end]);
             $locked->update(['last_seen_at' => now()]);
             if (! $locked->health_observed_at || $locked->health_observed_at->lte($end)) {
                 $locked->update(['health' => $v['health'], 'health_observed_at' => $end]);
             }
 
-            return $exists;
+            return false;
         });
 
         return response()->json(['accepted' => true, 'duplicate' => $duplicate]);
