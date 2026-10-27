@@ -411,8 +411,13 @@ func TestIncomingOnlyAndNonstandardPortReassembly(t *testing.T) {
 	}
 	outbound := frame("203.0.113.1", "1.1.1.1", 51000, 80, 1, 16, "GET / HTTP/1.1\r\nHost: visited.example\r\n\r\n")
 	e.Process(outbound, len(outbound), "a", now)
+	if len(e.Snapshot(now.Add(time.Second)).Sites) != 0 {
+		t.Fatal("a request is not HTTP server evidence")
+	}
+	response := httpDiscoveryFrame("203.0.113.1", "1.1.1.1", 18080, 50000, 2, uint32(1+len(first)+len(second)), 24, "HTTP/1.1 200 OK\r\n\r\n")
+	e.Process(response, len(response), "a", now.Add(2*time.Second))
 	b := e.Snapshot(now.Add(30 * time.Second))
-	if len(b.Sites) != 1 || b.Sites[0].Host != "example.com" || b.Sites[0].Port != 18080 {
+	if len(b.Sites) != 1 || b.Sites[0].Host != "example.com" || b.Sites[0].Port != 18080 || b.Sites[0].HTTPStatus != 200 || b.Sites[0].Source != "http_response" {
 		t.Fatalf("%+v", b.Sites)
 	}
 }

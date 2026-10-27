@@ -81,11 +81,12 @@ type PortTarget struct {
 	Truncated bool     `json:"truncated"`
 }
 type Site struct {
-	IP     string `json:"ip"`
-	Port   uint16 `json:"port"`
-	Scheme string `json:"scheme"`
-	Host   string `json:"host"`
-	Source string `json:"source"`
+	IP         string `json:"ip"`
+	Port       uint16 `json:"port"`
+	Scheme     string `json:"scheme"`
+	Host       string `json:"host"`
+	Source     string `json:"source"`
+	HTTPStatus int    `json:"http_status,omitempty"`
 }
 type VPNObservation struct {
 	IP             string `json:"ip"`

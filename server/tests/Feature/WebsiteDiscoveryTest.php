@@ -35,12 +35,12 @@ class WebsiteDiscoveryTest extends TestCase
 
     private function hint(string $source = 'tls_sni', int $port = 3389, string $host = ''): array
     {
-        return ['ip' => '203.0.113.10', 'port' => $port, 'scheme' => $source === 'http_host' ? 'http' : 'https', 'host' => $host, 'source' => $source];
+        return ['ip' => '203.0.113.10', 'port' => $port, 'scheme' => in_array($source, ['http_host', 'http_response'], true) ? 'http' : 'https', 'host' => $host, 'source' => $source] + ($source === 'http_response' ? ['http_status' => 200] : []);
     }
 
     public function test_pure_tls_and_rdp_clues_are_preserved_without_automatic_work(): void
     {
-        $this->upload([$this->hint(), $this->hint('rdp_negotiation', 13389), $this->hint('tls_alpn', 23389), $this->hint('http_host', 3389)]);
+        $this->upload([$this->hint(), $this->hint('rdp_negotiation', 13389), $this->hint('tls_alpn', 23389), $this->hint('http_response', 3389), $this->hint('http_host', 22)]);
         $this->assertSame('tls_unknown', Website::where('source', 'tls_sni')->firstOrFail()->discovery_kind);
         $this->assertSame('rdp', Website::where('source', 'rdp_negotiation')->firstOrFail()->discovery_kind);
         $this->artisan('monitor:maintain')->assertSuccessful();
@@ -92,7 +92,7 @@ class WebsiteDiscoveryTest extends TestCase
     public function test_failed_probe_cools_down_for_a_day_but_manual_retry_is_immediate(): void
     {
         $this->freezeTime();
-        $this->upload([$this->hint('http_host')]);
+        $this->upload([$this->hint('http_response')]);
         $site = Website::firstOrFail();
         $task = app(ProbeQueue::class)->enqueue($site, false);
         $task->update(['status' => 'failed']);
@@ -106,7 +106,7 @@ class WebsiteDiscoveryTest extends TestCase
     public function test_http_candidates_restore_skipped_task_and_manual_work_is_claimed_first(): void
     {
         config(['monitor.worker_token' => $this->token]);
-        $this->upload([$this->hint('http_host'), $this->hint('http_host', 13389)]);
+        $this->upload([$this->hint('http_response'), $this->hint('http_response', 13389)]);
         $auto = app(ProbeQueue::class)->enqueue(Website::where('port', 3389)->firstOrFail(), false);
         $auto->update(['status' => 'skipped']);
         $this->artisan('monitor:maintain')->assertSuccessful();
@@ -161,17 +161,84 @@ class WebsiteDiscoveryTest extends TestCase
         }
     }
 
+    public function test_request_only_upgrade_cancels_automatic_work_and_preserves_confirmed_sites(): void
+    {
+        $this->upload([$this->hint('tls_sni', 443)]);
+        $template = Website::firstOrFail();
+        $sites = [];
+        foreach ([22, 8022, 2222, 10022] as $port) {
+            $site = $template->replicate();
+            $site->fill(['fingerprint' => hash('sha256', 'request-'.$port), 'port' => $port, 'scheme' => 'http', 'source' => 'http_host', 'discovery_kind' => 'web_candidate']);
+            if ($port === 2222) {
+                $site->fill(['http_status' => 200, 'status' => 'verified']);
+            }
+            if ($port === 10022) {
+                $site->ownership_status = 'manual';
+            }
+            $site->save();
+            ProbeTask::create(['website_id' => $site->id, 'status' => 'pending', 'available_at' => now(), 'request_source' => $port === 8022 ? 'manual' : 'auto']);
+            $sites[$port] = $site;
+        }
+        $this->assertNull(app(ProbeQueue::class)->enqueue($sites[22], false));
+        $migration = require database_path('migrations/2026_10_27_115705_require_paired_http_responses_for_site_discovery.php');
+        $migration->up();
+        $migration->up();
+        foreach ([22, 8022] as $port) {
+            $this->assertSame('http_request', $sites[$port]->fresh()->discovery_kind);
+        }
+        $this->assertSame('skipped', $sites[22]->task->status);
+        $this->assertSame('pending', $sites[8022]->task->status);
+        foreach ([2222, 10022] as $port) {
+            $this->assertSame('web_candidate', $sites[$port]->fresh()->discovery_kind);
+            $this->assertSame('pending', $sites[$port]->task->status);
+        }
+        $this->assertDatabaseCount('websites', 5);
+    }
+
+    public function test_request_only_upgrade_retries_tasks_left_after_classification_was_committed(): void
+    {
+        $this->upload([$this->hint('tls_sni', 443)]);
+        $template = Website::firstOrFail();
+        $tasks = [];
+        $cases = [
+            ['source' => 'auto', 'mode' => 'normal', 'status' => 'pending', 'expected' => 'skipped'],
+            ['source' => 'legacy', 'mode' => 'normal', 'status' => 'pending', 'expected' => 'skipped'],
+            ['source' => 'manual', 'mode' => 'normal', 'status' => 'pending', 'expected' => 'pending'],
+            ['source' => 'auto', 'mode' => 'origin_test', 'status' => 'pending', 'expected' => 'pending'],
+            ['source' => 'auto', 'mode' => 'normal', 'status' => 'leased', 'expected' => 'leased'],
+        ];
+        foreach ($cases as $index => $case) {
+            $site = $template->replicate();
+            $site->fill(['fingerprint' => hash('sha256', 'interrupted-request-'.$index), 'port' => 20022 + $index,
+                'scheme' => 'http', 'source' => 'http_host', 'discovery_kind' => 'http_request']);
+            $site->save();
+            $tasks[] = ProbeTask::create(['website_id' => $site->id, 'status' => $case['status'], 'mode' => $case['mode'],
+                'available_at' => now(), 'request_source' => $case['source'], 'lease_token' => str_repeat('a', 64), 'leased_until' => now()->addMinute()]);
+        }
+        $migration = require database_path('migrations/2026_10_27_115705_require_paired_http_responses_for_site_discovery.php');
+        $migration->up();
+        $migration->up();
+        foreach ($tasks as $index => $task) {
+            $task->refresh();
+            $this->assertSame($cases[$index]['expected'], $task->status);
+            $this->assertSame($cases[$index]['mode'], $task->mode);
+            $this->assertSame($cases[$index]['expected'] === 'skipped' ? null : str_repeat('a', 64), $task->lease_token);
+        }
+        $this->assertDatabaseCount('websites', 6);
+        $this->assertDatabaseCount('probe_tasks', 5);
+    }
+
     public function test_repeated_site_sightings_coalesce_timestamp_writes(): void
     {
         $this->freezeTime();
-        $this->upload([$this->hint('http_host', 8080)]);
+        $this->upload([$this->hint('http_response', 8080)]);
         $site = Website::firstOrFail();
         $first = $site->last_seen_at->toIso8601String();
         $this->travel(30)->seconds();
-        $this->upload([$this->hint('http_host', 8080)]);
+        $this->upload([$this->hint('http_response', 8080)]);
         $this->assertSame($first, $site->fresh()->last_seen_at->toIso8601String());
         $this->travel(5)->minutes();
-        $this->upload([$this->hint('http_host', 8080)]);
+        $this->upload([$this->hint('http_response', 8080)]);
         $this->assertNotSame($first, $site->fresh()->last_seen_at->toIso8601String());
     }
 

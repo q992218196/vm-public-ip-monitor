@@ -5,7 +5,7 @@
                 <h2>{{ definition.title }}</h2>
                 <p v-if="resource === 'alerts'">仅显示疑似异常、强异常及节点运行异常；一般流量活动在流量窗口查看。</p>
                 <p v-else-if="resource === 'rules'">UDP 包数／流数量仅用于流量统计，不作为异常告警。时间按浏览器本地时区显示。</p>
-                <p v-else-if="resource === 'websites'">仅 HTTP 证据、已验证或人工确认的网站进入自动验证；纯 TLS 握手在服务线索中查看，可手动验证。</p>
+                <p v-else-if="resource === 'websites'">服务端返回 HTTP 响应后才进入自动验证；仅有请求或 TLS 握手保留为服务线索，不自动验证。</p>
                 <p v-else-if="resource === 'protocols'">在检测规则中配置“VPN 双向握手”和“疑似加密代理”的启用范围；未启用节点不新增对应记录或告警。</p>
                 <p v-else>监控数据按需读取，证据在打开单条详情时加载；时间按浏览器本地时区显示。</p>
             </div>
@@ -56,9 +56,9 @@
                 </el-select>
                 <el-select v-if="resource === 'websites'" v-model="filters.ownership" @change="resetAndLoad">
                     <el-option label="网站资产" value="assets" />
-                    <el-option label="归属待核实线索" value="candidates" />
+                    <el-option label="待验证／归属待核实线索" value="candidates" />
                     <el-option label="解析不匹配线索" value="foreign" />
-                    <el-option label="RDP／未知 TLS 服务线索" value="services" />
+                    <el-option label="请求／RDP／TLS 服务线索" value="services" />
                     <el-option label="全部资产和原始线索" value="all" />
                 </el-select>
                 <el-select v-if="resource === 'websites'" v-model="filters.review" placeholder="全部分类" clearable @change="resetAndLoad">
@@ -101,24 +101,24 @@
                             :class="resource === 'alerts' ? 'monitor-clickable' : ''"
                             @click="filterAlert(column.key, scope.row)"
                             >{{
-                                resource === 'websites' &&
-                                column.key === 'status' &&
-                                ['rdp', 'tls_unknown'].includes(scope.row.discovery_kind) &&
-                                scope.row.status === 'observed'
-                                    ? '仅观察服务'
-                                    : display(scope.row[column.key])
+                                resource === 'websites' && column.key === 'status' ? websiteStatusLabel(scope.row) : display(scope.row[column.key])
                             }}</el-tag
                         >
                         <el-tag v-else-if="column.key === 'enabled'" :type="enabledState(scope.row.enabled) ? 'success' : 'info'">{{
                             enabledState(scope.row.enabled) ? '启用' : '停用'
                         }}</el-tag>
                         <span v-else-if="column.key === 'node_scope'">{{ ruleNodeScope(scope.row) }}</span>
+                        <span v-else-if="resource === 'websites' && column.key === 'discovery_kind'">{{ websiteDiscoveryLabel(scope.row) }}</span>
                         <span
                             v-else-if="
-                                resource === 'websites' && column.key === 'scheme' && ['rdp', 'tls_unknown'].includes(scope.row.discovery_kind)
+                                resource === 'websites' &&
+                                column.key === 'ownership_status' &&
+                                scope.row.ownership_status === 'ip_only' &&
+                                isHttpRequestOnly(scope.row)
                             "
-                            >TLS</span
+                            >未提供域名（仅请求）</span
                         >
+                        <span v-else-if="resource === 'websites' && column.key === 'scheme'">{{ websiteProtocolLabel(scope.row) }}</span>
                         <span v-else-if="resource === 'rules' && column.key === 'threshold' && isServiceTargetRule(scope.row.kind)"
                             >{{ scope.row.threshold }} 个目标 IP</span
                         >
@@ -134,7 +134,7 @@
                                 column.key === 'host' &&
                                 resource === 'websites' &&
                                 scope.row.host &&
-                                !['rdp', 'tls_unknown'].includes(scope.row.discovery_kind)
+                                !['rdp', 'tls_unknown', 'http_request'].includes(scope.row.discovery_kind)
                             "
                             :href="websiteUrl(scope.row)"
                             target="_blank"
@@ -837,7 +837,8 @@ function display(value: any): string {
         leased: '执行中',
         complete: '完成',
         skipped: '已跳过自动探测',
-        web_candidate: '网页候选／已验证',
+        web_candidate: '网页候选（待验证）',
+        http_request: '仅 HTTP 请求（不自动验证）',
         tls_unknown: '未知 TLS（不自动探测）',
         rdp: 'RDP 协商线索',
         dns_match: '解析匹配（非部署证明）',
@@ -856,6 +857,50 @@ function display(value: any): string {
     }
     if (labels[String(value)]) return labels[String(value)]
     return String(value)
+}
+function hasHttpResponse(row: any): boolean {
+    const status = Number(row.http_status)
+    return Number.isInteger(status) && status >= 100 && status <= 599
+}
+function hasObservedHttpResponse(row: any): boolean {
+    const status = Number(row.observed_http_status)
+    return Number.isInteger(status) && status >= 100 && status <= 599
+}
+function hasManualWebsiteEvidence(row: any): boolean {
+    return row.source === 'manual' || row.ownership_status === 'manual' || Boolean(row.manual_category)
+}
+function hasKnownWebsiteEvidence(row: any): boolean {
+    return (
+        hasHttpResponse(row) ||
+        hasObservedHttpResponse(row) ||
+        row.status === 'verified' ||
+        hasManualWebsiteEvidence(row) ||
+        Boolean(row.screenshot_path)
+    )
+}
+function isHttpRequestOnly(row: any): boolean {
+    return (row.source === 'http_host' || row.discovery_kind === 'http_request') && !hasKnownWebsiteEvidence(row)
+}
+function websiteDiscoveryLabel(row: any): string {
+    if (hasHttpResponse(row)) return '已获 HTTP 响应'
+    if (row.status === 'verified') return '已验证（历史记录）'
+    if (hasManualWebsiteEvidence(row)) return '人工登记／确认'
+    if (row.screenshot_path) return '历史网页证据（待复验）'
+    if (hasObservedHttpResponse(row)) return 'HTTP 响应线索（待验证）'
+    if (isHttpRequestOnly(row)) return '仅 HTTP 请求（不自动验证）'
+    return display(row.discovery_kind)
+}
+function websiteStatusLabel(row: any): string {
+    if (row.status === 'observed') {
+        if (isHttpRequestOnly(row)) return '仅请求线索'
+        if (['rdp', 'tls_unknown'].includes(row.discovery_kind) && !hasKnownWebsiteEvidence(row)) return '仅观察服务'
+    }
+    return display(row.status)
+}
+function websiteProtocolLabel(row: any): string {
+    if (isHttpRequestOnly(row)) return 'HTTP 请求（非服务证明）'
+    if (['rdp', 'tls_unknown'].includes(row.discovery_kind) && !hasKnownWebsiteEvidence(row)) return 'TLS'
+    return display(row.scheme)
 }
 function enabledState(value: unknown): boolean {
     return [true, 1, '1', 't', 'true'].includes(value as string | number | boolean)

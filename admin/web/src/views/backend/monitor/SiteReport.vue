@@ -1,7 +1,7 @@
 <template>
     <section class="site-report">
         <el-alert
-            v-if="['rdp', 'tls_unknown'].includes(record.discovery_kind)"
+            v-if="isServiceClue"
             type="info"
             :closable="false"
             :title="
@@ -10,11 +10,36 @@
                     : '仅有 TLS 线索，尚无 HTTP 网页证据；不自动探测，需要时可手动验证。'
             "
         />
+        <el-alert
+            v-if="hasObservedHttpResponse && !hasHttpResponse && record.status !== 'verified'"
+            type="info"
+            :closable="false"
+            title="已配对观察到服务端明文 HTTP 响应，尚未完成主动网页验证；这不代表网站内容或用途已确认，普通 HTTPS 正文无法旁路解密。"
+        />
+        <el-alert
+            v-if="isHttpRequestOnly"
+            type="info"
+            :closable="false"
+            title="仅见客户端 HTTP 请求，未确认服务端返回 HTTP 响应；也可能是对 SSH 等服务的探测，不证明此端口提供 HTTP。"
+        />
         <header>
             <h3>站点监控分析</h3>
             <el-tag :type="report.review_required ? 'warning' : 'info'">{{ report.review_required ? '中风险 · 待人工复核' : '风险未确定' }}</el-tag>
         </header>
-        <el-alert v-if="record.status !== 'verified'" type="warning" :closable="false" title="最近一次未验证成功；已有分析及截图可能来自历史验证。" />
+        <el-alert
+            v-if="record.status !== 'verified'"
+            type="warning"
+            :closable="false"
+            :title="
+                isHttpRequestOnly
+                    ? record.last_probed_at
+                        ? '最近一次验证尚未确认有效 HTTP 响应，不能据此确认网站。'
+                        : '仅请求线索不进入自动验证；需要时可手动验证。'
+                    : hasObservedHttpResponse && !record.last_probed_at
+                      ? '已观察响应，尚未完成主动网页验证。'
+                      : '最近一次未验证成功；已有分析及截图可能来自历史验证。'
+            "
+        />
         <el-alert
             v-if="!['manual', 'dns_match', 'ip_only'].includes(record.ownership_status)"
             type="warning"
@@ -52,9 +77,10 @@
             >
             <el-descriptions-item label="公网 IP">{{ record.ip || '—' }}</el-descriptions-item>
             <el-descriptions-item label="域名／端口"
-                >{{ record.host || 'IP 直连' }} : {{ record.port }} /
-                {{ ['rdp', 'tls_unknown'].includes(record.discovery_kind) ? 'TLS 服务线索' : record.scheme }}</el-descriptions-item
+                >{{ record.host || (isHttpRequestOnly ? '未提供域名' : 'IP 直连') }} : {{ record.port }} /
+                {{ isHttpRequestOnly ? 'HTTP 请求（非服务证明）' : isServiceClue ? 'TLS 服务线索' : record.scheme }}</el-descriptions-item
             >
+            <el-descriptions-item label="证据阶段">{{ discoveryLabel }}</el-descriptions-item>
             <el-descriptions-item label="识别来源">{{
                 record.source === 'tls_alpn'
                     ? '客户端声明支持 HTTP；尚需验证响应'
@@ -62,14 +88,25 @@
                       ? 'RDP 协商请求（不代表认证成功）'
                       : record.source === 'tls_sni'
                         ? 'TLS 握手；SNI 本身不能证明网站'
-                        : record.source
+                        : record.source === 'http_host'
+                          ? '客户端 HTTP 请求头（不代表服务端响应）'
+                          : record.source === 'http_response'
+                            ? '配对观察的服务端明文 HTTP 响应'
+                            : record.source === 'manual'
+                              ? '人工登记'
+                              : record.source === 'active_candidate'
+                                ? '人工指定探测'
+                                : record.source
             }}</el-descriptions-item>
             <el-descriptions-item label="站点标题">{{ record.title || '—' }}</el-descriptions-item>
             <el-descriptions-item label="网站描述">{{ record.description || '未提供' }}</el-descriptions-item>
             <el-descriptions-item label="业务类型">{{ report.business_type || record.category || '未分类' }}</el-descriptions-item>
             <el-descriptions-item label="性质">{{ report.nature || '待人工核实' }}</el-descriptions-item>
             <el-descriptions-item label="人工分类">{{ record.manual_category || '未填写' }}</el-descriptions-item>
-            <el-descriptions-item label="HTTP 状态">{{ record.http_status || '—' }}</el-descriptions-item>
+            <el-descriptions-item label="被动观察 HTTP 响应">{{
+                hasObservedHttpResponse ? record.observed_http_status : '未观察／未保存'
+            }}</el-descriptions-item>
+            <el-descriptions-item label="主动验证 HTTP 状态">{{ hasHttpResponse ? record.http_status : '尚未取得有效响应' }}</el-descriptions-item>
             <el-descriptions-item label="观察时间">{{ observedAt }}</el-descriptions-item>
         </el-descriptions>
         <h4>分析说明</h4>
@@ -95,19 +132,52 @@
 import { computed } from 'vue'
 const props = defineProps<{ record: Record<string, any> }>()
 const report = computed(() => props.record.classification || {})
-const ownershipLabel = computed(
+const hasHttpResponse = computed(() => {
+    const status = Number(props.record.http_status)
+    return Number.isInteger(status) && status >= 100 && status <= 599
+})
+const hasObservedHttpResponse = computed(() => {
+    const status = Number(props.record.observed_http_status)
+    return Number.isInteger(status) && status >= 100 && status <= 599
+})
+const hasManualEvidence = computed(
+    () => props.record.source === 'manual' || props.record.ownership_status === 'manual' || Boolean(props.record.manual_category)
+)
+const hasWebEvidence = computed(
     () =>
-        (
-            ({
-                manual: '人工登记',
-                dns_match: '解析匹配',
-                ip_only: 'IP 直连',
-                dns_mismatch: '解析不匹配',
-                dns_unknown: 'DNS 暂不可确认',
-                unverified: '归属待验证',
-                origin_response: '指定 IP 响应，归属待核实',
-            }) as Record<string, string>
-        )[props.record.ownership_status] || '归属待验证'
+        hasHttpResponse.value ||
+        hasObservedHttpResponse.value ||
+        props.record.status === 'verified' ||
+        hasManualEvidence.value ||
+        Boolean(props.record.screenshot_path)
+)
+const isHttpRequestOnly = computed(
+    () => (props.record.source === 'http_host' || props.record.discovery_kind === 'http_request') && !hasWebEvidence.value
+)
+const isServiceClue = computed(() => ['rdp', 'tls_unknown'].includes(props.record.discovery_kind) && !hasWebEvidence.value)
+const discoveryLabel = computed(() => {
+    if (hasHttpResponse.value) return '已获 HTTP 响应'
+    if (props.record.status === 'verified') return '已验证（历史记录）'
+    if (hasManualEvidence.value) return '人工登记／确认'
+    if (props.record.screenshot_path) return '历史网页证据（待复验）'
+    if (hasObservedHttpResponse.value) return 'HTTP 响应线索（待验证）'
+    if (isHttpRequestOnly.value) return '仅 HTTP 请求（不自动验证）'
+    return isServiceClue.value ? '仅服务线索' : '网页候选（待验证）'
+})
+const ownershipLabel = computed(() =>
+    props.record.ownership_status === 'ip_only' && isHttpRequestOnly.value
+        ? '未提供域名（仅请求）'
+        : (
+              {
+                  manual: '人工登记',
+                  dns_match: '解析匹配',
+                  ip_only: 'IP 直连',
+                  dns_mismatch: '解析不匹配',
+                  dns_unknown: 'DNS 暂不可确认',
+                  unverified: '归属待验证',
+                  origin_response: '指定 IP 响应，归属待核实',
+              } as Record<string, string>
+          )[props.record.ownership_status] || '归属待验证'
 )
 const observedAt = computed(() => {
     const value = report.value.observed_at

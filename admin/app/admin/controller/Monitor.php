@@ -20,7 +20,7 @@ class Monitor extends Backend
     private const TABLES = [
         'nodes' => ['name', 'id', 'enabled', 'cidrs', 'last_seen_at', 'health', 'health_observed_at', 'agent_desired_version', 'agent_update_requested_at'],
         'ips' => ['ip', 'id', 'version', 'label', 'first_seen_at', 'last_seen_at'],
-        'websites' => ['id', 'ip_asset_id', 'host', 'port', 'scheme', 'discovery_kind', 'status', 'ownership_status', 'title', 'description', 'category', 'manual_category', 'last_probed_at', 'last_seen_at'],
+        'websites' => ['id', 'ip_asset_id', 'host', 'port', 'scheme', 'source', 'http_status', 'observed_http_status', 'observed_http_at', 'screenshot_path', 'discovery_kind', 'status', 'ownership_status', 'title', 'description', 'category', 'manual_category', 'last_probed_at', 'last_seen_at'],
         'alerts' => ['id', 'node_id', 'ip_asset_id', 'title', 'kind', 'severity', 'status', 'occurrences', 'last_seen_at'],
         'rules' => ['id', 'name', 'kind', 'threshold', 'window_seconds', 'cooldown_seconds', 'severity', 'node_id', 'node_ids', 'enabled'],
         'exclusions' => ['id', 'cidr', 'kind', 'reason', 'node_id', 'expires_at'],
@@ -93,7 +93,7 @@ class Monitor extends Backend
         $this->success('', [
             'nodes' => $db->table('nodes')->where('enabled', true)->where('last_seen_at', '>', gmdate('Y-m-d H:i:s', time() - 300))->count(),
             'ips' => $db->table('ip_assets')->count(),
-            'websites' => $db->table('websites')->where('discovery_kind', 'web_candidate')->whereIn('ownership_status', ['dns_match', 'manual', 'ip_only'])->count(),
+            'websites' => $db->table('websites')->alias('w')->where('w.discovery_kind', 'web_candidate')->whereIn('w.ownership_status', ['dns_match', 'manual', 'ip_only'])->whereRaw($this->websiteProofSql('w'))->count(),
             'alerts' => $events->count(),
             'batches' => $db->table('batches')->whereNull('processed_at')->count(),
         ]);
@@ -227,19 +227,31 @@ class Monitor extends Backend
         if ($resource === 'websites') {
             $ownership = (string) $this->request->get('ownership', 'assets');
             if ($ownership === 'services') {
-                $query->whereIn('m.discovery_kind', ['tls_unknown', 'rdp']);
+                $query->whereIn('m.discovery_kind', ['tls_unknown', 'rdp', 'http_request']);
             } elseif ($ownership !== 'all') {
                 $query->where('m.discovery_kind', 'web_candidate');
             }
             $states = match ($ownership) {
                 'assets' => ['dns_match', 'manual', 'ip_only'],
-                'candidates' => ['unverified', 'dns_unknown', 'origin_response'],
+                'candidates' => null,
                 'foreign' => ['dns_mismatch'],
                 'all', 'services' => null,
                 default => ['dns_match', 'manual', 'ip_only'],
             };
             if ($states !== null) {
                 $query->whereIn('m.ownership_status', $states);
+            }
+            if ($ownership === 'candidates') {
+                $query->whereRaw($this->websiteAdmissionSql('m'));
+                $query->where(function ($candidates): void {
+                    $candidates->whereIn('m.ownership_status', ['unverified', 'dns_unknown', 'origin_response'])
+                        ->whereOr(function ($requests): void {
+                            $requests->whereIn('m.ownership_status', ['dns_match', 'manual', 'ip_only'])
+                                ->whereRaw('NOT '.$this->websiteProofSql('m'));
+                        });
+                });
+            } elseif (! in_array($ownership, ['foreign', 'all', 'services'], true)) {
+                $query->whereRaw($this->websiteProofSql('m'));
             }
         }
         if ($resource === 'websites' && $review === '1') {
@@ -259,6 +271,22 @@ class Monitor extends Backend
     protected function decode($value)
     {
         return is_string($value) ? (json_decode($value, true) ?: []) : $value;
+    }
+
+    private function websiteProofSql(string $alias): string
+    {
+        return '(COALESCE('.$alias.'.http_status,0) BETWEEN 100 AND 599'
+            .' OR COALESCE('.$alias.".status,'')='verified'"
+            .' OR COALESCE('.$alias.".source,'')='manual'"
+            .' OR COALESCE('.$alias.".ownership_status,'')='manual'"
+            .' OR '.$alias.'.manual_category IS NOT NULL OR '.$alias.'.screenshot_path IS NOT NULL)';
+    }
+
+    private function websiteAdmissionSql(string $alias): string
+    {
+        return '('.$this->websiteProofSql($alias)
+            .' OR ('.$alias.".source='http_response' AND COALESCE(".$alias.'.observed_http_status,0) BETWEEN 100 AND 599)'
+            .' OR COALESCE('.$alias.".source,'')='active_candidate')";
     }
 
     public function detail(): void

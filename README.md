@@ -9,7 +9,7 @@
 - IPv4／IPv6 CIDR 过滤，同一 CIDR 可配置到多个节点。
 - 公网 IP 独立资产，保留多个观察节点；不推断 VM 身份，不把多节点流量直接相加。
 - Linux AF_PACKET 被动采集，支持 Ethernet、双层 VLAN、IPv4、IPv6 基础扩展头、TCP／UDP 统计。
-- 非标准端口 HTTP Host、TLS ClientHello SNI 线索与有界 TCP 顺序重组。
+- 非标准端口 HTTP 请求／响应配对发现、TLS ClientHello SNI 服务线索与有界 TCP 顺序重组；仅请求或 TLS 握手不进入自动网站验证。
 - 横向扫描、端口扫描、认证服务重复连接、单目标高频连接、TCP 连接突增及出站 Mbps 阈值告警。
 - UDP 出站五元组数量与包速率提醒（Agent 1.1.0），独立双向包量、字节和目标端口证据，不把 UDP 包数当作连接成功或攻击。
 - WireGuard、部分 OpenVPN UDP 和 IKEv2 双向握手结构识别，保留独立窗口证据；不把加密流量特征误报为具体翻墙协议。

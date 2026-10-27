@@ -162,7 +162,7 @@ if (($request('whitelist', ['id' => 100], true)['code'] ?? null) === 1 || $db->q
 }
 echo "Event list/count/detail, local PCAP summary, manual AI, encrypted secrets, duplicate prevention and read-only permissions passed.\n";
 
-$db->exec('CREATE TABLE websites (id bigserial primary key,ip_asset_id bigint,host text,port integer,scheme text,discovery_kind text default \'web_candidate\',status text,ownership_status text,title text,description text,category text,manual_category text,last_probed_at timestamp,last_seen_at timestamp,source text default \'http_host\',ownership_evidence jsonb,updated_at timestamp)');
+$db->exec('CREATE TABLE websites (id bigserial primary key,ip_asset_id bigint,host text,port integer,scheme text,discovery_kind text default \'web_candidate\',status text,ownership_status text,title text,description text,category text,manual_category text,last_probed_at timestamp,last_seen_at timestamp,source text default \'http_response\',http_status integer,observed_http_status integer default 200,observed_http_at timestamp,screenshot_path text,ownership_evidence jsonb,updated_at timestamp)');
 $db->exec("INSERT INTO websites(ip_asset_id,host,port,scheme,status,ownership_status,last_seen_at) VALUES(1,'owned.example',443,'https','verified','dns_match',now()),(1,'foreign.example',80,'http','failed','dns_mismatch',now()),(1,'unknown.example',80,'http','observed','unverified',now()),(1,'tested.example',443,'https','verified','origin_response',now())");
 foreach (['assets' => 1, 'foreign' => 1, 'candidates' => 2, 'all' => 4] as $ownership => $count) {
     $query = ['resource' => 'websites', 'ownership' => $ownership];
@@ -372,6 +372,31 @@ foreach ([false, true] as $viewer) {
     }
 }
 $db->exec('CREATE TABLE batches (id bigserial primary key,processed_at timestamp)');
+$websiteCountBefore = $ok($request('overview', [], false, false, 'Monitor'))['websites'];
+$db->exec("INSERT INTO websites(ip_asset_id,host,port,scheme,status,ownership_status,source,discovery_kind,observed_http_status,last_seen_at) VALUES(1,'request-only.example',22,'http','observed','ip_only','http_host','http_request',NULL,now()),(1,'response-on-22.example',22,'http','observed','ip_only','http_response','web_candidate',403,now())");
+if ($ok($request('overview', [], false, false, 'Monitor'))['websites'] !== $websiteCountBefore) {
+    throw new RuntimeException('Request-only or unverified passive response is counted as a confirmed website');
+}
+$newAssets = $ok($request('index', ['resource' => 'websites'], false, false, 'Monitor'))['list'];
+if (array_intersect(['request-only.example', 'response-on-22.example'], array_column($newAssets, 'host'))) {
+    throw new RuntimeException('Unverified HTTP evidence pollutes confirmed asset list');
+}
+$newCandidates = $ok($request('index', ['resource' => 'websites', 'ownership' => 'candidates'], false, false, 'Monitor'))['list'];
+if (! in_array('response-on-22.example', array_column($newCandidates, 'host'), true) || in_array('request-only.example', array_column($newCandidates, 'host'), true)) {
+    throw new RuntimeException('Pending verification must require a server response, while preserving nonstandard port 22');
+}
+$services = $ok($request('index', ['resource' => 'websites', 'ownership' => 'services'], false, true, 'Monitor'))['list'];
+if (! in_array('request-only.example', array_column($services, 'host'), true)) {
+    throw new RuntimeException('Historical request-only evidence disappeared from service clues');
+}
+$db->exec("UPDATE websites SET status='verified',http_status=403 WHERE host='response-on-22.example'");
+if ($ok($request('overview', [], false, false, 'Monitor'))['websites'] !== $websiteCountBefore + 1) {
+    throw new RuntimeException('A verified HTTP service on port 22 is incorrectly excluded');
+}
+$newAssets = $ok($request('index', ['resource' => 'websites'], false, true, 'Monitor'))['list'];
+if (! in_array('response-on-22.example', array_column($newAssets, 'host'), true) || in_array('request-only.example', array_column($newAssets, 'host'), true)) {
+    throw new RuntimeException('Confirmed nonstandard HTTP assets do not match dashboard count');
+}
 if ($ok($request('overview', [], false, false, 'Monitor'))['alerts'] !== $originalEventTotal + 4) {
     throw new RuntimeException('Dashboard count disagrees with notification-only event list');
 }
@@ -380,6 +405,10 @@ if (count($mixedDetail['alerts']) !== 2 || $mixedDetail['alerts'][0]['evidence']
     throw new RuntimeException('Hiding volume-only notifications deletes historical rule evidence');
 }
 $csvContext = stream_context_create(['http' => ['method' => 'GET', 'timeout' => 20, 'header' => ['server: true', 'batoken: '.getenv('TEST_ADMIN_TOKEN')]]]);
+$websiteCsv = file_get_contents('http://127.0.0.1:8099/admin/Monitor/export?resource=websites', false, $csvContext);
+if (str_contains($websiteCsv, 'request-only.example') || ! str_contains($websiteCsv, 'response-on-22.example')) {
+    throw new RuntimeException('Website CSV disagrees with HTTP response evidence filtering');
+}
 $deletedMixedDetail = $ok($request('detail', ['id' => 311]));
 if (array_column($deletedMixedDetail['alerts'], 'kind') !== ['smb_connections'] || $deletedMixedDetail['event']['kinds'] !== ['smb_connections'] || count($ok($request('detail', ['id' => 308]))['alerts']) !== 1) {
     throw new RuntimeException('Deleted multi-port data leaks into mixed details or retired service evidence is lost');

@@ -23,7 +23,7 @@ class ProbeController extends Controller
             $task->update(['status' => 'leased', 'attempts' => $task->attempts + 1, 'lease_token' => hash('sha256', $token), 'leased_until' => now()->addMinutes(3)]);
             $site = $task->website;
 
-            return response()->json(['task' => ['id' => $task->id, 'lease_token' => $token, 'ip' => $site->ipAsset->ip, 'host' => $site->host, 'port' => $site->port, 'scheme' => $site->scheme, 'source' => $site->source, 'discovery_kind' => $site->discovery_kind, 'request_source' => $task->request_source, 'mode' => $task->mode]]);
+            return response()->json(['task' => ['id' => $task->id, 'lease_token' => $token, 'ip' => $site->ipAsset->ip, 'host' => $site->host, 'port' => $site->port, 'scheme' => $site->scheme, 'source' => $site->source, 'observed_http_status' => $site->observed_http_status, 'automatic_web_check_allowed' => WebsiteDiscovery::canProbeAutomatically($site), 'discovery_kind' => $site->discovery_kind, 'request_source' => $task->request_source, 'mode' => $task->mode]]);
         });
     }
 

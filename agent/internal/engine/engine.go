@@ -40,9 +40,13 @@ type serviceTargetState struct {
 const maxServiceTargets = 128
 
 type stream struct {
-	buf  []byte
-	next uint32
-	at   time.Time
+	buf            []byte
+	next           uint32
+	at             time.Time
+	httpPending    bool
+	httpHost       string
+	httpRequestEnd uint32
+	httpRequestAt  time.Time
 }
 type seen struct {
 	iface string
@@ -193,6 +197,10 @@ func (e *Engine) Process(b []byte, wireLen int, iface string, now time.Time) {
 		return
 	}
 	k := flowKey{p.Src, p.Dst, p.SrcPort, p.DstPort}
+	if p.SYN || p.RST {
+		delete(e.streams, k)
+		delete(e.streams, flowKey{p.Dst, p.Src, p.DstPort, p.SrcPort})
+	}
 	if p.SYN && !p.ACK {
 		delete(e.rdpFlows, k)
 	}
@@ -299,6 +307,12 @@ func (e *Engine) Process(b []byte, wireLen int, iface string, now time.Time) {
 			}
 		}
 	}
+	if p.RST {
+		return
+	}
+	if src && e.observeHTTPResponse(p, now) {
+		return
+	}
 	if (!dst && !outbound) || (inboundReply && !outbound) || len(p.Payload) == 0 {
 		return
 	}
@@ -312,6 +326,11 @@ func (e *Engine) Process(b []byte, wireLen int, iface string, now time.Time) {
 		return
 	}
 	st := e.streams[k]
+	if st != nil && st.httpPending {
+		// Only the first request headers are needed. Do not retain request bodies
+		// or replace their Host with later pipelined requests before the reply.
+		return
+	}
 	if st == nil {
 		if len(e.streams) >= e.c.MaxReassembly {
 			e.health.ReassemblyDropped++
@@ -341,8 +360,8 @@ func (e *Engine) Process(b []byte, wireLen int, iface string, now time.Time) {
 	if !complete {
 		return
 	}
-	delete(e.streams, k)
 	if scheme == "" {
+		delete(e.streams, k)
 		return
 	}
 	if source == "rdp_negotiation" {
@@ -350,10 +369,12 @@ func (e *Engine) Process(b []byte, wireLen int, iface string, now time.Time) {
 			e.rdpFlows[k] = now
 		}
 		if outbound {
+			delete(e.streams, k)
 			return
 		}
 	}
 	if outbound {
+		delete(e.streams, k)
 		if endpoint != nil {
 			endpoint.Scheme, endpoint.Host = scheme, host
 			if scheme == "http" {
@@ -363,7 +384,20 @@ func (e *Engine) Process(b []byte, wireLen int, iface string, now time.Time) {
 		}
 		return
 	}
+	if source == "http_host" {
+		if !p.ACK || p.SYN {
+			delete(e.streams, k)
+			return
+		}
+		e.awaitHTTPResponse(st, p, host, now)
+		return
+	}
+	delete(e.streams, k)
 	site := wire.Site{IP: p.Dst.String(), Port: p.DstPort, Scheme: scheme, Host: host, Source: source}
+	e.storeSite(site)
+}
+
+func (e *Engine) storeSite(site wire.Site) {
 	key := fmt.Sprintf("%s|%d|%s|%s", site.IP, site.Port, site.Scheme, site.Host)
 	if _, ok := e.sites[key]; !ok && len(e.sites) >= e.c.MaxSites {
 		e.health.StateDropped++

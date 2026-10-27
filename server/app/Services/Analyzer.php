@@ -41,6 +41,9 @@ class Analyzer
             $this->detect($node, $asset, $batch);
         }
         foreach ($p['sites'] as $s) {
+            if ($s['source'] === 'http_host') {
+                continue;
+            }
             $asset = $this->observe($s['ip'], $node, $at);
             if (filter_var(trim($s['host'], '[]'), FILTER_VALIDATE_IP) && inet_pton(trim($s['host'], '[]')) === inet_pton($s['ip'])) {
                 $s['host'] = '';
@@ -50,10 +53,15 @@ class Analyzer
             if ($website->last_seen_at->lte($at->copy()->subMinutes(5))) {
                 $website->update(['last_seen_at' => $at]);
             }
+            if ($s['source'] === 'http_response' && ($website->observed_http_status === null || $website->observed_http_at === null || $website->observed_http_at->lte($at->copy()->subMinutes(5)))) {
+                if ($website->observed_http_at === null || $website->observed_http_at->lte($at)) {
+                    $website->update(['observed_http_status' => $s['http_status'], 'observed_http_at' => $at]);
+                }
+            }
             if ($website->source !== 'manual' && $website->ownership_status !== 'manual' && $website->http_status === null && $website->status !== 'verified' && $website->manual_category === null && $website->screenshot_path === null) {
                 $kind = WebsiteDiscovery::kind($s['source'], $s['port']);
                 $changed = false;
-                $priority = ['tls_sni' => 0, 'tls_alpn' => 1, 'rdp_negotiation' => 2, 'http_host' => 3];
+                $priority = ['tls_sni' => 0, 'tls_alpn' => 1, 'rdp_negotiation' => 2, 'http_host' => 3, 'http_response' => 4];
                 if (($priority[$s['source']] ?? 0) >= ($priority[$website->source] ?? 0)) {
                     $website->fill(['discovery_kind' => $kind, 'source' => $s['source']]);
                     $changed = $website->isDirty(['discovery_kind', 'source']);

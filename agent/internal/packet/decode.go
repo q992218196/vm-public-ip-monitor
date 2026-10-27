@@ -6,14 +6,14 @@ import (
 )
 
 type Packet struct {
-	Src, Dst         netip.Addr
-	SrcPort, DstPort uint16
-	Seq              uint32
-	AckSeq           uint32
-	SYN, ACK, RST    bool
-	Protocol         uint8
-	Payload          []byte
-	Size             int
+	Src, Dst           netip.Addr
+	SrcPort, DstPort   uint16
+	Seq                uint32
+	AckSeq             uint32
+	SYN, ACK, RST, FIN bool
+	Protocol           uint8
+	Payload            []byte
+	Size               int
 }
 
 // Decode only accepts complete Ethernet/IP headers. Fragmented transport and
@@ -96,6 +96,7 @@ func Decode(b []byte, wireLen int) (p Packet, ok bool) {
 		p.SYN = b[off+13]&2 != 0
 		p.ACK = b[off+13]&16 != 0
 		p.RST = b[off+13]&4 != 0
+		p.FIN = b[off+13]&1 != 0
 		p.Payload = b[off+h:]
 	case 17:
 		if len(b) < off+8 {

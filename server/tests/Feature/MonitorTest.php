@@ -682,11 +682,50 @@ class MonitorTest extends TestCase
         $this->assertDatabaseCount('alerts', 4);
     }
 
+    public function test_http_requests_do_not_create_sites_but_paired_responses_on_port_22_do(): void
+    {
+        $node = $this->node();
+        $payload = $this->payload();
+        $payload['sites'][0] = ['ip' => '203.0.113.10', 'port' => 22, 'scheme' => 'http', 'host' => '', 'source' => 'http_host'];
+        $this->upload($node, $payload)->assertOk();
+        ProcessBatch::dispatchSync(Batch::firstOrFail()->id);
+        $this->assertDatabaseCount('websites', 0);
+        $this->assertDatabaseCount('probe_tasks', 0);
+        $this->assertDatabaseCount('traffic_metrics', 1);
+        $payload['batch_id'] = (string) Str::uuid();
+        $payload['sites'][0]['source'] = 'http_response';
+        $this->upload($node, $payload)->assertUnprocessable();
+        $payload['sites'][0]['http_status'] = 700;
+        $this->upload($node, $payload)->assertUnprocessable();
+        $payload['sites'][0]['http_status'] = 403;
+        $payload['sites'][0]['scheme'] = 'https';
+        $this->upload($node, $payload)->assertUnprocessable();
+        $payload['sites'][0]['scheme'] = 'http';
+        $payload['sites'][0]['source'] = 'http_host';
+        $this->upload($node, $payload)->assertUnprocessable();
+        $payload['sites'][0]['source'] = 'http_response';
+        $this->upload($node, $payload)->assertOk();
+        ProcessBatch::dispatchSync(Batch::where('batch_id', $payload['batch_id'])->firstOrFail()->id);
+        $site = Website::firstOrFail();
+        $this->assertSame(22, $site->port);
+        $this->assertSame('http_response', $site->source);
+        $this->assertSame(403, $site->observed_http_status);
+        $this->assertNull($site->http_status);
+        $this->assertSame('observed', $site->status);
+        $this->artisan('monitor:maintain')->assertSuccessful();
+        $this->assertDatabaseCount('probe_tasks', 1);
+        config(['monitor.worker_token' => $this->token]);
+        $this->withToken($this->token)->postJson('/api/v1/worker/claim')->assertOk()
+            ->assertJsonPath('task.automatic_web_check_allowed', true)->assertJsonPath('task.observed_http_status', 403);
+    }
+
     public function test_maintenance_queues_existing_sites_only_when_auto_probe_is_enabled(): void
     {
         $node = $this->node();
         $payload = $this->payload();
-        $payload['sites'][0]['source'] = 'http_host';
+        $payload['sites'][0]['source'] = 'http_response';
+        $payload['sites'][0]['http_status'] = 200;
+        $payload['sites'][0]['scheme'] = 'http';
         $this->upload($node, $payload)->assertOk();
         ProcessBatch::dispatchSync(Batch::first()->id);
         config(['monitor.auto_probe' => false]);

@@ -77,20 +77,22 @@ cd /home/vm-monitor-src
 git pull --ff-only
 cd deploy
 docker compose -f compose.yml -f compose.buildadmin.yml build app web buildadmin-app buildadmin-web
+docker compose -f compose.yml -f compose.buildadmin.yml --profile screenshots build worker
 docker compose -f compose.yml -f compose.buildadmin.yml --profile agent-build build agent-builder
-docker compose -f compose.yml -f compose.buildadmin.yml --profile agent-build run --rm agent-builder
-docker compose -f compose.yml -f compose.buildadmin.yml stop queue scheduler ai-queue
+docker compose -f compose.yml -f compose.buildadmin.yml stop app queue scheduler ai-queue worker buildadmin-app
 docker compose -f compose.yml -f compose.buildadmin.yml run --rm --no-deps app php artisan migrate --force
 docker compose -f compose.yml -f compose.buildadmin.yml run --rm --no-deps app php artisan db:seed --class=MonitorSeeder --force
-docker compose -f compose.yml -f compose.buildadmin.yml up -d --no-deps --force-recreate app web queue scheduler ai-queue buildadmin-app buildadmin-web
+docker compose -f compose.yml -f compose.buildadmin.yml run --rm --no-deps app php artisan schedule:clear-cache
+docker compose -f compose.yml -f compose.buildadmin.yml up -d --no-deps --force-recreate --scale queue=3 app web queue scheduler ai-queue buildadmin-app buildadmin-web
 docker compose -f compose.yml -f compose.buildadmin.yml exec buildadmin-app php think migrate:run
-docker compose -f compose.yml -f compose.buildadmin.yml --profile https up -d --no-deps https
+docker compose -f compose.yml -f compose.buildadmin.yml --profile agent-build run --rm agent-builder
 ```
 
-如果已启用网站 worker，**也要更新它**：
+上面保留 3 个分析进程；其他部署可按原有数量调整 `--scale queue=3`。`schedule:clear-cache` 仅释放定时任务锁，不会清空 Redis 队列。
+
+如果已启用网站 worker，恢复它：
 
 ```sh
-docker compose -f compose.yml -f compose.buildadmin.yml --profile screenshots build worker
 docker compose -f compose.yml -f compose.buildadmin.yml --profile screenshots up -d --no-deps --force-recreate worker
 ```
 
@@ -98,7 +100,7 @@ docker compose -f compose.yml -f compose.buildadmin.yml --profile screenshots up
 
 升级不强制重建已运行的 HTTPS 入口，避免无必要的 443 中断；如果修改了 Caddy 配置，可执行 `docker compose -f compose.yml -f compose.buildadmin.yml exec https caddy reload --config /etc/caddy/Caddyfile` 平滑重载。应用容器替换期间仍可能短暂出现 502，Agent 会保留普通上报批次并自动重试，入口恢复后无需逐个重启节点。
 
-本版 Agent 为 **1.5.0**：先升级主控，再在“采集节点”下发更新。新版本独立统计 SSH、RDP、FTP 的主动建连目标，不受通用 Top 8 端点样本影响；每个公网 IP、每种服务最多保存 128 个目标。旧节点继续上报，但不参加新的服务多目标规则，升级后自动参与。
+本版 Agent 为 **1.6.0**：先完成主控、数据库迁移、后台及 worker 升级，再在“采集节点”下发更新。网站自动发现改为配对同一连接上的明文 HTTP 请求与服务端响应；仅请求不再进入自动待验证。旧 Agent 的流量与告警数据继续接收，但其仅请求网站线索不再新增网站；节点升级后才恢复新的被动 HTTP 发现。
 
 **本次迁移会永久删除“多端口连接”规则、该类型告警及纯该类型事件的关联抓包／AI 报告。** 混合事件保留其他告警、抓包和人工审核，重新选择主告警；原始流量窗口保留。旧 SSH／RDP／FTP 高频次数规则停用，历史证据仍保留，但退出异常通知。新三项规则使用新的类型和阈值，不会将旧“连接次数”阈值直接解释成“目标 IP 数”。
 
@@ -121,15 +123,18 @@ docker compose -f compose.yml -f compose.buildadmin.yml --profile screenshots up
 
 ### 先筛选协议，再验证网页
 
-本次 HTTP 优先与保留策略升级需更新 **主控和新版后台**，执行数据库迁移；无需更新 Agent 或重建 worker。迁移会分批调整历史 TLS 线索，升级期间暂停分析、定时任务和 worker，完成后恢复。已有三个分析进程时，恢复命令加 `--scale queue=3`。
+本次响应准入升级需更新 **主控、后台、worker 和 Agent 1.6.0**，并执行数据库迁移，顺序见“升级主控”。迁移会分批调整历史请求及 TLS 线索，升级期间暂停应用、分析、定时任务和 worker，完成后恢复。
 
-- 所有端口仅有 TLS/SNI 或 ALPN 声明，以及 RDP 协商：保留在“RDP／未知 TLS 服务线索”，不进入自动验证，默认不计入网站列表和总数。ALPN 声明支持 HTTP 不等于取得 HTTP 响应。
-- 观察到明文 HTTP 请求头，或已取得有效 HTTP 响应、已验证／人工确认的网站：作为网页候选，允许自动验证。旁路采集无法解密普通 HTTPS 内的 HTTP；纯 TLS 的真实 HTTPS 网站可能需要人工登记或手动验证补充，自动发现覆盖会减少。
+- 仅有明文 HTTP 请求、TLS/SNI、ALPN 声明或 RDP 协商：不进入自动验证。历史记录保留在“请求／RDP／TLS 服务线索”，默认不计入网站资产和待验证总数；新 Agent 不再上报仅请求的网站候选。
+- Agent 在同一连接上配对到发往监控 IP 的 HTTP 请求和该 IP 返回的有效 HTTP/1.0／1.1 状态行后，上报 `http_response` 和被动响应码，才进入待验证。22 等非标准端口同样适用；SSH 欢迎信息不算 HTTP。已取得主动 HTTP 结果、已验证或人工确认的网站也可继续自动验证。
+- 详情分别显示“被动观察 HTTP 响应”和“主动验证 HTTP 状态”，被动响应不会直接把网站标成已验证。被动观察时间使用所在采集窗口结束时间，不是精确响应报文时间。
 - 人工登记网站、点击“验证／截图”或“测试源站”：可以手动探测这些服务线索，优先于自动任务领取，不会仅因点击就确认网站。
 - 主控的 worker 先发送固定 IP、Host/SNI 的轻量 HTTP 请求，自动检查总超时 3 秒，手动检查 8 秒；TLS 证书仍严格验证。明确的 JSON、图片等非网页内容只记录 HTTP 结果，不启动浏览器。HTML 或未注明内容类型的响应才进入浏览器分析和截图。
 - 同一线索重复上报不重复排队；自动失败后冷却 24 小时，手动操作可立即重试。确认到新的网页候选后，原先跳过的任务可重新排队。
 
-升级迁移会将所有端口未验证、未人工登记且没有 HTTP／截图证据的旧 TLS 记录移为服务线索，取消尚未执行的自动普通探测任务；不是让 worker 逐条处理整个 TLS 积压。手动任务、人工源站测试、已验证网站和人工分类保留，服务线索不删除。同一网站重复出现时，“最近观察”最多约五分钟更新一次，以减少索引写入；首次发现和来源升级仍保留。
+升级迁移会将所有端口未验证、未人工登记且没有主动 HTTP／截图证据的旧请求及 TLS 记录移为服务线索，取消尚未执行的自动普通探测任务，直接解除这部分积压。手动任务、人工源站测试、已验证网站和人工分类保留，服务线索不删除。同一网站重复出现时，“最近观察”最多约五分钟更新一次，以减少索引写入；首次发现和来源升级仍保留。
+
+配对只短暂保存有界请求头和响应状态行，不保存网页正文；等待响应最多 10 秒，使用现有重组数量上限。丢包、非对称采集、长延迟或不连续的 TCP 分段可能漏掉响应。旁路采集无法解密普通 HTTPS，未观察到 HTTP 响应不代表该 IP 没有网站；已知网站可人工登记或手动验证。
 
 ### 如何确认网站归属
 
@@ -144,7 +149,7 @@ docker compose -f compose.yml -f compose.buildadmin.yml --profile screenshots up
 
 测试成功只能证明该 IP 对此 Host/SNI 有响应；默认站点、通配站点、反向代理也可能响应。测试失败也可能是源站只允许 CDN 回源、证书限制或访问控制。测试不会修改公网 DNS，也不会自动寻找其他源站 IP。
 
-网站资产默认显示解析匹配、人工登记和 IP 直连记录。其余线索通过归属筛选查看；“指定 IP 响应，待核实”保留在待核实线索中。客户端填写的 Host/SNI 不等于 VM 部署的网站。
+网站资产默认显示具有主动 HTTP、已验证或人工确认证据，且解析匹配、人工登记或 IP 直连的记录。新被动响应先进入“待验证／归属待核实线索”；“指定 IP 响应，待核实”也保留在那里。客户端填写的 Host/SNI 不等于 VM 部署的网站。
 
 首页标题、描述、正文可形成博彩、成人、诈骗、支付、贷款或影视等分类线索；报告给出理由、原文证据和截图，仍需人工复核。
 
@@ -179,7 +184,7 @@ du -sh /home/vm-monitor
 
 ### 更新 Agent
 
-主控发布二进制后，在“采集节点”下发单节点或批量更新，先试点一台。Agent 1.5.0 启动时立即检查，正常每分钟轮询；暂时性网络错误按 15、30、60、120 秒退避重试，二进制校验失败或无权限保留 10 分钟间隔。下载最长允许 3 分钟，仍限制文件大小和 SHA-256 校验。后台显示当前版本及自动重试状态；重新下发后，上一次指令之前的错误不再覆盖新状态。旧 Agent 仍按原来的 10 分钟间隔重试；急需恢复时可执行下面的手动更新命令。
+主控发布二进制后，在“采集节点”下发单节点或批量更新，先试点一台。当前 Agent 启动时立即检查，正常每分钟轮询；暂时性网络错误按 15、30、60、120 秒退避重试，二进制校验失败或无权限保留 10 分钟间隔。下载最长允许 3 分钟，仍限制文件大小和 SHA-256 校验。后台显示当前版本及自动重试状态；重新下发后，上一次指令之前的错误不再覆盖新状态。旧 Agent 仍按原来的 10 分钟间隔重试；急需恢复时可执行下面的手动更新命令。
 
 节点需要立即检查已下发更新时执行：
 
@@ -299,7 +304,7 @@ docker compose -f compose.yml -f compose.buildadmin.yml --profile https ps
 tail -n 40 /home/vm-monitor-server/nginx-logs/error.log
 tail -n 40 /home/vm-monitor-server/storage/logs/php-fpm.log
 tail -n 40 /home/vm-monitor-server/worker/worker.log
-curl -sS -o /dev/null -w 'Agent API: %{http_code}\n' 'https://vm-monitor.lcayun.cn/api/v1/agent/update?version=1.5.0'
+curl -sS -o /dev/null -w 'Agent API: %{http_code}\n' 'https://vm-monitor.lcayun.cn/api/v1/agent/update?version=1.6.0'
 ```
 
 无 Agent 令牌的最后一项正常应为 **401**。示例域名和自定义目录请替换。BuildAdmin 日志在 `buildadmin/runtime`；节点日志在宿主机的 `data_dir/logs/agent.log`。

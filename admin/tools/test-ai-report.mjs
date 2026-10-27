@@ -12,7 +12,7 @@ let server, browser;
 try {
   await writeFile(
     fixturePath,
-    '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><style>body{margin:0;padding:24px;background:#f4f6fa;font:14px system-ui;--el-text-color-primary:#303133;--el-border-color:#ddd;--el-fill-color-light:#f5f7fa;--el-fill-color-lighter:#fafafa;--el-color-primary:#409eff}#app{max-width:900px;margin:auto;background:white;padding:20px;box-sizing:border-box}</style></head><body><div id="app"></div><script type="module">import {createApp, reactive, h} from "vue";import ElementPlus from "element-plus";import "element-plus/dist/index.css";import {createPinia} from "pinia";import {createRouter,createMemoryHistory} from "vue-router";import Monitor from "/src/views/backend/monitor/index.vue";const router=createRouter({history:createMemoryHistory(),routes:[{path:"/rules",component:{render:()=>null}}]});await router.push("/rules");import Events from "/src/views/backend/monitor/events.vue";import AiReport from "/src/views/backend/monitor/AiReport.vue";import TrafficEvidence from "/src/views/backend/monitor/TrafficEvidence.vue";import SiteReport from "/src/views/backend/monitor/SiteReport.vue";const state=reactive({content:"",record:{},view:"ai"});createApp({setup:()=>()=>state.view==="rules"?h(Monitor):state.view==="events"?h(Events):["udp","metrics"].includes(state.view)?h(TrafficEvidence,{record:state.record,windowStatistics:state.view==="metrics"}):state.view==="site"?h(SiteReport,{record:state.record}):h(AiReport,{content:state.content})}).use(createPinia()).use(router).use(ElementPlus).mount("#app");window.showReport=(text)=>{state.view="ai";state.content=text};window.showEvidence=(view,record)=>{state.view=view;state.record=record};window.ready=true;</script></body></html>',
+    '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><style>body{margin:0;padding:24px;background:#f4f6fa;font:14px system-ui;--el-text-color-primary:#303133;--el-border-color:#ddd;--el-fill-color-light:#f5f7fa;--el-fill-color-lighter:#fafafa;--el-color-primary:#409eff}#app{max-width:900px;margin:auto;background:white;padding:20px;box-sizing:border-box}</style></head><body><div id="app"></div><script type="module">import {createApp, reactive, h} from "vue";import ElementPlus from "element-plus";import "element-plus/dist/index.css";import {createPinia} from "pinia";import {createRouter,createMemoryHistory} from "vue-router";import Monitor from "/src/views/backend/monitor/index.vue";const router=createRouter({history:createMemoryHistory(),routes:[{path:"/rules",component:{render:()=>null}},{path:"/websites",component:{render:()=>null}}]});await router.push("/rules");import Events from "/src/views/backend/monitor/events.vue";import AiReport from "/src/views/backend/monitor/AiReport.vue";import TrafficEvidence from "/src/views/backend/monitor/TrafficEvidence.vue";import SiteReport from "/src/views/backend/monitor/SiteReport.vue";const state=reactive({content:"",record:{},view:"ai"});createApp({setup:()=>()=>state.view==="rules"?h(Monitor):state.view==="events"?h(Events):["udp","metrics"].includes(state.view)?h(TrafficEvidence,{record:state.record,windowStatistics:state.view==="metrics"}):state.view==="site"?h(SiteReport,{record:state.record}):h(AiReport,{content:state.content})}).use(createPinia()).use(router).use(ElementPlus).mount("#app");window.showReport=(text)=>{state.view="ai";state.content=text};window.showEvidence=(view,record)=>{state.view=view;state.record=record};window.showMonitor=async(resource)=>{await router.push("/"+resource);state.view="rules"};window.ready=true;</script></body></html>',
   );
   server = await createServer({
     root: webRoot,
@@ -270,6 +270,41 @@ try {
   }));
   await page.getByText("仅有 TLS 线索，尚无 HTTP 网页证据；不自动探测，需要时可手动验证。", {exact: true}).waitFor();
   assert.ok((await page.locator(".site-report").textContent()).includes("TLS 握手；SNI 本身不能证明网站"));
+  const requestClue = {id: 201, source: "http_host", discovery_kind: "http_request", status: "observed", ownership_status: "ip_only", ip: "61.111.131.206", port: 22, scheme: "http", host: "", http_status: null, observed_http_status: null};
+  const responseClue = {...requestClue, id: 202, ip: "61.111.131.207", source: "http_response", discovery_kind: "web_candidate", observed_http_status: 200};
+  for (const discoveryKind of ["http_request", "web_candidate"]) {
+    await page.evaluate(record => window.showEvidence("site", record), {...requestClue, discovery_kind: discoveryKind});
+    await page.getByText("仅 HTTP 请求（不自动验证）", {exact: true}).waitFor();
+    const requestText = await page.locator(".site-report").textContent();
+    assert.ok(requestText.includes("客户端 HTTP 请求头（不代表服务端响应）"));
+    assert.ok(requestText.includes("也可能是对 SSH 等服务的探测") && requestText.includes("22 /"));
+    assert.ok(requestText.includes("HTTP 请求（非服务证明）") && requestText.includes("未提供域名（仅请求）"));
+    assert.ok(!requestText.includes("http_host") && !requestText.includes("TLS 服务线索"));
+    assert.equal(await page.getByText("已获 HTTP 响应", {exact: true}).count(), 0);
+    assert.ok((await page.locator(".site-report .el-descriptions tr").filter({hasText: "被动观察 HTTP 响应"}).textContent()).includes("未观察／未保存"));
+    assert.ok((await page.locator(".site-report .el-descriptions tr").filter({hasText: "主动验证 HTTP 状态"}).textContent()).includes("尚未取得有效响应"));
+  }
+  await page.evaluate(record => window.showEvidence("site", record), responseClue);
+  await page.getByText("HTTP 响应线索（待验证）", {exact: true}).waitFor();
+  const responseText = await page.locator(".site-report").textContent();
+  assert.ok(responseText.includes("配对观察的服务端明文 HTTP 响应") && responseText.includes("普通 HTTPS 正文无法旁路解密"));
+  assert.ok(!responseText.includes("http_response") && !responseText.includes("TLS 服务线索"));
+  assert.ok((await page.locator(".site-report .el-descriptions tr").filter({hasText: "被动观察 HTTP 响应"}).textContent()).includes("200"));
+  assert.ok((await page.locator(".site-report .el-descriptions tr").filter({hasText: "主动验证 HTTP 状态"}).textContent()).includes("尚未取得有效响应"));
+  assert.equal(await page.getByText("已获 HTTP 响应", {exact: true}).count(), 0);
+  const manualClue = {...requestClue, id: 203, ip: "61.111.131.208", source: "manual", discovery_kind: "web_candidate", ownership_status: "manual"};
+  const legacyVerified = {...requestClue, id: 204, ip: "61.111.131.209", source: "tls_sni", discovery_kind: "web_candidate", status: "verified", scheme: "https"};
+  const activeVerified = {...requestClue, id: 205, ip: "61.111.131.210", discovery_kind: "web_candidate", status: "verified", http_status: 403};
+  const manualClassified = {...requestClue, id: 206, ip: "61.111.131.211", discovery_kind: "web_candidate", manual_category: "人工核查业务"};
+  for (const [record, expectedPhase] of [[manualClue, "人工登记／确认"], [manualClassified, "人工登记／确认"], [legacyVerified, "已验证（历史记录）"], [activeVerified, "已获 HTTP 响应"]]) {
+    await page.evaluate(record => window.showEvidence("site", record), record);
+    await page.getByText(expectedPhase, {exact: true}).waitFor();
+    assert.equal(await page.getByText("仅 HTTP 请求（不自动验证）", {exact: true}).count(), 0);
+    if (record.http_status) assert.ok((await page.locator(".site-report .el-descriptions tr").filter({hasText: "主动验证 HTTP 状态"}).textContent()).includes(String(record.http_status)));
+    else assert.equal(await page.getByText("已获 HTTP 响应", {exact: true}).count(), 0);
+  }
+  const websiteFixtures = [requestClue, responseClue, manualClue, legacyVerified, activeVerified, manualClassified];
+  const websiteRows = ownership => ownership === "services" ? [requestClue] : ownership === "candidates" ? [responseClue] : ownership === "all" ? websiteFixtures : [manualClue, legacyVerified, activeVerified, manualClassified];
   const eventFixture = {id: 933, title: "SMB 服务高频连接（待复核）", ip: "103.123.132.239", node_name: "TW 2", severity: "medium", status: "open", kinds: ["horizontal_scan", "smb_connections"], quality: {}, first_seen_at: "2026-10-03 07:01:48", last_seen_at: "2026-10-03 07:02:48"};
   const captureFixture = {id: "test-pcap", status: "uploaded", bytes: 4, snaplen: 2048, max_bytes: 8388608, duration_seconds: 60, metadata: {started_at: "2026-10-03T07:01:48Z", ended_at: "2026-10-03T07:02:01Z", stop_reason: "size"}, created_at: "2026-10-03 07:01:48"};
   const ruleFixture = {id: 1, title: "SMB 服务高频连接（待复核）", kind: "smb_connections", assessment_category: "needs_review", evidence: {value: 317, threshold: 60, window_seconds: 60, sample: {tcp_attempts: 317, ports: [445]}, note: "Fixture long explanation remains available on demand"}};
@@ -281,7 +316,9 @@ try {
     const url = new URL(route.request().url());
     const action = url.pathname.split("/").at(-1);
     let data = {};
-    if (action === "index" && url.pathname.includes("/Monitor/")) data = {list: [
+    if (action === "index" && url.pathname.includes("/Monitor/") && url.searchParams.get("resource") === "websites") data = {list: websiteRows(url.searchParams.get("ownership")), super: true};
+    else if (action === "count" && url.pathname.includes("/Monitor/") && url.searchParams.get("resource") === "websites") data = {total: websiteRows(url.searchParams.get("ownership")).length};
+    else if (action === "index" && url.pathname.includes("/Monitor/")) data = {list: [
       {id: 1, name: "高规则", kind: "horizontal_scan", threshold: 100, window_seconds: 60, severity: "high", enabled: true},
       {id: 2, name: "中规则", kind: "smb_connections", threshold: 60, window_seconds: 60, severity: "medium", enabled: false},
       {id: 3, name: "低规则", kind: "tcp_connection_burst", threshold: 2000, window_seconds: 60, severity: "low", enabled: "f"}, qualityRule
@@ -360,6 +397,31 @@ try {
     assert.deepEqual(savedQualityRule.node_ids, [nodeFixtures[0].id]);
     assert.equal(savedQualityRule.node_id, null);
   }
+  await page.evaluate(() => window.showMonitor("websites"));
+  await page.getByRole("heading", {name: "网站资产", exact: true}).waitFor();
+  await page.locator(".el-table tbody tr").filter({hasText: manualClue.ip}).waitFor();
+  const websiteTable = page.locator(".el-table tbody");
+  assert.equal(await websiteTable.locator("tr").count(), 4);
+  assert.equal(await websiteTable.getByText("人工登记／确认", {exact: true}).count(), 2);
+  assert.equal(await websiteTable.getByText("已验证（历史记录）", {exact: true}).count(), 1);
+  assert.equal(await websiteTable.getByText("已获 HTTP 响应", {exact: true}).count(), 1);
+  assert.equal(await websiteTable.getByText("网页候选／已验证", {exact: true}).count(), 0);
+  const ownershipSelect = page.locator(".monitor-filters .el-select").nth(1);
+  await ownershipSelect.click();
+  await page.getByRole("option", {name: "请求／RDP／TLS 服务线索", exact: true}).click();
+  const requestRow = websiteTable.locator("tr").filter({hasText: requestClue.ip});
+  await requestRow.waitFor();
+  assert.ok((await requestRow.textContent()).includes("仅 HTTP 请求（不自动验证）"));
+  assert.ok((await requestRow.textContent()).includes("HTTP 请求（非服务证明）"));
+  assert.ok((await requestRow.textContent()).includes("仅请求线索") && (await requestRow.textContent()).includes("未提供域名（仅请求）"));
+  assert.ok(!(await requestRow.textContent()).includes("TLS") && !(await requestRow.textContent()).includes("已获 HTTP 响应"));
+  await ownershipSelect.click();
+  await page.getByRole("option", {name: "待验证／归属待核实线索", exact: true}).click();
+  const responseRow = websiteTable.locator("tr").filter({hasText: responseClue.ip});
+  await responseRow.waitFor();
+  assert.ok((await responseRow.textContent()).includes("HTTP 响应线索（待验证）"));
+  assert.ok((await responseRow.textContent()).includes("待验证") && (await responseRow.textContent()).includes("22"));
+  assert.equal(await responseRow.getByText("已获 HTTP 响应", {exact: true}).count(), 0);
   await page.evaluate(() => window.showEvidence("events", {}));
   await page.getByText("仅显示疑似异常、强异常及节点运行异常；一般流量活动在流量窗口查看。同节点、IP 的持续行为合并为事件。", {exact: true}).waitFor();
   await page.locator(".filters .el-select").last().click();
@@ -427,7 +489,7 @@ try {
   assert.deepEqual(errors, []);
   assert.deepEqual(externalRequests, []);
   console.log(
-    "AI Markdown headings, lists, tables, old reports, fenced reports, mobile width, XSS/network isolation, UDP evidence and source test provenance passed.",
+    "AI Markdown headings, lists, tables, old reports, fenced reports, mobile width, XSS/network isolation, UDP evidence, paired HTTP response provenance and request-only website filtering passed.",
   );
 } finally {
   if (browser) await browser.close();

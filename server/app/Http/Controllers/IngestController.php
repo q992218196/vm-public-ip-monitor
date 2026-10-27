@@ -104,7 +104,8 @@ class IngestController extends Controller
             'metrics.*.outbound_endpoints.*.query_keys.*' => 'string|max:32',
             'sites.*.ip' => 'required|ip', 'sites.*.port' => 'required|integer|min:1|max:65535',
             'sites.*.scheme' => 'required|in:http,https', 'sites.*.host' => ['present', 'nullable', 'string', 'max:253', 'regex:/^[a-zA-Z0-9.\-:\[\]]*$/'],
-            'sites.*.source' => 'required|in:http_host,tls_sni,tls_alpn,rdp_negotiation',
+            'sites.*.source' => 'required|in:http_host,http_response,tls_sni,tls_alpn,rdp_negotiation',
+            'sites.*.http_status' => 'sometimes|integer|min:100|max:599',
             ...collect(['bytes_out', 'bytes_in', 'packets_out', 'packets_in', 'tcp_attempts', 'unique_targets', 'max_ports_per_target', 'max_attempts_per_target', 'auth_attempts'])->mapWithKeys(fn ($f) => ["metrics.*.$f" => 'required|integer|min:0|max:1000000000000000'])->all(),
         ]);
         $start = CarbonImmutable::parse($v['window_start']);
@@ -115,6 +116,17 @@ class IngestController extends Controller
         if ($end->isAfter(now()->addMinutes(5)) || $start->isBefore(now()->subDays(14)) || $start->diffInSeconds($end) > 600) {
             throw ValidationException::withMessages(['window_start' => '窗口必须在过去14天内、长度不超过600秒，未来偏差不超过5分钟']);
         }
+        foreach ($v['sites'] as $index => &$site) {
+            if ($site['source'] === 'http_response') {
+                if (! isset($site['http_status']) || $site['scheme'] !== 'http') {
+                    throw ValidationException::withMessages(["sites.$index.http_status" => '配对 HTTP 响应必须包含有效状态码，且为明文 HTTP']);
+                }
+                $site['http_status'] = (int) $site['http_status'];
+            } elseif (isset($site['http_status'])) {
+                throw ValidationException::withMessages(["sites.$index.http_status" => '仅配对 HTTP 响应来源可上报被动响应码']);
+            }
+        }
+        unset($site);
         $seen = [];
         $v['vpn'] ??= [];
         $v['proxies'] ??= [];

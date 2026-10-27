@@ -9,8 +9,10 @@ import {verifyOwnership, canRequestWebsite, originTestResult} from './ownership.
 
 export async function probe(task,limits={}) {
   const manual=task.request_source==='manual'||task.source==='manual'||task.mode==='origin_test';
-  if(!manual && (['rdp','tls_unknown'].includes(task.discovery_kind)||(!task.discovery_kind&&(task.source==='rdp_negotiation'||(task.port===3389&&task.source==='tls_sni'))))) {
-    return {status:'failed',error:'服务线索不自动探测网页；需要时可手动验证'};
+  const observedResponse=task.source==='http_response'&&Number.isInteger(task.observed_http_status)&&task.observed_http_status>=100&&task.observed_http_status<=599;
+  const automaticAllowed=task.automatic_web_check_allowed===true||(task.automatic_web_check_allowed!==false&&observedResponse);
+  if(!manual && !automaticAllowed) {
+    return {status:'failed',error:'未确认服务端 HTTP 响应，不自动探测网页；需要时可手动验证'};
   }
   const diskLimit=limits.diskLimitBytes||512*1024*1024;
   if(limits.dataDir && await directoryBytes(limits.dataDir)>diskLimit)throw new Error('Worker disk budget exhausted');
@@ -29,7 +31,7 @@ export async function probe(task,limits={}) {
     proxy = await pinnedProxy(t);
     const browserEnv = Object.fromEntries(['PATH','HOME','XDG_CACHE_HOME','USERPROFILE','SYSTEMROOT','WINDIR','TMPDIR','TMP','TEMP','LANG'].filter(k=>process.env[k]).map(k=>[k,process.env[k]]));
     browser = await chromium.launch({headless: true, timeout:10000, chromiumSandbox: process.platform === 'linux', proxy: {server: proxy.address}, env: browserEnv,
-      args: ['--disable-quic', '--proxy-bypass-list=<-loopback>', '--disk-cache-size=16777216', '--media-cache-size=1048576', '--force-webrtc-ip-handling-policy=disable_non_proxied_udp']});
+      args: ['--disable-quic', `--explicitly-allowed-ports=${t.port}`, '--proxy-bypass-list=<-loopback>', '--disk-cache-size=16777216', '--media-cache-size=1048576', '--force-webrtc-ip-handling-policy=disable_non_proxied_udp']});
     if(limits.dataDir)diskWatch=setInterval(async()=>{
       if(checkingDisk)return;checkingDisk=true;
       try{if(await directoryBytes(limits.dataDir)>diskLimit){diskExceeded=true;await browser.close();}}catch{}finally{checkingDisk=false;}
